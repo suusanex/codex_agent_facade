@@ -1,0 +1,2 @@
+# codex_agent_facade
+Codex Appを共通UIとして、多数のコーディングエージェントを使い分けることができるFacade
