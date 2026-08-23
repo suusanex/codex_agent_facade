@@ -1,0 +1,19 @@
+name: codex_agent_facade
+version: 1.0.0
+description: APM project for codex_agent_facade
+author: suusanex
+# Which agent platforms to deploy to.
+# Resolution order: --target flag > this field > auto-detect from filesystem.
+# Accepted values: agent-skills, antigravity, claude, codex, copilot, cursor, gemini, kiro, opencode, windsurf
+targets:
+  - agent-skills
+  - codex
+  - copilot
+dependencies:
+  apm:
+    - suusanex/coding_agent_plan_and_verify_process/apm-packages/persistent-purpose-review
+    - suusanex/coding_agent_plan_and_verify_process/apm-packages/adaptive-implementation-execution
+    - suusanex/agent_skills_dotnet_utility/.agents/skills/dotnet-file-based-apps
+  mcp: []
+includes: auto
+scripts: {}

@@ -1,0 +1,178 @@
+lockfile_version: '1'
+generated_at: '2026-08-23T04:14:26.516871+00:00'
+apm_version: 0.26.0
+dependencies:
+- repo_url: suusanex/agent_skills_dotnet_utility
+  name: dotnet-file-based-apps
+  host: github.com
+  resolved_commit: 8f20bbdc5f2b071eaa6518e12ff039cf19b71d8e
+  version: unknown
+  virtual_path: .agents/skills/dotnet-file-based-apps
+  is_virtual: true
+  package_type: claude_skill
+  deployed_files:
+  - .agents/skills/dotnet-file-based-apps
+  - .agents/skills/dotnet-file-based-apps/SKILL.md
+  deployed_file_hashes:
+    .agents/skills/dotnet-file-based-apps/SKILL.md: sha256:a612eb06415c9c149ceacf0598f597544cbe5f5ffe4d8cf9e42223c1d1097710
+  content_hash: sha256:f915ad8100702665872888bdede4363e60af398d1ab1f012176361de551b05de
+- repo_url: suusanex/coding_agent_plan_and_verify_process
+  name: persistent-purpose-review
+  host: github.com
+  resolved_commit: 638ee00c4a7c176627548461122cd2635f7aa0c0
+  version: 0.2.0
+  virtual_path: apm-packages/persistent-purpose-review
+  is_virtual: true
+  package_type: apm_package
+  deployed_files:
+  - .agents/skills/persistent-purpose-review
+  - .agents/skills/persistent-purpose-review/SKILL.md
+  deployed_file_hashes:
+    .agents/skills/persistent-purpose-review/SKILL.md: sha256:b5b79395602bac045e6fdf9e2e655e5e666ede2aba013493210fc8520a860a10
+  content_hash: sha256:777760232a97ea3d2c387e3d22d695858f38fe147e842bf2ca1a42d342a2e367
+- repo_url: suusanex/coding_agent_plan_and_verify_process
+  name: adaptive-implementation-execution
+  host: github.com
+  resolved_commit: 638ee00c4a7c176627548461122cd2635f7aa0c0
+  version: 0.5.0
+  virtual_path: apm-packages/adaptive-implementation-execution
+  is_virtual: true
+  package_type: apm_package
+  deployed_files:
+  - .agents/skills/adaptive-implementation-execution
+  - .agents/skills/adaptive-implementation-execution/SKILL.md
+  - .agents/skills/adaptive-implementation-execution/refs/handoff.md
+  - .agents/skills/adaptive-implementation-execution/refs/intent.md
+  - .codex/agents/high-implementation-starter.toml
+  - .codex/agents/standard-implementation-completer.toml
+  - .github/agents/high-implementation-starter.agent.md
+  - .github/agents/standard-implementation-completer.agent.md
+  deployed_file_hashes:
+    .agents/skills/adaptive-implementation-execution/SKILL.md: sha256:fea65280a59cc828cb96d59929677bf63e91f878620b94c5498870a69db02860
+    .agents/skills/adaptive-implementation-execution/refs/handoff.md: sha256:850294c82cc8a2b3953a4bb3aa8738b409284afe6b753637f126781bbb36cad5
+    .agents/skills/adaptive-implementation-execution/refs/intent.md: sha256:4f38d5fe12569fe20c1782438b4528f5ac99fa20cd4be682bab25732c0244da5
+    .codex/agents/high-implementation-starter.toml: sha256:98ef0805e9277e53359c035387fb8cd9733110ff254286b88ef95e28b5795918
+    .codex/agents/standard-implementation-completer.toml: sha256:44c8563ae96682bcf31b311c0f6940a309e26a81f9bba1f5b18653da7d7c78d5
+    .github/agents/high-implementation-starter.agent.md: sha256:68da27d392791737701e64d5c7208e5124e4bdec565488c866506fcc380e23ed
+    .github/agents/standard-implementation-completer.agent.md: sha256:796bdcd0ad7f61f851da8691df5066bee739da892ef61d034f9722d8c64495b9
+  content_hash: sha256:05d17e283fe388a73dbd06c9ea0ebe8a0f5db4c105a544f27147c3f5906e07d9
+- repo_url: suusanex/coding_agent_plan_and_verify_process
+  name: codex-profile-finalizer
+  host: github.com
+  resolved_commit: 638ee00c4a7c176627548461122cd2635f7aa0c0
+  version: 0.1.0
+  virtual_path: apm-packages/codex-profile-finalizer
+  is_virtual: true
+  depth: 2
+  resolved_by: suusanex/coding_agent_plan_and_verify_process
+  package_type: apm_package
+  content_hash: sha256:3b7f7d73c73c74e93853a3dc5380d05fc76bee229ab94e4914175ae1b142dba9
+deployments:
+- kind: project-relative
+  target: agents
+  value: .agents/skills/adaptive-implementation-execution
+  runtime: null
+  scope: project
+  owners:
+  - suusanex/coding_agent_plan_and_verify_process/apm-packages/adaptive-implementation-execution
+  active_owner: suusanex/coding_agent_plan_and_verify_process/apm-packages/adaptive-implementation-execution
+  content_hash: null
+- kind: project-relative
+  target: agents
+  value: .agents/skills/adaptive-implementation-execution/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - suusanex/coding_agent_plan_and_verify_process/apm-packages/adaptive-implementation-execution
+  active_owner: suusanex/coding_agent_plan_and_verify_process/apm-packages/adaptive-implementation-execution
+  content_hash: sha256:fea65280a59cc828cb96d59929677bf63e91f878620b94c5498870a69db02860
+- kind: project-relative
+  target: agents
+  value: .agents/skills/adaptive-implementation-execution/refs/handoff.md
+  runtime: null
+  scope: project
+  owners:
+  - suusanex/coding_agent_plan_and_verify_process/apm-packages/adaptive-implementation-execution
+  active_owner: suusanex/coding_agent_plan_and_verify_process/apm-packages/adaptive-implementation-execution
+  content_hash: sha256:850294c82cc8a2b3953a4bb3aa8738b409284afe6b753637f126781bbb36cad5
+- kind: project-relative
+  target: agents
+  value: .agents/skills/adaptive-implementation-execution/refs/intent.md
+  runtime: null
+  scope: project
+  owners:
+  - suusanex/coding_agent_plan_and_verify_process/apm-packages/adaptive-implementation-execution
+  active_owner: suusanex/coding_agent_plan_and_verify_process/apm-packages/adaptive-implementation-execution
+  content_hash: sha256:4f38d5fe12569fe20c1782438b4528f5ac99fa20cd4be682bab25732c0244da5
+- kind: project-relative
+  target: agents
+  value: .agents/skills/dotnet-file-based-apps
+  runtime: null
+  scope: project
+  owners:
+  - suusanex/agent_skills_dotnet_utility/.agents/skills/dotnet-file-based-apps
+  active_owner: suusanex/agent_skills_dotnet_utility/.agents/skills/dotnet-file-based-apps
+  content_hash: null
+- kind: project-relative
+  target: agents
+  value: .agents/skills/dotnet-file-based-apps/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - suusanex/agent_skills_dotnet_utility/.agents/skills/dotnet-file-based-apps
+  active_owner: suusanex/agent_skills_dotnet_utility/.agents/skills/dotnet-file-based-apps
+  content_hash: sha256:a612eb06415c9c149ceacf0598f597544cbe5f5ffe4d8cf9e42223c1d1097710
+- kind: project-relative
+  target: agents
+  value: .agents/skills/persistent-purpose-review
+  runtime: null
+  scope: project
+  owners:
+  - suusanex/coding_agent_plan_and_verify_process/apm-packages/persistent-purpose-review
+  active_owner: suusanex/coding_agent_plan_and_verify_process/apm-packages/persistent-purpose-review
+  content_hash: null
+- kind: project-relative
+  target: agents
+  value: .agents/skills/persistent-purpose-review/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - suusanex/coding_agent_plan_and_verify_process/apm-packages/persistent-purpose-review
+  active_owner: suusanex/coding_agent_plan_and_verify_process/apm-packages/persistent-purpose-review
+  content_hash: sha256:b5b79395602bac045e6fdf9e2e655e5e666ede2aba013493210fc8520a860a10
+- kind: project-relative
+  target: codex
+  value: .codex/agents/high-implementation-starter.toml
+  runtime: null
+  scope: project
+  owners:
+  - suusanex/coding_agent_plan_and_verify_process/apm-packages/adaptive-implementation-execution
+  active_owner: suusanex/coding_agent_plan_and_verify_process/apm-packages/adaptive-implementation-execution
+  content_hash: sha256:98ef0805e9277e53359c035387fb8cd9733110ff254286b88ef95e28b5795918
+- kind: project-relative
+  target: codex
+  value: .codex/agents/standard-implementation-completer.toml
+  runtime: null
+  scope: project
+  owners:
+  - suusanex/coding_agent_plan_and_verify_process/apm-packages/adaptive-implementation-execution
+  active_owner: suusanex/coding_agent_plan_and_verify_process/apm-packages/adaptive-implementation-execution
+  content_hash: sha256:44c8563ae96682bcf31b311c0f6940a309e26a81f9bba1f5b18653da7d7c78d5
+- kind: project-relative
+  target: copilot
+  value: .github/agents/high-implementation-starter.agent.md
+  runtime: null
+  scope: project
+  owners:
+  - suusanex/coding_agent_plan_and_verify_process/apm-packages/adaptive-implementation-execution
+  active_owner: suusanex/coding_agent_plan_and_verify_process/apm-packages/adaptive-implementation-execution
+  content_hash: sha256:68da27d392791737701e64d5c7208e5124e4bdec565488c866506fcc380e23ed
+- kind: project-relative
+  target: copilot
+  value: .github/agents/standard-implementation-completer.agent.md
+  runtime: null
+  scope: project
+  owners:
+  - suusanex/coding_agent_plan_and_verify_process/apm-packages/adaptive-implementation-execution
+  active_owner: suusanex/coding_agent_plan_and_verify_process/apm-packages/adaptive-implementation-execution
+  content_hash: sha256:796bdcd0ad7f61f851da8691df5066bee739da892ef61d034f9722d8c64495b9
