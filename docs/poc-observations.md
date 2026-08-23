@@ -2,47 +2,68 @@
 
 issue [#1](https://github.com/suusanex/codex_agent_facade/issues/1) の 8 項目。成立させること自体は成功条件ではない。迂回実装で不可を隠さない。
 
+観測日: 2026-08-23  
+環境: Windows、Codex CLI 0.149.0、GitHub Copilot CLI 1.0.80、Grok Build `grok 1.0.5 (5115b46bc9) [stable]`  
+経路 A: Codex CLI (`codex exec`) → MCP `run_agent` → Facade → 各 CLI。プロジェクト `.codex/config.toml` で server 登録。  
+経路 B: `src/PocSmoke.cs` から Driver 直呼び（MCP を通さない対照）。  
+Desktop Codex App の composer / 通知 UI は未操作。公式には CLI と App が同じ `config.toml` の MCP 設定を共有する。
+
 状態の意味:
 
 - `成立` — 実機で確認できた
 - `部分成立` — 経路の一部だけ確認できた
 - `不可` — 現行 CLI / Codex / MCP の組み合わせでは成立しない
-- `人手確認待ち` — 実装はあるが実 Codex App / 実 CLI での確認が残っている
-- `実装上の境界` — コードから読み取れる責務分割。実機確認とは独立
+- `人手確認待ち` — Codex App UI など、この環境から操作できない範囲
+- `実装上の境界` — コードと実測から読み取れる責務分割
 
 | # | 観測項目 | 状態 | 根拠 |
 | --- | --- | --- | --- |
-| 1 | Codex 上で選択した agent へ実作業 prompt を渡し、同じ thread へ返せるか | 人手確認待ち | MCP tool `run_agent` が prompt を Driver へ渡し、CLI 最終出力を JSON で返す。Codex App 上の往復は未確認 |
-| 2 | Codex 形式の Skill を GitHub Copilot / Grok Build へ実用的に変換できるか | 人手確認待ち | Driver は `$name` / `name` を各 agent の native `/name` 行として prompt 先頭へ付与する。cwd 上の skill 発見は各 CLI に任せる。実機での skill 実行は未確認 |
-| 3 | 同じ外部 session へ次のユーザー入力を継続できるか | 人手確認待ち | Copilot は `--resume <id>`、Grok は `--session-id <id>`。session id は CLI 出力から読む。取れなければ空文字。`--prompt` と `--resume` の同時指定は未確認 |
-| 4 | 質問・permission を Codex の自然な入力待ちへ橋渡しできるか | 人手確認待ち | 独自 queue は無い。正常系は `--allow-all` / `--always-approve`。質問観測はこれらを外した別試行が必要 |
-| 5 | streaming output を Codex UI へ逐次表示できるか | 人手確認待ち | stdout 各行を MCP progress notification に載せる。既定 CLI 形式は json（完了時 object / JSONL）。Codex UI が表示するかは未確認。独自 stream プロトコルは無い |
-| 6 | 数分の実行中に別 Codex thread / worktree を使えるか | 人手確認待ち | Facade は同期 MCP tool 呼び出し。Codex 既定 `tool_timeout_sec` は 60 秒のため、設定で延長が必要。並行利用は Codex 側の挙動 |
-| 7 | 完了が Codex 本来の通知・thread 一覧・復帰と連動するか | 人手確認待ち | Facade は MCP tool 完了以上の通知を送らない。連動するなら Codex の tool 完了に乗る |
-| 8 | 2 Driver 間で何が Facade 共通で、何が agent 固有か | 実装上の境界 | 下記 |
+| 1 | 選択 agent へ実作業 prompt を渡し、応答を返せるか | 部分成立 | Codex CLI 0.149.0 が MCP `run_agent` を呼び、同一 turn の agent_message に結果を返した。Grok `outputText=pong` / `sessionId=01a02e21-7892-7c50-9146-0c1d4f508532`。Copilot `outputText=pong` / `sessionId=cb783c8f-cd6a-4b70-84e7-4ce65598b578`。Desktop App の composer は未操作 |
+| 2 | Codex 形式 Skill を各 agent へ実用的に変換できるか | 部分成立 | 共通 runtime は無い。Copilot 先頭行 `/name` は CLI slash command になり JSONL を壊す。Copilot は `Use the /name skill.`、Grok は `/name` 行。Grok は skill 探索後に invoke を報告。Copilot は `/dotnet-file-based-apps isn’t available in this CLI session` |
+| 3 | 同じ外部 session へ次入力を継続できるか | 部分成立 | Codex MCP 経由で Grok に `session_id` を渡し、同一 ID で `pingpong`。Driver は `--resume` を使う（`--session-id` は既存 ID で `already in use`）。Copilot `--resume` も同一 session で `pingpong`。Desktop 継続 UI は未確認 |
+| 4 | 質問・permission を Codex の入力待ちへ橋渡しできるか | 不可（この CLI 経路） | 独自 queue は無い。`auto_approve=false` でも Copilot は 45 秒以内に exit 0。Grok は `ask_user_question` が non-interactive で失敗し、質問文を最終 `text` に書いて `stopReason=end_turn`。プロセスはユーザー入力待ちにならない |
+| 5 | streaming を Codex UI へ逐次表示できるか | 部分成立 | `codex exec --json` では `mcp_tool_call` が `in_progress` → `completed`。行単位の assistant 本文は最終 tool result にまとまる。Desktop の逐次表示は未確認。独自 stream プロトコルは無い |
+| 6 | 数分の実行中に別 Codex thread / worktree を使えるか | 人手確認待ち | Facade は同期 MCP tool。`tool_timeout_sec=1800` をプロジェクト config に設定済み。Desktop での別 thread 操作は未確認 |
+| 7 | 完了が Codex 本来の通知・thread 一覧・復帰と連動するか | 人手確認待ち | CLI では `turn.completed` まで到達。Desktop の完了通知・一覧復帰は未確認。Facade は追加通知を送らない |
+| 8 | 2 Driver 間の共通 / 固有 | 実装上の境界 | 下記。Skill と session 継続フラグは実測で異なったので共通化していない |
+
+## 実測コマンド（要約）
+
+正常系（`auto_approve=true`）:
+
+```text
+copilot --prompt <prompt> --output-format json --allow-all [--resume <id>]
+grok --no-auto-update -p <prompt> --cwd <dir> --output-format json --always-approve [--resume <id>]
+```
+
+Windows では `copilot` の拡張子なし npm shim は PE ではない。`.cmd` を優先する。
+
+Grok 新規実行の JSON は `text` / `sessionId` / `stopReason` を持つ。Copilot JSONL の session は `type=result` の `sessionId`。assistant 本文は `type=assistant.message` の `data.content`。
 
 ## 8. 共通責務と agent 固有責務
 
-Facade 共通:
+Facade 共通（2 Driver で実際に同じだったもの）:
 
-- MCP tool `run_agent` の schema と入力バリデーション（agent / prompt / working_directory）
+- MCP tool `run_agent` と入力バリデーション
 - agent 名による Driver 選択
-- プロセス起動（cwd、引数配列、stdout/stderr 収集、cancel 時の process tree kill、例外の `ToString()` トレース）
-- Codex `$skill` を slash command 行へ正規化する処理（両 CLI が `/name` を native とする範囲）
+- プロセス起動（cwd、引数配列、stdout/stderr、cancel 時 kill、例外トレース）
+- `auto_approve` を各 CLI の公式フラグへ渡すかどうかのスイッチ
 
 GitHub Copilot 固有:
 
-- 実行ファイル `copilot`
-- `--prompt` / `--output-format json` / `--allow-all` / `--resume`
-- 作業ディレクトリはプロセス cwd のみ（CLI の `--cwd` は使わない）
-- JSONL 1 行 1 object の解釈、`--resume=<uuid>` hint からの session id 抽出
+- `copilot.cmd`、`--prompt`、`--output-format json`、`--allow-all`、`--resume`
+- JSONL。`result.sessionId`。`assistant.message.data.content`
+- Skill は `Use the /name skill.`（先頭 `/name` は CLI command）
+- `--output-format json` でも slash command 扱いになると TUI 行が混ざる
 
 Grok Build 固有:
 
-- 実行ファイル `grok`
-- `--no-auto-update` / `-p` / `--cwd` / `--output-format json` / `--always-approve` / `--session-id`
-- 末尾 JSON object の解釈（先行ログがある場合は最後の `{` から）
+- `grok`、`-p`、`--cwd`、`--output-format json`、`--always-approve`
+- 継続は `--resume`。`--session-id` は既存 ID で `already in use`
+- 末尾 JSON object の `text` / `sessionId`
+- Skill は `/name` 行（slash command = skill）
+- non-interactive の質問は最終 text に落ち、入力待ちにはならない
 
 意図的に共通化していないもの:
 
-- CLI フラグ、permission モデル、session フラグの意味、JSON スキーマ、ACP
+- Skill 変換、session フラグ、JSON スキーマ、permission モデル、ACP

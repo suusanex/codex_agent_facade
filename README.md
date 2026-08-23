@@ -52,12 +52,13 @@ tool_timeout_sec = 1800
 | `prompt` | はい | 対象 agent へ渡す本文。Facade は再構成しない |
 | `working_directory` | はい | 対象 workspace / worktree |
 | `session_id` | いいえ | 同一外部 session の継続。省略時は新規 |
-| `skills` | いいえ | Codex 形式の Skill 名。各 Driver が `/name` へ変換する |
+| `skills` | いいえ | Codex 形式の Skill 名。Driver ごとに native 形式へ変換する |
+| `auto_approve` | いいえ | 既定 true。各 CLI の non-interactive 承認フラグを付ける。質問待ちの観測では false |
 
 戻り JSON:
 
 - `agent`
-- `sessionId`（CLI 出力から読めた場合。読めなければ空）
+- `sessionId`（CLI が明示した session フィールド、または Copilot の `--resume=` hint。任意 UUID は使わない。読めなければ空）
 - `exitCode`
 - `outputText`
 - `rawOutput`
@@ -78,23 +79,31 @@ UX は固定しない。入口の例は `examples/codex-skills/` にある。
 GitHub Copilot（プロセス cwd = `working_directory`）:
 
 ```text
-copilot --prompt <prompt> --output-format json --allow-all [--resume <session_id>]
+copilot --prompt <prompt> --output-format json [--allow-all] [--resume <session_id>]
 ```
 
 Grok Build:
 
 ```text
-grok --no-auto-update -p <prompt> --cwd <working_directory> --output-format json --always-approve [--session-id <session_id>]
+grok --no-auto-update -p <prompt> --cwd <working_directory> --output-format json [--always-approve] [--resume <session_id>]
 ```
 
-`--allow-all` / `--always-approve` は各 CLI の non-interactive 公式フラグ。質問・permission の橋渡しを観測するときは、これらのフラグを外した別試行が必要。
+`--allow-all` / `--always-approve` は `auto_approve=true` のときだけ付ける。Windows では `copilot.cmd` を使う（拡張子なし npm shim は起動できない）。
+
+Skill 変換は共通化しない。Copilot は `Use the /name skill.`、Grok は `/name` 行。詳細は `docs/poc-observations.md`。
 
 ## テスト
 
-実 `copilot` / `grok` は呼ばない（`dotnet --version` の収集確認だけ実プロセスを使う）。
+CI / 通常テストは実 `copilot` / `grok` を呼ばない（`dotnet --version` の収集確認だけ実プロセスを使う）。
 
 ```powershell
 dotnet run --file tests/CodexAgentFacade.Tests.cs
+```
+
+実 CLI 観測用ハーネス（公開 MCP I/F ではない）:
+
+```powershell
+dotnet run --file src/PocSmoke.cs
 ```
 
 ## 観測
@@ -105,4 +114,4 @@ PoC の成果物は実装に加え、成立 / 不可の記録である。`docs/p
 
 - GitHub Copilot CLI と Grok Build CLI へのログイン
 - Codex への MCP 登録と `tool_timeout_sec` 延長
-- `docs/poc-observations.md` の実機項目（往復、session 継続、質問、streaming、並行利用、完了通知）
+- Desktop Codex App の composer / 完了通知 / 別 thread 並行（Codex CLI 0.149.0 からの MCP `run_agent` 往復は確認済み）

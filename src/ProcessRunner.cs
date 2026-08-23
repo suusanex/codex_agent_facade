@@ -198,15 +198,20 @@ internal static class ExecutableResolver
                 continue;
             }
 
-            var exact = Path.Combine(trimmed, fileName);
-            if (File.Exists(exact))
+            if (Path.HasExtension(fileName))
             {
-                return Path.GetFullPath(exact);
+                var named = Path.Combine(trimmed, fileName);
+                if (File.Exists(named))
+                {
+                    return Path.GetFullPath(named);
+                }
+
+                continue;
             }
 
             foreach (var extension in extensions)
             {
-                if (fileName.EndsWith(extension, StringComparison.OrdinalIgnoreCase))
+                if (extension.Length == 0)
                 {
                     continue;
                 }
@@ -215,6 +220,15 @@ internal static class ExecutableResolver
                 if (File.Exists(candidate))
                 {
                     return Path.GetFullPath(candidate);
+                }
+            }
+
+            if (!OperatingSystem.IsWindows())
+            {
+                var exact = Path.Combine(trimmed, fileName);
+                if (File.Exists(exact))
+                {
+                    return Path.GetFullPath(exact);
                 }
             }
         }
