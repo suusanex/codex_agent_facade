@@ -19,8 +19,8 @@ dependencies:
 - repo_url: suusanex/coding_agent_plan_and_verify_process
   name: persistent-purpose-review
   host: github.com
-  resolved_commit: 3a462a47ab4108e413fa35c67e527e7792b473aa
-  version: 0.2.1
+  resolved_commit: 3c369132d7d2b3cba5ff43774bf9b60a507080fc
+  version: 0.2.2
   virtual_path: apm-packages/persistent-purpose-review
   is_virtual: true
   package_type: apm_package
@@ -28,8 +28,8 @@ dependencies:
   - .agents/skills/persistent-purpose-review
   - .agents/skills/persistent-purpose-review/SKILL.md
   deployed_file_hashes:
-    .agents/skills/persistent-purpose-review/SKILL.md: sha256:93dbeec8580a6793692535d5684244dad6a004b9ff577639a26ed1dc9501de47
-  content_hash: sha256:a141ec5ca7ba60589eaaf8535fa55e955fa6ec131b84de5c5a36c6d34a2c2ae1
+    .agents/skills/persistent-purpose-review/SKILL.md: sha256:0d653ad1e929a4f703b99903441357ad6f0ac5106739628317d411c5e1967a90
+  content_hash: sha256:a64a062246d43790f4ae5c61d4fed77acffecb2963c3896792b631bed4b2fb27
 - repo_url: suusanex/coding_agent_plan_and_verify_process
   name: adaptive-implementation-execution
   host: github.com
@@ -139,7 +139,7 @@ deployments:
   owners:
   - suusanex/coding_agent_plan_and_verify_process/apm-packages/persistent-purpose-review
   active_owner: suusanex/coding_agent_plan_and_verify_process/apm-packages/persistent-purpose-review
-  content_hash: sha256:93dbeec8580a6793692535d5684244dad6a004b9ff577639a26ed1dc9501de47
+  content_hash: sha256:0d653ad1e929a4f703b99903441357ad6f0ac5106739628317d411c5e1967a90
 - kind: project-relative
   target: codex
   value: .codex/agents/high-implementation-starter.toml

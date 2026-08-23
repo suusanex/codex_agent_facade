@@ -39,7 +39,7 @@ context pathはrepository相対またはabsoluteでよい。Runner自身にsourc
 purpose-review-runner version
 ```
 
-stdoutの単一JSONを読み、`protocolVersion`が`2`であること、および`runnerVersion`が`0.2.1`以上であることを確認する。`runnerVersion`はmajor.minor.patchとして比較する。command未導入、非0 exit、JSON不正、`protocolVersion`非互換、`runnerVersion`欠落、`0.2.1`未満、または比較不能なら`Blocked`として停止する。別commandやprovider CLIで代替しない。`apm update`はRunner binaryを更新しないため、旧Runnerのまま続行しない。
+stdoutの単一JSONを読み、`protocolVersion`が`2`であること、および`runnerVersion`が`0.2.2`以上であることを確認する。`runnerVersion`はmajor.minor.patchとして比較する。command未導入、非0 exit、JSON不正、`protocolVersion`非互換、`runnerVersion`欠落、`0.2.2`未満、または比較不能なら`Blocked`として停止する。別commandやprovider CLIで代替しない。`apm update`はRunner binaryを更新しないため、旧Runnerのまま続行しない。
 
 ## Start review
 
