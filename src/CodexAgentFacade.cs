@@ -69,7 +69,8 @@ public sealed class AgentTools
         [Description("User prompt forwarded to the selected agent without reinterpretation.")] string prompt,
         [Description("Working directory or worktree for the agent process.")] string working_directory,
         [Description("Existing external agent session id. Omit to start a new session.")] string? session_id = null,
-        [Description("Codex-format skill names. Each driver converts them to the agent native skill invocation.")] string[]? skills = null,
+        [Description("Codex-format skill names. Each driver converts them to that agent's native invocation.")] string[]? skills = null,
+        [Description("When true (default), pass the CLI native non-interactive auto-approve flag. Set false to observe question/permission blocking on this same MCP path.")] bool auto_approve = true,
         IProgress<ProgressNotificationValue>? progress = null,
         CancellationToken cancellationToken = default)
     {
@@ -80,7 +81,8 @@ public sealed class AgentTools
                 Prompt: prompt,
                 WorkingDirectory: working_directory,
                 SessionId: session_id,
-                Skills: skills);
+                Skills: skills,
+                AutoApprove: auto_approve);
 
             var result = await _facade.RunAsync(
                 request,

@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
@@ -12,7 +11,8 @@ public sealed record AgentRunRequest(
     string Prompt,
     string WorkingDirectory,
     string? SessionId,
-    IReadOnlyList<string>? Skills);
+    IReadOnlyList<string>? Skills,
+    bool AutoApprove = true);
 
 /// <summary>
 /// CLI から得た結果。独自セマンティクスは持たせず、Driver が読めた範囲だけを返す。
@@ -32,47 +32,6 @@ internal static class AgentJson
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         WriteIndented = false,
     };
-}
-
-/// <summary>
-/// Codex 形式の Skill 指定を、対象 agent の native slash command 行へ変換する。
-/// ユーザー本文そのものは変更しない。
-/// </summary>
-internal static class AgentPrompt
-{
-    public static string ApplySkills(string prompt, IReadOnlyList<string>? skills)
-    {
-        if (skills is null || skills.Count == 0)
-        {
-            return prompt;
-        }
-
-        var builder = new StringBuilder();
-        foreach (var skill in skills)
-        {
-            builder.Append(ToNativeSkillInvocation(skill));
-            builder.Append('\n');
-        }
-
-        builder.Append(prompt);
-        return builder.ToString();
-    }
-
-    internal static string ToNativeSkillInvocation(string skill)
-    {
-        var name = skill.Trim();
-        if (name.StartsWith('$') || name.StartsWith('/'))
-        {
-            name = name[1..].Trim();
-        }
-
-        if (string.IsNullOrWhiteSpace(name))
-        {
-            throw new ArgumentException("Skill name is empty.");
-        }
-
-        return "/" + name;
-    }
 }
 
 /// <summary>
@@ -128,10 +87,6 @@ public sealed class AgentFacade
 
 internal static class CliJson
 {
-    private static readonly Regex SessionIdRegex = new(
-        @"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
-        RegexOptions.Compiled);
-
     public static bool TryGetPropertyIgnoreCase(JsonElement element, string name, out JsonElement value)
     {
         if (element.ValueKind != JsonValueKind.Object)
@@ -182,31 +137,28 @@ internal static class CliJson
         };
     }
 
-    public static string? FindSessionId(JsonElement element, string rawText)
+    public static string? FindExplicitSessionId(JsonElement element)
     {
-        var fromProperties = FindFirstString(element, "sessionId", "session_id", "sessionID");
-        if (!string.IsNullOrWhiteSpace(fromProperties))
-        {
-            return fromProperties;
-        }
-
-        return FindSessionIdInText(rawText);
+        return FindFirstString(element, "sessionId", "session_id", "sessionID");
     }
 
-    public static string? FindSessionIdInText(string text)
+    /// <summary>
+    /// Copilot CLI が出力する `copilot --resume=&lt;uuid&gt;` hint だけを読む。任意 UUID は採用しない。
+    /// </summary>
+    public static string? FindCopilotResumeHint(string text)
     {
         var resumeIndex = text.IndexOf("--resume", StringComparison.OrdinalIgnoreCase);
-        if (resumeIndex >= 0)
+        if (resumeIndex < 0)
         {
-            var match = SessionIdRegex.Match(text[resumeIndex..]);
-            if (match.Success)
-            {
-                return match.Value;
-            }
+            return null;
         }
 
-        var sessionMatch = SessionIdRegex.Match(text);
-        return sessionMatch.Success ? sessionMatch.Value : null;
+        var rest = text[resumeIndex..];
+        var match = Regex.Match(
+            rest,
+            @"^--resume(?:=|\s+)([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
+            RegexOptions.IgnoreCase);
+        return match.Success ? match.Groups[1].Value : null;
     }
 
     private static string? JoinArrayStrings(JsonElement array)

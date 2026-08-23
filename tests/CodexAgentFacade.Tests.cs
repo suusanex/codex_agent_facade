@@ -114,6 +114,15 @@ public class GitHubCopilotDriverTests
     }
 
     [Fact]
+    public void BuildArgumentsOmitsAllowAllWhenAutoApproveFalse()
+    {
+        var args = GitHubCopilotDriver.BuildArguments(
+            new AgentRunRequest(AgentFacade.GitHubCopilotAgent, "ask", @"C:\repo", null, null, AutoApprove: false));
+        Assert.Equal(["--prompt", "ask", "--output-format", "json"], args);
+        Assert.DoesNotContain("--allow-all", args);
+    }
+
+    [Fact]
     public void BuildArgumentsResumeAndSkills()
     {
         var args = GitHubCopilotDriver.BuildArguments(
@@ -126,8 +135,8 @@ public class GitHubCopilotDriverTests
         Assert.Contains("--resume", args);
         Assert.Contains("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", args);
         var prompt = args[args.IndexOf("--prompt") + 1];
-        Assert.StartsWith("/dotnet-file-based-apps", prompt, StringComparison.Ordinal);
-        Assert.Contains("/review", prompt, StringComparison.Ordinal);
+        Assert.StartsWith("Use the /dotnet-file-based-apps skill.", prompt, StringComparison.Ordinal);
+        Assert.Contains("Use the /review skill.", prompt, StringComparison.Ordinal);
         Assert.EndsWith("continue", prompt, StringComparison.Ordinal);
     }
 
@@ -157,6 +166,51 @@ public class GitHubCopilotDriverTests
     }
 
     [Fact]
+    public async Task ParsesAssistantMessageAndResultSessionId()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(
+                0,
+                """
+                {"type":"assistant.message","data":{"content":"pong"}}
+                {"type":"result","sessionId":"f3358158-943c-4355-a193-ccb669fe856d","exitCode":0}
+                """,
+                ""),
+        };
+        var driver = new GitHubCopilotDriver(runner);
+        var result = await driver.RunAsync(
+            new AgentRunRequest(AgentFacade.GitHubCopilotAgent, "go", Path.GetTempPath(), null, null),
+            onStdoutLine: null,
+            CancellationToken.None);
+        Assert.Equal("pong", result.OutputText);
+        Assert.Equal("f3358158-943c-4355-a193-ccb669fe856d", result.SessionId);
+    }
+
+    [Fact]
+    public async Task IgnoresNonJsonLinesWhenJsonlExists()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(
+                0,
+                """
+                ● Checking my documentation
+                {"type":"assistant.message","data":{"content":"pong"}}
+                {"type":"result","sessionId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}
+                """,
+                ""),
+        };
+        var driver = new GitHubCopilotDriver(runner);
+        var result = await driver.RunAsync(
+            new AgentRunRequest(AgentFacade.GitHubCopilotAgent, "go", Path.GetTempPath(), null, null),
+            onStdoutLine: null,
+            CancellationToken.None);
+        Assert.Equal("pong", result.OutputText);
+        Assert.Equal("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", result.SessionId);
+    }
+
+    [Fact]
     public async Task ParsesResumeHint()
     {
         var runner = new RecordingProcessRunner
@@ -172,6 +226,25 @@ public class GitHubCopilotDriverTests
             onStdoutLine: null,
             CancellationToken.None);
         Assert.Equal("cccccccc-cccc-cccc-cccc-cccccccccccc", result.SessionId);
+    }
+
+    [Fact]
+    public async Task DoesNotTreatArbitraryUuidAsSessionId()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(
+                0,
+                """{"type":"assistant","text":"see 99999999-9999-9999-9999-999999999999"}""",
+                ""),
+        };
+        var driver = new GitHubCopilotDriver(runner);
+        var result = await driver.RunAsync(
+            new AgentRunRequest(AgentFacade.GitHubCopilotAgent, "go", Path.GetTempPath(), null, null),
+            onStdoutLine: null,
+            CancellationToken.None);
+        Assert.Equal(string.Empty, result.SessionId);
+        Assert.Contains("99999999-9999-9999-9999-999999999999", result.OutputText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -232,6 +305,15 @@ public class GrokBuildDriverTests
     }
 
     [Fact]
+    public void BuildArgumentsOmitsAlwaysApproveWhenAutoApproveFalse()
+    {
+        var args = GrokBuildDriver.BuildArguments(
+            new AgentRunRequest(AgentFacade.GrokBuildAgent, "ask", @"D:\ws", null, null, AutoApprove: false));
+        Assert.DoesNotContain("--always-approve", args);
+        Assert.Contains("-p", args);
+    }
+
+    [Fact]
     public void BuildArgumentsSessionAndSkills()
     {
         var args = GrokBuildDriver.BuildArguments(
@@ -241,7 +323,8 @@ public class GrokBuildDriverTests
                 @"D:\ws",
                 "dddddddd-dddd-dddd-dddd-dddddddddddd",
                 ["/review"]));
-        Assert.Contains("--session-id", args);
+        Assert.Contains("--resume", args);
+        Assert.DoesNotContain("--session-id", args);
         Assert.Contains("dddddddd-dddd-dddd-dddd-dddddddddddd", args);
         var prompt = args[args.IndexOf("-p") + 1];
         Assert.Equal("/review\nnext", prompt);
@@ -287,6 +370,25 @@ public class GrokBuildDriverTests
     }
 
     [Fact]
+    public async Task DoesNotTreatLogUuidAsSessionId()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(
+                0,
+                "session 88888888-8888-8888-8888-888888888888 started\n{\"result\":\"ok\"}",
+                ""),
+        };
+        var driver = new GrokBuildDriver(runner);
+        var result = await driver.RunAsync(
+            new AgentRunRequest(AgentFacade.GrokBuildAgent, "go", Path.GetTempPath(), null, null),
+            onStdoutLine: null,
+            CancellationToken.None);
+        Assert.Equal(string.Empty, result.SessionId);
+        Assert.Equal("ok", result.OutputText);
+    }
+
+    [Fact]
     public async Task NonZeroExitThrows()
     {
         var runner = new RecordingProcessRunner
@@ -316,27 +418,37 @@ public class GrokBuildDriverTests
     }
 }
 
-public class AgentPromptTests
+public class SkillConversionTests
 {
     [Fact]
-    public void EmptySkillsLeavesPromptUnchanged()
+    public void CopilotLeavesPromptUnchangedWithoutSkills()
     {
-        Assert.Equal("body", AgentPrompt.ApplySkills("body", null));
-        Assert.Equal("body", AgentPrompt.ApplySkills("body", []));
+        Assert.Equal("body", GitHubCopilotDriver.ApplyCopilotSkills("body", null));
+        Assert.Equal("body", GitHubCopilotDriver.ApplyCopilotSkills("body", []));
     }
 
     [Fact]
-    public void ConvertsCodexSkillPrefix()
+    public void CopilotConvertsCodexSkillPrefixToSlash()
     {
-        Assert.Equal("/dotnet-file-based-apps", AgentPrompt.ToNativeSkillInvocation("$dotnet-file-based-apps"));
-        Assert.Equal("/review", AgentPrompt.ToNativeSkillInvocation("review"));
-        Assert.Equal("/review", AgentPrompt.ToNativeSkillInvocation("/review"));
+        Assert.Equal("/dotnet-file-based-apps", GitHubCopilotDriver.ToSlashName("$dotnet-file-based-apps"));
+        Assert.Equal("/review", GitHubCopilotDriver.ToSlashName("review"));
+        Assert.Equal(
+            "Use the /review skill.\nbody",
+            GitHubCopilotDriver.ApplyCopilotSkills("body", ["review"]));
     }
 
     [Fact]
-    public void EmptySkillNameThrows()
+    public void GrokConvertsCodexSkillPrefixToSlash()
     {
-        Assert.Throws<ArgumentException>(() => AgentPrompt.ToNativeSkillInvocation("$"));
+        Assert.Equal("/dotnet-file-based-apps", GrokBuildDriver.ToSlashInvocation("$dotnet-file-based-apps"));
+        Assert.Equal("/review", GrokBuildDriver.ToSlashInvocation("/review"));
+    }
+
+    [Fact]
+    public void EmptySkillNameThrowsOnEachDriver()
+    {
+        Assert.Throws<ArgumentException>(() => GitHubCopilotDriver.ToSlashName("$"));
+        Assert.Throws<ArgumentException>(() => GrokBuildDriver.ToSlashInvocation("$"));
     }
 }
 

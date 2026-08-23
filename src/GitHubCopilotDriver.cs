@@ -54,15 +54,19 @@ public sealed class GitHubCopilotDriver
 
     internal static List<string> BuildArguments(AgentRunRequest request)
     {
-        var prompt = AgentPrompt.ApplySkills(request.Prompt, request.Skills);
+        var prompt = ApplyCopilotSkills(request.Prompt, request.Skills);
         var arguments = new List<string>
         {
             "--prompt",
             prompt,
             "--output-format",
             "json",
-            "--allow-all",
         };
+
+        if (request.AutoApprove)
+        {
+            arguments.Add("--allow-all");
+        }
 
         if (!string.IsNullOrWhiteSpace(request.SessionId))
         {
@@ -71,6 +75,46 @@ public sealed class GitHubCopilotDriver
         }
 
         return arguments;
+    }
+
+    /// <summary>
+    /// Copilot CLI は先頭行の `/name` を CLI slash command として解釈する。
+    /// 公式の skill 指定は prompt 本文中の "Use the /name skill." 形式。
+    /// </summary>
+    internal static string ApplyCopilotSkills(string prompt, IReadOnlyList<string>? skills)
+    {
+        if (skills is null || skills.Count == 0)
+        {
+            return prompt;
+        }
+
+        var builder = new System.Text.StringBuilder();
+        foreach (var skill in skills)
+        {
+            builder.Append("Use the ");
+            builder.Append(ToSlashName(skill));
+            builder.Append(" skill.");
+            builder.Append('\n');
+        }
+
+        builder.Append(prompt);
+        return builder.ToString();
+    }
+
+    internal static string ToSlashName(string skill)
+    {
+        var name = skill.Trim();
+        if (name.StartsWith('$') || name.StartsWith('/'))
+        {
+            name = name[1..].Trim();
+        }
+
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            throw new ArgumentException("Skill name is empty.");
+        }
+
+        return "/" + name;
     }
 }
 
@@ -86,6 +130,8 @@ internal static class GitHubCopilotOutputParser
         var lines = stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
         string? sessionId = null;
         var texts = new List<string>();
+        var jsonLineCount = 0;
+        JsonException? lastJsonError = null;
 
         foreach (var line in lines)
         {
@@ -101,11 +147,14 @@ internal static class GitHubCopilotOutputParser
             }
             catch (JsonException ex)
             {
+                lastJsonError = ex;
                 CliJson.TraceException(ex);
-                throw new InvalidOperationException($"GitHub Copilot CLI stdout is not JSONL. Line: {line}", ex);
+                continue;
             }
 
-            sessionId ??= CliJson.FindSessionId(root, line);
+            jsonLineCount++;
+            sessionId ??= CliJson.FindExplicitSessionId(root);
+            sessionId ??= CliJson.FindCopilotResumeHint(line);
             var text = ReadAssistantText(root);
             if (!string.IsNullOrWhiteSpace(text))
             {
@@ -113,7 +162,14 @@ internal static class GitHubCopilotOutputParser
             }
         }
 
-        sessionId ??= CliJson.FindSessionIdInText(stdout);
+        if (jsonLineCount == 0)
+        {
+            throw new InvalidOperationException(
+                "GitHub Copilot CLI stdout did not contain JSONL objects.",
+                lastJsonError);
+        }
+
+        sessionId ??= CliJson.FindCopilotResumeHint(stdout);
         var outputText = texts.Count > 0 ? string.Join("\n", texts) : stdout.Trim();
         return new ParsedCliOutput(sessionId ?? string.Empty, outputText);
     }
@@ -125,27 +181,25 @@ internal static class GitHubCopilotOutputParser
             var type = typeElement.GetString();
             if (type is not null
                 && !string.Equals(type, "assistant", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(type, "assistant.message", StringComparison.OrdinalIgnoreCase)
                 && !string.Equals(type, "assistant_message", StringComparison.OrdinalIgnoreCase)
                 && !string.Equals(type, "message", StringComparison.OrdinalIgnoreCase)
-                && !string.Equals(type, "result", StringComparison.OrdinalIgnoreCase)
                 && !string.Equals(type, "final", StringComparison.OrdinalIgnoreCase))
             {
                 return null;
             }
         }
 
-        return CliJson.FindFirstString(root, "text", "content", "message", "output", "result")
-            ?? ReadNestedDataText(root);
-    }
-
-    private static string? ReadNestedDataText(JsonElement root)
-    {
-        if (!CliJson.TryGetPropertyIgnoreCase(root, "data", out var data))
+        if (CliJson.TryGetPropertyIgnoreCase(root, "data", out var data))
         {
-            return null;
+            var fromData = CliJson.FindFirstString(data, "content", "text", "message", "output", "result");
+            if (!string.IsNullOrWhiteSpace(fromData))
+            {
+                return fromData;
+            }
         }
 
-        return CliJson.FindFirstString(data, "text", "content", "message", "output", "result");
+        return CliJson.FindFirstString(root, "text", "content", "message", "output", "result");
     }
 }
 

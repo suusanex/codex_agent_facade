@@ -1,0 +1,9 @@
+# このファイルは Codex が MCP server を発見するためのプロジェクト設定。
+# tool_timeout_sec の延長はホスト側設定であり、Facade の迂回ではない。
+
+[mcp_servers.codex_agent_facade]
+command = "dotnet"
+args = ["run", "--file", "src/CodexAgentFacade.cs"]
+startup_timeout_sec = 120
+tool_timeout_sec = 1800
+default_tools_approval_mode = "auto"

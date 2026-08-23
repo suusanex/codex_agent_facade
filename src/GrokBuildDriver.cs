@@ -54,7 +54,7 @@ public sealed class GrokBuildDriver
 
     internal static List<string> BuildArguments(AgentRunRequest request)
     {
-        var prompt = AgentPrompt.ApplySkills(request.Prompt, request.Skills);
+        var prompt = ApplyGrokSkills(request.Prompt, request.Skills);
         var arguments = new List<string>
         {
             "--no-auto-update",
@@ -64,16 +64,58 @@ public sealed class GrokBuildDriver
             request.WorkingDirectory,
             "--output-format",
             "json",
-            "--always-approve",
         };
+
+        if (request.AutoApprove)
+        {
+            arguments.Add("--always-approve");
+        }
 
         if (!string.IsNullOrWhiteSpace(request.SessionId))
         {
-            arguments.Add("--session-id");
+            // --session-id は新規作成用。実機では既存 ID に対して "already in use" になるため継続は --resume。
+            arguments.Add("--resume");
             arguments.Add(request.SessionId);
         }
 
         return arguments;
+    }
+
+    /// <summary>
+    /// Grok Build は user-invocable skill を slash command として扱う。実機未確認の共通 runtime にはしない。
+    /// </summary>
+    internal static string ApplyGrokSkills(string prompt, IReadOnlyList<string>? skills)
+    {
+        if (skills is null || skills.Count == 0)
+        {
+            return prompt;
+        }
+
+        var builder = new System.Text.StringBuilder();
+        foreach (var skill in skills)
+        {
+            builder.Append(ToSlashInvocation(skill));
+            builder.Append('\n');
+        }
+
+        builder.Append(prompt);
+        return builder.ToString();
+    }
+
+    internal static string ToSlashInvocation(string skill)
+    {
+        var name = skill.Trim();
+        if (name.StartsWith('$') || name.StartsWith('/'))
+        {
+            name = name[1..].Trim();
+        }
+
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            throw new ArgumentException("Skill name is empty.");
+        }
+
+        return "/" + name;
     }
 }
 
@@ -98,7 +140,7 @@ internal static class GrokBuildOutputParser
             throw new InvalidOperationException("Grok Build CLI stdout did not end with a JSON object.", ex);
         }
 
-        var sessionId = CliJson.FindSessionId(root, stdout) ?? string.Empty;
+        var sessionId = CliJson.FindExplicitSessionId(root) ?? string.Empty;
         var outputText = CliJson.FindFirstString(root, "text", "result", "message", "output", "content", "response")
             ?? stdout.Trim();
         return new ParsedCliOutput(sessionId, outputText);
