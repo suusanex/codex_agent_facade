@@ -17,6 +17,9 @@
 # Mono auto generated files
 mono_crash.*
 
+# File-based apps publish output
+artifacts/
+
 # Build results
 [Dd]ebug/
 [Dd]ebugPublic/
