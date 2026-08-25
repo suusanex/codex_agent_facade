@@ -104,18 +104,20 @@ public sealed class ProcessRunner : IProcessRunner
 
         if (isWindowsScript)
         {
+            // ArgumentList を cmd にバラして渡すと & | 等がメタ文字になる。/s /c で1本の quoted command にする。
             startInfo.FileName = Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe";
+            startInfo.ArgumentList.Add("/d");
+            startInfo.ArgumentList.Add("/s");
             startInfo.ArgumentList.Add("/c");
-            startInfo.ArgumentList.Add(resolvedExecutable);
+            startInfo.ArgumentList.Add(WindowsCmd.BuildCommand(resolvedExecutable, request.Arguments));
         }
         else
         {
             startInfo.FileName = resolvedExecutable;
-        }
-
-        foreach (var argument in request.Arguments)
-        {
-            startInfo.ArgumentList.Add(argument);
+            foreach (var argument in request.Arguments)
+            {
+                startInfo.ArgumentList.Add(argument);
+            }
         }
 
         if (request.EnvironmentVariables is not null)
@@ -166,6 +168,33 @@ public sealed class ProcessRunner : IProcessRunner
         {
             CliJson.TraceException(ex);
         }
+    }
+}
+
+/// <summary>
+/// cmd.exe に渡す1コマンドを引用符で囲み、メタ文字として解釈されないようにする。
+/// </summary>
+internal static class WindowsCmd
+{
+    public static string QuoteArgument(string value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        var escaped = value
+            .Replace("\"", "\"\"", StringComparison.Ordinal)
+            .Replace("%", "%%", StringComparison.Ordinal);
+        return "\"" + escaped + "\"";
+    }
+
+    public static string BuildCommand(string executable, IReadOnlyList<string> arguments)
+    {
+        var builder = new StringBuilder(QuoteArgument(executable));
+        foreach (var argument in arguments)
+        {
+            builder.Append(' ');
+            builder.Append(QuoteArgument(argument));
+        }
+
+        return builder.ToString();
     }
 }
 

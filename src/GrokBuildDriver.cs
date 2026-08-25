@@ -141,8 +141,12 @@ internal static class GrokBuildOutputParser
         }
 
         var sessionId = CliJson.FindExplicitSessionId(root) ?? string.Empty;
-        var outputText = CliJson.FindFirstString(root, "text", "result", "message", "output", "content", "response")
-            ?? stdout.Trim();
+        var outputText = CliJson.FindFirstString(root, "text", "result", "message", "output", "content", "response");
+        if (string.IsNullOrWhiteSpace(outputText))
+        {
+            throw new InvalidOperationException("Grok Build CLI JSON did not contain a recognized response field.");
+        }
+
         return new ParsedCliOutput(sessionId, outputText);
     }
 

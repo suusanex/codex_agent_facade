@@ -84,13 +84,15 @@ public sealed class AgentTools
                 Skills: skills,
                 AutoApprove: auto_approve);
 
+            var progressCount = 0;
             var result = await _facade.RunAsync(
                 request,
                 onStdoutLine: line =>
                 {
+                    progressCount++;
                     progress?.Report(new ProgressNotificationValue
                     {
-                        Progress = 0,
+                        Progress = progressCount,
                         Message = TruncateProgress(line),
                     });
                 },
@@ -106,7 +108,9 @@ public sealed class AgentTools
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
-            throw new McpException(ex.Message, ex);
+            var mcpException = new McpException("run_agent failed. See server traces for details.", ex);
+            CliJson.TraceException(mcpException);
+            throw mcpException;
         }
     }
 
