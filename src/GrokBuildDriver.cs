@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 
 /// <summary>
@@ -14,10 +15,23 @@ public sealed class GrokBuildDriver
 
     public async Task<AgentRunResult> RunAsync(
         AgentRunRequest request,
+        IAgentRunLog runLog,
         Action<string>? onStdoutLine,
         CancellationToken cancellationToken)
     {
         var arguments = BuildArguments(request);
+        var prompt = ApplyGrokSkills(request.Prompt, request.Skills);
+        runLog.WriteStarted(new AgentRunStartedInfo(
+            Agent: AgentFacade.GrokBuildAgent,
+            WorkingDirectory: request.WorkingDirectory,
+            SessionId: request.SessionId,
+            AutoApprove: request.AutoApprove,
+            Skills: request.Skills,
+            Prompt: prompt,
+            FileName: "grok",
+            Arguments: arguments));
+
+        var accumulator = new GrokStreamAccumulator(runLog);
         ProcessRunResult processResult;
         try
         {
@@ -26,7 +40,14 @@ public sealed class GrokBuildDriver
                     FileName: "grok",
                     Arguments: arguments,
                     WorkingDirectory: request.WorkingDirectory,
-                    StdoutLineCallback: onStdoutLine),
+                    StdoutLineCallback: line =>
+                    {
+                        accumulator.OnStdoutLine(line);
+                        onStdoutLine?.Invoke(line);
+                    },
+                    StderrLineCallback: line => runLog.WriteProcessLine("stderr", line),
+                    OnProcessStarted: runLog.AttachProcess,
+                    OnLaunchResolved: runLog.WriteLaunch),
                 cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -38,18 +59,22 @@ public sealed class GrokBuildDriver
         if (processResult.ExitCode != 0)
         {
             var failure = new InvalidOperationException(
-                $"Grok Build CLI exited with code {processResult.ExitCode}. stdout: {processResult.StandardOutput} stderr: {processResult.StandardError}");
+                SecretRedactor.RedactText(
+                    $"Grok Build CLI exited with code {processResult.ExitCode}. stdout: {processResult.StandardOutput} stderr: {processResult.StandardError}"));
             CliJson.TraceException(failure);
             throw failure;
         }
 
-        var parsed = GrokBuildOutputParser.Parse(processResult.StandardOutput);
+        var parsed = accumulator.Complete();
         return new AgentRunResult(
             Agent: AgentFacade.GrokBuildAgent,
             SessionId: parsed.SessionId,
             ExitCode: processResult.ExitCode,
             OutputText: parsed.OutputText,
-            RawOutput: processResult.StandardOutput);
+            RawOutput: processResult.StandardOutput,
+            RunId: runLog.RunId,
+            EventsLogPath: runLog.EventsPath,
+            TextLogPath: runLog.TextLogPath);
     }
 
     internal static List<string> BuildArguments(AgentRunRequest request)
@@ -63,7 +88,7 @@ public sealed class GrokBuildDriver
             "--cwd",
             request.WorkingDirectory,
             "--output-format",
-            "json",
+            "streaming-json",
         };
 
         if (request.AutoApprove)
@@ -91,7 +116,7 @@ public sealed class GrokBuildDriver
             return prompt;
         }
 
-        var builder = new System.Text.StringBuilder();
+        var builder = new StringBuilder();
         foreach (var skill in skills)
         {
             builder.Append(ToSlashInvocation(skill));
@@ -119,135 +144,166 @@ public sealed class GrokBuildDriver
     }
 }
 
-internal static class GrokBuildOutputParser
+/// <summary>
+/// streaming-json の NDJSON を 1 パスで蓄積する。終了後に stdout 全体は再 parse しない。
+/// </summary>
+internal sealed class GrokStreamAccumulator
 {
-    public static ParsedCliOutput Parse(string stdout)
+    private readonly IAgentRunLog _runLog;
+    private readonly StringBuilder _text = new();
+    private string _sessionId = string.Empty;
+    private int _jsonEventCount;
+    private bool _sawNonWhitespace;
+
+    public GrokStreamAccumulator(IAgentRunLog runLog)
     {
-        if (string.IsNullOrWhiteSpace(stdout))
+        _runLog = runLog;
+    }
+
+    public void OnStdoutLine(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
         {
-            throw new InvalidOperationException("Grok Build CLI returned empty stdout.");
+            return;
         }
 
-        var json = ExtractTrailingJsonObject(stdout);
+        _sawNonWhitespace = true;
         JsonElement root;
         try
         {
-            root = JsonSerializer.Deserialize<JsonElement>(json);
+            root = JsonSerializer.Deserialize<JsonElement>(line);
         }
         catch (JsonException ex)
         {
             CliJson.TraceException(ex);
-            throw new InvalidOperationException("Grok Build CLI stdout did not end with a JSON object.", ex);
+            _runLog.WriteProcessLine("stdout", line);
+            return;
         }
 
-        var sessionId = CliJson.FindExplicitSessionId(root) ?? string.Empty;
-        var outputText = CliJson.FindFirstString(root, "text", "result", "message", "output", "content", "response");
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            _runLog.WriteProcessLine("stdout", line);
+            return;
+        }
+
+        _jsonEventCount++;
+        var type = CliJson.FindFirstString(root, "type") ?? "unknown";
+        _runLog.WriteAgentEvent(type, root, GrokBuildHumanSummary.Format(type, root));
+
+        if (string.Equals(type, "text", StringComparison.OrdinalIgnoreCase))
+        {
+            var chunk = ReadDataString(root);
+            if (!string.IsNullOrEmpty(chunk))
+            {
+                _text.Append(chunk);
+            }
+        }
+        else if (string.Equals(type, "end", StringComparison.OrdinalIgnoreCase))
+        {
+            _sessionId = CliJson.FindExplicitSessionId(root) ?? _sessionId;
+        }
+    }
+
+    public ParsedCliOutput Complete()
+    {
+        if (!_sawNonWhitespace)
+        {
+            throw new InvalidOperationException("Grok Build CLI returned empty stdout.");
+        }
+
+        if (_jsonEventCount == 0)
+        {
+            throw new InvalidOperationException("Grok Build CLI stdout did not contain JSON objects.");
+        }
+
+        var outputText = _text.ToString();
         if (string.IsNullOrWhiteSpace(outputText))
         {
             throw new InvalidOperationException("Grok Build CLI JSON did not contain a recognized response field.");
         }
 
-        return new ParsedCliOutput(sessionId, outputText);
+        return new ParsedCliOutput(_sessionId, outputText);
     }
 
-    /// <summary>
-    /// Grok の json 形式は「末尾の 1 JSON object」。末尾まで閉じる object の開始位置を探してから parse する。
-    /// </summary>
-    internal static string ExtractTrailingJsonObject(string stdout)
+    private static string? ReadDataString(JsonElement root)
     {
-        var trimmed = stdout.Trim();
-        for (var i = 0; i < trimmed.Length; i++)
+        return CliJson.FindFirstString(root, "data", "text", "content");
+    }
+}
+
+internal static class GrokBuildHumanSummary
+{
+    public static string? Format(string type, JsonElement root)
+    {
+        if (string.Equals(type, "usage", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(type, "available_commands", StringComparison.OrdinalIgnoreCase))
         {
-            if (trimmed[i] != '{')
-            {
-                continue;
-            }
-
-            if (!IsObjectBalancedToEnd(trimmed, i))
-            {
-                continue;
-            }
-
-            var candidate = trimmed[i..];
-            try
-            {
-                var element = JsonSerializer.Deserialize<JsonElement>(candidate);
-                if (element.ValueKind == JsonValueKind.Object)
-                {
-                    return candidate;
-                }
-            }
-            catch (JsonException ex)
-            {
-                CliJson.TraceException(ex);
-            }
+            return null;
         }
 
-        throw new InvalidOperationException("Grok Build CLI stdout did not contain a JSON object.");
+        if (string.Equals(type, "thought", StringComparison.OrdinalIgnoreCase))
+        {
+            return "thought: " + ReadData(root);
+        }
+
+        if (string.Equals(type, "text", StringComparison.OrdinalIgnoreCase))
+        {
+            return "assistant: " + ReadData(root);
+        }
+
+        if (string.Equals(type, "tool_call", StringComparison.OrdinalIgnoreCase)
+            || (AgentLogSummary.LooksLikeTool(type, root)
+                && !string.Equals(type, "tool_call_update", StringComparison.OrdinalIgnoreCase)))
+        {
+            return AgentLogSummary.DescribeTool(root, started: true);
+        }
+
+        if (string.Equals(type, "tool_call_update", StringComparison.OrdinalIgnoreCase))
+        {
+            return AgentLogSummary.DescribeTool(root, started: false);
+        }
+
+        if (string.Equals(type, "plan", StringComparison.OrdinalIgnoreCase))
+        {
+            var entries = CliJson.TryGetPropertyIgnoreCase(root, "entries", out var element)
+                ? Compact(element)
+                : Compact(root);
+            return "plan: " + entries;
+        }
+
+        if (AgentLogSummary.LooksLikeMode(type))
+        {
+            return AgentLogSummary.DescribeModeOrLifecycle(type, root);
+        }
+
+        if (string.Equals(type, "end", StringComparison.OrdinalIgnoreCase))
+        {
+            var stop = CliJson.FindFirstString(root, "stopReason") ?? string.Empty;
+            var sid = CliJson.FindExplicitSessionId(root) ?? string.Empty;
+            return "end stopReason=" + stop + " sessionId=" + sid;
+        }
+
+        if (string.Equals(type, "error", StringComparison.OrdinalIgnoreCase))
+        {
+            return "error: " + (CliJson.FindFirstString(root, "message") ?? Compact(root));
+        }
+
+        return AgentLogSummary.DescribeGeneric(type, root);
     }
 
-    private static bool IsObjectBalancedToEnd(string text, int start)
+    private static string ReadData(JsonElement root)
     {
-        var depth = 0;
-        var inString = false;
-        var escape = false;
-        for (var i = start; i < text.Length; i++)
+        return CliJson.FindFirstString(root, "data", "text", "content") ?? string.Empty;
+    }
+
+    private static string Compact(JsonElement element)
+    {
+        return element.ValueKind switch
         {
-            var c = text[i];
-            if (inString)
-            {
-                if (escape)
-                {
-                    escape = false;
-                    continue;
-                }
-
-                if (c == '\\')
-                {
-                    escape = true;
-                    continue;
-                }
-
-                if (c == '"')
-                {
-                    inString = false;
-                }
-
-                continue;
-            }
-
-            switch (c)
-            {
-                case '"':
-                    inString = true;
-                    break;
-                case '{':
-                    depth++;
-                    break;
-                case '}':
-                    depth--;
-                    if (depth == 0)
-                    {
-                        for (var j = i + 1; j < text.Length; j++)
-                        {
-                            if (!char.IsWhiteSpace(text[j]))
-                            {
-                                return false;
-                            }
-                        }
-
-                        return true;
-                    }
-
-                    if (depth < 0)
-                    {
-                        return false;
-                    }
-
-                    break;
-            }
-        }
-
-        return false;
+            JsonValueKind.String => element.GetString() ?? string.Empty,
+            JsonValueKind.Undefined => string.Empty,
+            JsonValueKind.Null => string.Empty,
+            _ => element.GetRawText(),
+        };
     }
 }

@@ -33,12 +33,12 @@ Desktop Codex App の composer / 通知 UI は未操作。公式には CLI と A
 
 ```text
 copilot --prompt <prompt> --output-format json --allow-all [--resume <id>]
-grok --no-auto-update -p <prompt> --cwd <dir> --output-format json --always-approve [--resume <id>]
+grok --no-auto-update -p <prompt> --cwd <dir> --output-format streaming-json --always-approve [--resume <id>]
 ```
 
 Windows では `copilot` の拡張子なし npm shim は PE ではない。`.cmd` を優先する。
 
-Grok 新規実行の JSON は `text` / `sessionId` / `stopReason` を持つ。Copilot JSONL の session は `type=result` の `sessionId`。assistant 本文は `type=assistant.message` の `data.content`。
+Grok は headless `streaming-json`（NDJSON）を使う。最終 `outputText` / `sessionId` は `text` chunk と `end` から復元する。tool_call / plan 等は run log へ流す。実機での長時間 tail は人手確認待ち。Copilot JSONL の session は `type=result` の `sessionId`。assistant 本文は `type=assistant.message` の `data.content`。
 
 ## 8. 共通責務と agent 固有責務
 
@@ -60,10 +60,14 @@ Grok Build 固有:
 
 - `grok`、`-p`、`--cwd`、`--output-format json`、`--always-approve`
 - 継続は `--resume`。`--session-id` は既存 ID で `already in use`
-- 末尾 JSON object の `text` / `sessionId`
+- `streaming-json` の NDJSON。`text` chunk と `end.sessionId`
 - Skill は `/name` 行（slash command = skill）
 - non-interactive の質問は最終 text に落ち、入力待ちにはならない
 
 意図的に共通化していないもの:
 
 - Skill 変換、session フラグ、JSON スキーマ、permission モデル、ACP
+
+## Run log（issue #4）
+
+Codex UI 上の逐次本文表示は引き続き部分成立 / 人手確認待ち。Facade は invocation ごとに `%LOCALAPPDATA%\codex-agent-facade\runs\` へ `{runId}.events.jsonl` と `{runId}.log` を書く。MCP progress とは別経路。単体テストでファイル生成・heartbeat・Grok NDJSON の tool 要約は確認済み。実 CLI を `Get-Content -Wait` で追う観測は人手確認待ち。durable job 化は対象外。

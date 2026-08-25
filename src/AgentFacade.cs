@@ -22,7 +22,10 @@ public sealed record AgentRunResult(
     string SessionId,
     int ExitCode,
     string OutputText,
-    string RawOutput);
+    string RawOutput,
+    string RunId,
+    string EventsLogPath,
+    string TextLogPath);
 
 internal static class AgentJson
 {
@@ -44,26 +47,57 @@ public sealed class AgentFacade
 
     private readonly GitHubCopilotDriver _gitHubCopilot;
     private readonly GrokBuildDriver _grokBuild;
+    private readonly IAgentRunLogFactory _runLogFactory;
 
-    public AgentFacade(GitHubCopilotDriver gitHubCopilot, GrokBuildDriver grokBuild)
+    public AgentFacade(
+        GitHubCopilotDriver gitHubCopilot,
+        GrokBuildDriver grokBuild,
+        IAgentRunLogFactory runLogFactory)
     {
         _gitHubCopilot = gitHubCopilot;
         _grokBuild = grokBuild;
+        _runLogFactory = runLogFactory;
     }
 
-    public Task<AgentRunResult> RunAsync(
+    public async Task<AgentRunResult> RunAsync(
         AgentRunRequest request,
         Action<string>? onStdoutLine,
         CancellationToken cancellationToken)
     {
         Validate(request);
-
-        return request.Agent.Trim() switch
+        await using var log = _runLogFactory.Start(request);
+        try
         {
-            GitHubCopilotAgent => _gitHubCopilot.RunAsync(request, onStdoutLine, cancellationToken),
-            GrokBuildAgent => _grokBuild.RunAsync(request, onStdoutLine, cancellationToken),
-            _ => throw new ArgumentException($"Unknown agent '{request.Agent}'. Supported agents: {GitHubCopilotAgent}, {GrokBuildAgent}."),
-        };
+            var result = request.Agent.Trim() switch
+            {
+                GitHubCopilotAgent => await _gitHubCopilot.RunAsync(request, log, onStdoutLine, cancellationToken)
+                    .ConfigureAwait(false),
+                GrokBuildAgent => await _grokBuild.RunAsync(request, log, onStdoutLine, cancellationToken)
+                    .ConfigureAwait(false),
+                _ => throw new ArgumentException($"Unknown agent '{request.Agent}'. Supported agents: {GitHubCopilotAgent}, {GrokBuildAgent}."),
+            };
+
+            var withLogs = result with
+            {
+                RunId = log.RunId,
+                EventsLogPath = log.EventsPath,
+                TextLogPath = log.TextLogPath,
+            };
+            log.WriteCompleted(withLogs);
+            return withLogs;
+        }
+        catch (OperationCanceledException ex)
+        {
+            CliJson.TraceException(ex);
+            log.WriteCancelled();
+            throw;
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            log.WriteFailed(ex);
+            throw;
+        }
     }
 
     private static void Validate(AgentRunRequest request)
@@ -178,6 +212,6 @@ internal static class CliJson
 
     public static void TraceException(Exception exception)
     {
-        Trace.TraceError(exception.ToString());
+        Trace.TraceError(SecretRedactor.RedactText(exception.ToString()));
     }
 }

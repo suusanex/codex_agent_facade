@@ -6,6 +6,8 @@
 #:property NoWarn=CA2266
 #:include AgentFacade.cs
 #:include ProcessRunner.cs
+#:include AgentRunLog.cs
+#:include SecretRedactor.cs
 #:include GitHubCopilotDriver.cs
 #:include GrokBuildDriver.cs
 
@@ -13,7 +15,10 @@ var workspace = Directory.CreateTempSubdirectory("codex-agent-facade-poc-");
 File.WriteAllText(Path.Combine(workspace.FullName, "NOTE.txt"), "poc observation workspace. do not keep.");
 Console.WriteLine("workspace=" + workspace.FullName);
 
-var facade = new AgentFacade(new GitHubCopilotDriver(new ProcessRunner()), new GrokBuildDriver(new ProcessRunner()));
+var facade = new AgentFacade(
+    new GitHubCopilotDriver(new ProcessRunner()),
+    new GrokBuildDriver(new ProcessRunner()),
+    new AgentRunLogFactory());
 const string prompt = "Reply with only the word pong. Do not create, edit, or delete any files.";
 const string followUp = "Reply with only the word pingpong. Do not create, edit, or delete any files.";
 const string question = "Ask me to choose option A or option B, then stop and wait for my answer. Do not choose for me. Do not modify files.";

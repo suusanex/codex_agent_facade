@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 
 /// <summary>
@@ -14,10 +15,23 @@ public sealed class GitHubCopilotDriver
 
     public async Task<AgentRunResult> RunAsync(
         AgentRunRequest request,
+        IAgentRunLog runLog,
         Action<string>? onStdoutLine,
         CancellationToken cancellationToken)
     {
         var arguments = BuildArguments(request);
+        var prompt = ApplyCopilotSkills(request.Prompt, request.Skills);
+        runLog.WriteStarted(new AgentRunStartedInfo(
+            Agent: AgentFacade.GitHubCopilotAgent,
+            WorkingDirectory: request.WorkingDirectory,
+            SessionId: request.SessionId,
+            AutoApprove: request.AutoApprove,
+            Skills: request.Skills,
+            Prompt: prompt,
+            FileName: "copilot",
+            Arguments: arguments));
+
+        var accumulator = new GitHubCopilotStreamAccumulator(runLog);
         ProcessRunResult processResult;
         try
         {
@@ -26,7 +40,14 @@ public sealed class GitHubCopilotDriver
                     FileName: "copilot",
                     Arguments: arguments,
                     WorkingDirectory: request.WorkingDirectory,
-                    StdoutLineCallback: onStdoutLine),
+                    StdoutLineCallback: line =>
+                    {
+                        accumulator.OnStdoutLine(line);
+                        onStdoutLine?.Invoke(line);
+                    },
+                    StderrLineCallback: line => runLog.WriteProcessLine("stderr", line),
+                    OnProcessStarted: runLog.AttachProcess,
+                    OnLaunchResolved: runLog.WriteLaunch),
                 cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -38,18 +59,22 @@ public sealed class GitHubCopilotDriver
         if (processResult.ExitCode != 0)
         {
             var failure = new InvalidOperationException(
-                $"GitHub Copilot CLI exited with code {processResult.ExitCode}. stdout: {processResult.StandardOutput} stderr: {processResult.StandardError}");
+                SecretRedactor.RedactText(
+                    $"GitHub Copilot CLI exited with code {processResult.ExitCode}. stdout: {processResult.StandardOutput} stderr: {processResult.StandardError}"));
             CliJson.TraceException(failure);
             throw failure;
         }
 
-        var parsed = GitHubCopilotOutputParser.Parse(processResult.StandardOutput);
+        var parsed = accumulator.Complete();
         return new AgentRunResult(
             Agent: AgentFacade.GitHubCopilotAgent,
             SessionId: parsed.SessionId,
             ExitCode: processResult.ExitCode,
             OutputText: parsed.OutputText,
-            RawOutput: processResult.StandardOutput);
+            RawOutput: processResult.StandardOutput,
+            RunId: runLog.RunId,
+            EventsLogPath: runLog.EventsPath,
+            TextLogPath: runLog.TextLogPath);
     }
 
     internal static List<string> BuildArguments(AgentRunRequest request)
@@ -88,7 +113,7 @@ public sealed class GitHubCopilotDriver
             return prompt;
         }
 
-        var builder = new System.Text.StringBuilder();
+        var builder = new StringBuilder();
         foreach (var skill in skills)
         {
             builder.Append("Use the ");
@@ -118,67 +143,125 @@ public sealed class GitHubCopilotDriver
     }
 }
 
-internal static class GitHubCopilotOutputParser
+/// <summary>
+/// Copilot JSONL を 1 パスで蓄積する。Grok の wire schema には合わせない。
+/// </summary>
+internal sealed class GitHubCopilotStreamAccumulator
 {
-    public static ParsedCliOutput Parse(string stdout)
+    private readonly IAgentRunLog _runLog;
+    private readonly List<string> _texts = [];
+    private string? _sessionId;
+    private int _jsonLineCount;
+    private bool _sawNonWhitespace;
+    private JsonException? _lastJsonError;
+
+    public GitHubCopilotStreamAccumulator(IAgentRunLog runLog)
     {
-        if (string.IsNullOrWhiteSpace(stdout))
+        _runLog = runLog;
+    }
+
+    public void OnStdoutLine(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return;
+        }
+
+        _sawNonWhitespace = true;
+        JsonElement root;
+        try
+        {
+            root = JsonSerializer.Deserialize<JsonElement>(line);
+        }
+        catch (JsonException ex)
+        {
+            _lastJsonError = ex;
+            CliJson.TraceException(ex);
+            _sessionId ??= CliJson.FindCopilotResumeHint(line);
+            _runLog.WriteProcessLine("stdout", line);
+            return;
+        }
+
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            _sessionId ??= CliJson.FindCopilotResumeHint(line);
+            _runLog.WriteProcessLine("stdout", line);
+            return;
+        }
+
+        _jsonLineCount++;
+        _sessionId ??= CliJson.FindExplicitSessionId(root);
+        _sessionId ??= CliJson.FindCopilotResumeHint(line);
+        var type = CliJson.FindFirstString(root, "type") ?? "unknown";
+        var assistantText = GitHubCopilotOutputParser.ReadAssistantText(root);
+        _runLog.WriteAgentEvent(type, root, GitHubCopilotHumanSummary.Format(type, root, assistantText));
+        if (!string.IsNullOrWhiteSpace(assistantText))
+        {
+            _texts.Add(assistantText);
+        }
+    }
+
+    public ParsedCliOutput Complete()
+    {
+        if (!_sawNonWhitespace)
         {
             throw new InvalidOperationException("GitHub Copilot CLI returned empty stdout.");
         }
 
-        var lines = stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
-        string? sessionId = null;
-        var texts = new List<string>();
-        var jsonLineCount = 0;
-        JsonException? lastJsonError = null;
-
-        foreach (var line in lines)
-        {
-            if (string.IsNullOrWhiteSpace(line))
-            {
-                continue;
-            }
-
-            JsonElement root;
-            try
-            {
-                root = JsonSerializer.Deserialize<JsonElement>(line);
-            }
-            catch (JsonException ex)
-            {
-                lastJsonError = ex;
-                CliJson.TraceException(ex);
-                continue;
-            }
-
-            jsonLineCount++;
-            sessionId ??= CliJson.FindExplicitSessionId(root);
-            sessionId ??= CliJson.FindCopilotResumeHint(line);
-            var text = ReadAssistantText(root);
-            if (!string.IsNullOrWhiteSpace(text))
-            {
-                texts.Add(text);
-            }
-        }
-
-        if (jsonLineCount == 0)
+        if (_jsonLineCount == 0)
         {
             throw new InvalidOperationException(
                 "GitHub Copilot CLI stdout did not contain JSONL objects.",
-                lastJsonError);
+                _lastJsonError);
         }
 
-        if (texts.Count == 0)
+        if (_texts.Count == 0)
         {
             throw new InvalidOperationException("GitHub Copilot CLI JSONL did not contain assistant text.");
         }
 
-        sessionId ??= CliJson.FindCopilotResumeHint(stdout);
-        return new ParsedCliOutput(sessionId ?? string.Empty, string.Join("\n", texts));
+        return new ParsedCliOutput(_sessionId ?? string.Empty, string.Join("\n", _texts));
     }
+}
 
-    private static string? ReadAssistantText(JsonElement root)
+internal static class GitHubCopilotHumanSummary
+{
+    public static string Format(string type, JsonElement root, string? assistantText)
+    {
+        if (!string.IsNullOrWhiteSpace(assistantText))
+        {
+            return "assistant: " + assistantText;
+        }
+
+        if (string.Equals(type, "result", StringComparison.OrdinalIgnoreCase))
+        {
+            return "result sessionId=" + (CliJson.FindExplicitSessionId(root) ?? string.Empty);
+        }
+
+        if (string.Equals(type, "session", StringComparison.OrdinalIgnoreCase))
+        {
+            return "session sessionId=" + (CliJson.FindExplicitSessionId(root) ?? string.Empty);
+        }
+
+        if (AgentLogSummary.LooksLikeTool(type, root))
+        {
+            var started = !type.Contains("update", StringComparison.OrdinalIgnoreCase)
+                && !type.Contains("result", StringComparison.OrdinalIgnoreCase);
+            return AgentLogSummary.DescribeTool(root, started);
+        }
+
+        if (AgentLogSummary.LooksLikeMode(type))
+        {
+            return AgentLogSummary.DescribeModeOrLifecycle(type, root);
+        }
+
+        return AgentLogSummary.DescribeGeneric(type, root);
+    }
+}
+
+internal static class GitHubCopilotOutputParser
+{
+    internal static string? ReadAssistantText(JsonElement root)
     {
         if (CliJson.TryGetPropertyIgnoreCase(root, "type", out var typeElement))
         {

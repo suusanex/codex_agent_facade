@@ -8,6 +8,8 @@
 #:package Microsoft.Extensions.Hosting@10.0.0
 #:include AgentFacade.cs
 #:include ProcessRunner.cs
+#:include AgentRunLog.cs
+#:include SecretRedactor.cs
 #:include GitHubCopilotDriver.cs
 #:include GrokBuildDriver.cs
 
@@ -30,6 +32,7 @@ builder.Logging.AddConsole(options =>
 });
 
 builder.Services.AddSingleton<IProcessRunner, ProcessRunner>();
+builder.Services.AddSingleton<IAgentRunLogFactory, AgentRunLogFactory>();
 builder.Services.AddSingleton<GitHubCopilotDriver>();
 builder.Services.AddSingleton<GrokBuildDriver>();
 builder.Services.AddSingleton<AgentFacade>();
