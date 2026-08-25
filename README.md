@@ -30,19 +30,44 @@ dotnet publish src/CodexAgentFacade.cs
 
 `~/.codex/config.toml` または信頼済みプロジェクトの `.codex/config.toml` に追加する。
 
-`tool_timeout_sec` の既定は 60 秒なので、agent 実行向けに延長する。これはホスト側設定であり、Facade の迂回実装ではない。
+別リポジトリを編集するときは、編集対象ではなく **ユーザー設定** `~/.codex/config.toml` に書く。
+
+`/mcp` ではこの server を有効化できない。設定ファイルに最初から `enabled = true` を書く。
+
+`run_agent` は長時間の同期実行になる。`direct_only_tool_namespaces` を指定しないと、Codex 側が進捗確認とタイムアウトを行い、期待どおり完了しない。`tool_timeout_sec` の既定は 60 秒なので、agent 実行向けに延長する。いずれもホスト側設定であり、Facade の迂回実装ではない。
+
+実機で確認した設定（`command` / `cwd` は配置先に置き換える）:
+
+```toml
+[features.code_mode]
+direct_only_tool_namespaces = ["mcp__codex_agent_facade"]
+
+[mcp_servers.codex_agent_facade]
+command = "C:/path/to/CodexAgentFacade/CodexAgentFacade.exe"
+args = []
+cwd = "C:/path/to/CodexAgentFacade"
+startup_timeout_sec = 120
+tool_timeout_sec = 1800
+default_tools_approval_mode = "auto"
+enabled = true
+```
+
+`command` は `dotnet run --file` でも、`dotnet publish` した `CodexAgentFacade.exe` でもよい。exe を使う場合は成果物フォルダごと配置し、ソースツリーは不要。
+
+開発時に `dotnet run --file` で起動する例（`[features.code_mode]` は同じ）:
 
 ```toml
 [mcp_servers.codex_agent_facade]
 command = "dotnet"
 args = ["run", "--file", "C:/path/to/codex_agent_facade/src/CodexAgentFacade.cs"]
-startup_timeout_sec = 60
+cwd = "C:/path/to/codex_agent_facade"
+startup_timeout_sec = 120
 tool_timeout_sec = 1800
+default_tools_approval_mode = "auto"
+enabled = true
 ```
 
-別リポジトリを編集するときは、編集対象ではなく **ユーザー設定** `~/.codex/config.toml` に書く。`command` は `dotnet run --file` でも、`dotnet publish` した `CodexAgentFacade.exe` でもよい。exe を使う場合は成果物フォルダごと配置し、ソースツリーは不要。
-
-Codex App では MCP server を保存したあと Restart する。
+Codex App では設定を保存したあと Restart する。
 
 ## MCP tool
 
@@ -132,5 +157,5 @@ PoC の成果物は実装に加え、成立 / 不可の記録である。`docs/p
 ## 人手での作業が必要
 
 - GitHub Copilot CLI と Grok Build CLI へのログイン
-- Codex への MCP 登録と `tool_timeout_sec` 延長
+- Codex への MCP 登録（`enabled = true`、`direct_only_tool_namespaces`、`tool_timeout_sec` 延長）
 - Desktop Codex App の composer / 完了通知 / 別 thread 並行（Codex CLI 0.149.0 からの MCP `run_agent` 往復は確認済み）
