@@ -31,11 +31,14 @@ internal static class SecretRedactor
         "openai_api_key",
     };
 
+    private static readonly Regex JsonSecretPropertyValue = CreateJsonSecretPropertyRegex();
+
     private static readonly Regex[] Patterns =
     [
         new(@"\bxai-[A-Za-z0-9_\-]{8,}", RegexOptions.Compiled),
-        new(@"\bghp_[A-Za-z0-9]{20,}", RegexOptions.Compiled),
+        new(@"\bgh[pours]_[A-Za-z0-9]{20,}", RegexOptions.Compiled),
         new(@"\bgithub_pat_[A-Za-z0-9_]{20,}", RegexOptions.Compiled),
+        new(@"\bsk-proj-[A-Za-z0-9_-]{10,}", RegexOptions.Compiled),
         new(@"\bsk-[A-Za-z0-9]{10,}", RegexOptions.Compiled),
         new(@"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", RegexOptions.Compiled),
         new(@"\bBearer\s+[A-Za-z0-9\-._~+/]+=*", RegexOptions.IgnoreCase | RegexOptions.Compiled),
@@ -63,7 +66,17 @@ internal static class SecretRedactor
             current = pattern.Replace(current, Replacement);
         }
 
-        return current;
+        return JsonSecretPropertyValue.Replace(
+            current,
+            match => "\"" + match.Groups[1].Value + "\":\"" + Replacement + "\"");
+    }
+
+    private static Regex CreateJsonSecretPropertyRegex()
+    {
+        var names = string.Join("|", SecretPropertyNames.Select(Regex.Escape));
+        return new Regex(
+            "\"(" + names + ")\"\\s*:\\s*\"(?:\\\\.|[^\"\\\\])*\"",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
     }
 
     public static JsonElement Redact(JsonElement element)

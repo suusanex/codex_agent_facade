@@ -249,7 +249,7 @@ internal sealed class AgentRunLog : IAgentRunLog
 
     public void WriteCancelled()
     {
-        var data = JsonSerializer.SerializeToElement(new { reason = "canceled" }, AgentJson.Options);
+        var data = JsonSerializer.SerializeToElement(new { reason = "cancelled" }, AgentJson.Options);
         WriteEnvelope("facade", "cancelled", data, "cancelled");
     }
 
@@ -348,8 +348,9 @@ internal sealed class AgentRunLog : IAgentRunLog
                 WriteHeartbeat();
             }
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException ex)
         {
+            CliJson.TraceException(ex);
         }
         catch (Exception ex)
         {

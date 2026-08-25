@@ -640,6 +640,31 @@ public class ProcessRunnerTests
     }
 
     [Fact]
+    public async Task CancelledTokenThrowsBeforeStartingProcess()
+    {
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var runner = new ProcessRunner();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => runner.RunAsync(
+            new ProcessRunRequest("codex-agent-facade-missing-cli-xyz", [], Directory.GetCurrentDirectory()),
+            cts.Token));
+    }
+
+    [Fact]
+    public async Task StdoutCallbackFailureStopsTheProcess()
+    {
+        var runner = new ProcessRunner();
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => runner.RunAsync(
+            new ProcessRunRequest(
+                "dotnet",
+                ["--info"],
+                Directory.GetCurrentDirectory(),
+                StdoutLineCallback: _ => throw new InvalidOperationException("log volume full")),
+            CancellationToken.None));
+        Assert.Equal("log volume full", ex.Message);
+    }
+
+    [Fact]
     public void MissingExecutableThrows()
     {
         Assert.Throws<FileNotFoundException>(() => ExecutableResolver.Resolve("codex-agent-facade-missing-cli-xyz"));
@@ -934,6 +959,8 @@ public class AgentRunLogTests
         var eventsFile = Directory.GetFiles(factory.LogDirectory, "*.events.jsonl").Single();
         Assert.Contains("cancelled", TestRunLogs.ReadShared(logFile), StringComparison.Ordinal);
         Assert.Contains("\"type\":\"cancelled\"", TestRunLogs.ReadShared(eventsFile), StringComparison.Ordinal);
+        Assert.Contains("\"reason\":\"cancelled\"", TestRunLogs.ReadShared(eventsFile), StringComparison.Ordinal);
+        Assert.DoesNotContain("\"reason\":\"canceled\"", TestRunLogs.ReadShared(eventsFile), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1024,9 +1051,60 @@ public class AgentRunLogTests
         return match!;
     }
 
+    [Fact]
+    public async Task HeartbeatCancellationIsTraced()
+    {
+        var listener = new CapturingTraceListener();
+        Trace.Listeners.Add(listener);
+        try
+        {
+            await using (var log = TestRunLogs.CreateLog())
+            {
+                await Task.Delay(20);
+            }
+
+            Assert.Contains("OperationCanceledException", listener.Buffer.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Trace.Listeners.Remove(listener);
+        }
+    }
+
     private static async Task WaitForHeartbeatLoopAsync()
     {
         await Task.Delay(50);
+    }
+}
+
+public class SecretRedactorTests
+{
+    [Fact]
+    public void RedactTextCoversModernGitHubAndOpenAiPrefixes()
+    {
+        var gho = "gho_" + new string('a', 36);
+        var ghu = "ghu_" + new string('b', 36);
+        var ghs = "ghs_" + new string('c', 36);
+        var ghr = "ghr_" + new string('d', 36);
+        const string projectKey = "sk-proj-abcdefghijklmnopqrstuvwxyz";
+        var text = "tokens " + gho + " " + ghu + " " + ghs + " " + ghr + " " + projectKey;
+        var redacted = SecretRedactor.RedactText(text);
+        Assert.DoesNotContain(gho, redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain(ghu, redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain(ghs, redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain(ghr, redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain(projectKey, redacted, StringComparison.Ordinal);
+        Assert.Contains(SecretRedactor.Replacement, redacted, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RedactTextRedactsJsonSecretPropertyValues()
+    {
+        const string input = """{"apiKey":"literal-secret","path":"src/main.rs"}""";
+        var redacted = SecretRedactor.RedactText(input);
+        Assert.DoesNotContain("literal-secret", redacted, StringComparison.Ordinal);
+        Assert.Contains("\"apiKey\":\"" + SecretRedactor.Replacement + "\"", redacted, StringComparison.Ordinal);
+        Assert.Contains("src/main.rs", redacted, StringComparison.Ordinal);
     }
 }
 

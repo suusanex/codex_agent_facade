@@ -46,6 +46,7 @@ public sealed class ProcessRunner : IProcessRunner
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(request.FileName);
         ArgumentException.ThrowIfNullOrWhiteSpace(request.WorkingDirectory);
+        cancellationToken.ThrowIfCancellationRequested();
 
         var resolved = ExecutableResolver.Resolve(request.FileName);
         var startInfo = CreateStartInfo(resolved, request, out var usedWindowsCmdWrapper);
@@ -93,17 +94,26 @@ public sealed class ProcessRunner : IProcessRunner
 
         var stdoutTask = ReadLinesAsync(process.StandardOutput, stdout, request.StdoutLineCallback, cancellationToken);
         var stderrTask = ReadLinesAsync(process.StandardError, stderr, request.StderrLineCallback, cancellationToken);
+        var readersTask = Task.WhenAll(stdoutTask, stderrTask);
+        var waitTask = process.WaitForExitAsync(cancellationToken);
 
         try
         {
-            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-            await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
+            // callback 失敗で pipe を読まなくなると WaitForExit が無限待ちになる。先に reader 故障を見て kill する。
+            var finished = await Task.WhenAny(waitTask, readersTask).ConfigureAwait(false);
+            if (finished == readersTask && readersTask.IsFaulted)
+            {
+                TryKill(process);
+            }
+
+            await waitTask.ConfigureAwait(false);
+            await readersTask.ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
             TryKill(process);
-            throw;
+            throw UnwrapProcessException(ex);
         }
 
         return new ProcessRunResult(process.ExitCode, stdout.ToString(), stderr.ToString());
@@ -225,6 +235,25 @@ public sealed class ProcessRunner : IProcessRunner
                 }
             }
         }
+    }
+
+    private static Exception UnwrapProcessException(Exception exception)
+    {
+        if (exception is not AggregateException aggregate)
+        {
+            return exception;
+        }
+
+        var flattened = aggregate.Flatten().InnerExceptions;
+        foreach (var inner in flattened)
+        {
+            if (inner is not IOException)
+            {
+                return inner;
+            }
+        }
+
+        return flattened[0];
     }
 
     private static void TryKill(Process process)
