@@ -9,12 +9,31 @@ public interface IProcessRunner
     Task<ProcessRunResult> RunAsync(ProcessRunRequest request, CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// 起動中プロセスの生存確認だけを公開する。実 Process は ProcessRunner 内に閉じる。
+/// </summary>
+public interface IProcessLifetime
+{
+    int Id { get; }
+    bool HasExited { get; }
+}
+
+public sealed record ProcessLaunchInfo(
+    string RequestedFileName,
+    string ResolvedExecutable,
+    string ProcessFileName,
+    IReadOnlyList<string> ProcessArguments,
+    bool UsedWindowsCmdWrapper);
+
 public sealed record ProcessRunRequest(
     string FileName,
     IReadOnlyList<string> Arguments,
     string WorkingDirectory,
     IReadOnlyDictionary<string, string>? EnvironmentVariables = null,
-    Action<string>? StdoutLineCallback = null);
+    Action<string>? StdoutLineCallback = null,
+    Action<string>? StderrLineCallback = null,
+    Action<IProcessLifetime>? OnProcessStarted = null,
+    Action<ProcessLaunchInfo>? OnLaunchResolved = null);
 
 public sealed record ProcessRunResult(int ExitCode, string StandardOutput, string StandardError);
 
@@ -27,9 +46,16 @@ public sealed class ProcessRunner : IProcessRunner
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(request.FileName);
         ArgumentException.ThrowIfNullOrWhiteSpace(request.WorkingDirectory);
+        cancellationToken.ThrowIfCancellationRequested();
 
         var resolved = ExecutableResolver.Resolve(request.FileName);
-        var startInfo = CreateStartInfo(resolved, request);
+        var startInfo = CreateStartInfo(resolved, request, out var usedWindowsCmdWrapper);
+        request.OnLaunchResolved?.Invoke(new ProcessLaunchInfo(
+            request.FileName,
+            resolved,
+            startInfo.FileName,
+            [.. startInfo.ArgumentList],
+            usedWindowsCmdWrapper));
 
         using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
         var stdout = new StringBuilder();
@@ -49,6 +75,7 @@ public sealed class ProcessRunner : IProcessRunner
         }
 
         process.StandardInput.Close();
+        request.OnProcessStarted?.Invoke(new ProcessLifetime(process));
 
         await using var killOnCancel = cancellationToken.Register(() =>
         {
@@ -66,24 +93,36 @@ public sealed class ProcessRunner : IProcessRunner
         });
 
         var stdoutTask = ReadLinesAsync(process.StandardOutput, stdout, request.StdoutLineCallback, cancellationToken);
-        var stderrTask = ReadLinesAsync(process.StandardError, stderr, onLine: null, cancellationToken);
+        var stderrTask = ReadLinesAsync(process.StandardError, stderr, request.StderrLineCallback, cancellationToken);
+        var readersTask = Task.WhenAll(stdoutTask, stderrTask);
+        var waitTask = process.WaitForExitAsync(cancellationToken);
 
         try
         {
-            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-            await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
+            // callback 失敗で pipe を読まなくなると WaitForExit が無限待ちになる。先に reader 故障を見て kill する。
+            var finished = await Task.WhenAny(waitTask, readersTask).ConfigureAwait(false);
+            if (finished == readersTask && readersTask.IsFaulted)
+            {
+                TryKill(process);
+            }
+
+            await waitTask.ConfigureAwait(false);
+            await readersTask.ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
             TryKill(process);
-            throw;
+            throw UnwrapProcessException(ex);
         }
 
         return new ProcessRunResult(process.ExitCode, stdout.ToString(), stderr.ToString());
     }
 
-    private static ProcessStartInfo CreateStartInfo(string resolvedExecutable, ProcessRunRequest request)
+    private static ProcessStartInfo CreateStartInfo(
+        string resolvedExecutable,
+        ProcessRunRequest request,
+        out bool usedWindowsCmdWrapper)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -101,6 +140,7 @@ public sealed class ProcessRunner : IProcessRunner
         var isWindowsScript = OperatingSystem.IsWindows()
             && (resolvedExecutable.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase)
                 || resolvedExecutable.EndsWith(".bat", StringComparison.OrdinalIgnoreCase));
+        usedWindowsCmdWrapper = isWindowsScript;
 
         if (isWindowsScript)
         {
@@ -153,6 +193,67 @@ public sealed class ProcessRunner : IProcessRunner
             sink.Append(line);
             onLine?.Invoke(line);
         }
+    }
+
+    private sealed class ProcessLifetime : IProcessLifetime
+    {
+        private readonly Process _process;
+
+        public ProcessLifetime(Process process)
+        {
+            _process = process;
+        }
+
+        public int Id
+        {
+            get
+            {
+                try
+                {
+                    return _process.Id;
+                }
+                catch (Exception ex)
+                {
+                    CliJson.TraceException(ex);
+                    return 0;
+                }
+            }
+        }
+
+        public bool HasExited
+        {
+            get
+            {
+                try
+                {
+                    return _process.HasExited;
+                }
+                catch (Exception ex)
+                {
+                    CliJson.TraceException(ex);
+                    return true;
+                }
+            }
+        }
+    }
+
+    private static Exception UnwrapProcessException(Exception exception)
+    {
+        if (exception is not AggregateException aggregate)
+        {
+            return exception;
+        }
+
+        var flattened = aggregate.Flatten().InnerExceptions;
+        foreach (var inner in flattened)
+        {
+            if (inner is not IOException)
+            {
+                return inner;
+            }
+        }
+
+        return flattened[0];
     }
 
     private static void TryKill(Process process)

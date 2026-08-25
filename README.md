@@ -89,8 +89,36 @@ Codex App では設定を保存したあと Restart する。
 - `exitCode`
 - `outputText`
 - `rawOutput`
+- `runId`
+- `eventsLogPath`
+- `textLogPath`
 
 失敗時はフォールバックせず MCP tool error になる。
+
+## Run log
+
+Codex UI へのストリーミング表示とは独立して、各 `run_agent` invocation の逐次出力を Facade 専用ディレクトリへ保存する。対象リポジトリの working tree は使わない。durable job 管理（切断後の生存・result 再取得）とは別の観測用ログである。
+
+既定の保存先:
+
+```text
+%LOCALAPPDATA%\codex-agent-facade\runs\
+```
+
+1 invocation につき一意な `runId` を付け、同じ ID で次の 2 ファイルを同時に append する。
+
+| ファイル | 用途 |
+| --- | --- |
+| `{runId}.events.jsonl` | 機械解析・監査向け。agent の構造化イベントと Facade の started / heartbeat / completed / failed / cancelled |
+| `{runId}.log` | 人間が実行中に読むテキスト。assistant / thought / tool 概要 / plan / 完了。巨大な tool 入出力はここに展開しない |
+
+実行中の追従例:
+
+```powershell
+Get-Content -Wait "$env:LOCALAPPDATA\codex-agent-facade\runs\<runId>.log"
+```
+
+`runId` とパスは tool の戻り JSON に含まれる。heartbeat は 15 秒間隔で、経過時間・process 生存・最後の外部出力からの経過を記録する。出力が無いこととハングは同義ではない。認証情報・credential・token は書き込み前に `[REDACTED]` へ置換する。起動時には PATH 解決後の実行ファイルと、Windows で `.cmd` を `cmd.exe` 経由にしたかどうかも残す。
 
 ## 編集対象リポジトリへの Skill 導入
 
@@ -129,7 +157,7 @@ copilot --prompt <prompt> --output-format json [--allow-all] [--resume <session_
 Grok Build:
 
 ```text
-grok --no-auto-update -p <prompt> --cwd <working_directory> --output-format json [--always-approve] [--resume <session_id>]
+grok --no-auto-update -p <prompt> --cwd <working_directory> --output-format streaming-json [--always-approve] [--resume <session_id>]
 ```
 
 `--allow-all` / `--always-approve` は `auto_approve=true` のときだけ付ける。Windows では `copilot.cmd` を使う（拡張子なし npm shim は起動できない）。
