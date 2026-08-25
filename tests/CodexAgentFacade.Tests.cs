@@ -217,7 +217,10 @@ public class GitHubCopilotDriverTests
         {
             Result = new ProcessRunResult(
                 0,
-                """{"type":"exit","hint":"copilot --resume=cccccccc-cccc-cccc-cccc-cccccccccccc"}""",
+                """
+                {"type":"assistant.message","data":{"content":"done"}}
+                {"type":"exit","hint":"copilot --resume=cccccccc-cccc-cccc-cccc-cccccccccccc"}
+                """,
                 ""),
         };
         var driver = new GitHubCopilotDriver(runner);
@@ -226,6 +229,24 @@ public class GitHubCopilotDriverTests
             onStdoutLine: null,
             CancellationToken.None);
         Assert.Equal("cccccccc-cccc-cccc-cccc-cccccccccccc", result.SessionId);
+        Assert.Equal("done", result.OutputText);
+    }
+
+    [Fact]
+    public async Task ThrowsWhenAssistantTextIsMissing()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(
+                0,
+                """{"type":"result","sessionId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","exitCode":0}""",
+                ""),
+        };
+        var driver = new GitHubCopilotDriver(runner);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => driver.RunAsync(
+            new AgentRunRequest(AgentFacade.GitHubCopilotAgent, "go", Path.GetTempPath(), null, null),
+            onStdoutLine: null,
+            CancellationToken.None));
     }
 
     [Fact]
@@ -389,6 +410,20 @@ public class GrokBuildDriverTests
     }
 
     [Fact]
+    public async Task ThrowsWhenResponseFieldIsMissing()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(0, """{"sessionId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}""", ""),
+        };
+        var driver = new GrokBuildDriver(runner);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => driver.RunAsync(
+            new AgentRunRequest(AgentFacade.GrokBuildAgent, "go", Path.GetTempPath(), null, null),
+            onStdoutLine: null,
+            CancellationToken.None));
+    }
+
+    [Fact]
     public async Task NonZeroExitThrows()
     {
         var runner = new RecordingProcessRunner
@@ -469,5 +504,18 @@ public class ProcessRunnerTests
     public void MissingExecutableThrows()
     {
         Assert.Throws<FileNotFoundException>(() => ExecutableResolver.Resolve("codex-agent-facade-missing-cli-xyz"));
+    }
+
+    [Fact]
+    public void CmdCommandQuotesMetacharacters()
+    {
+        var command = WindowsCmd.BuildCommand(
+            @"C:\tools\copilot.cmd",
+            ["--prompt", "foo&whoami", "--output-format", "json"]);
+        Assert.Equal(
+            "\"C:\\tools\\copilot.cmd\" \"--prompt\" \"foo&whoami\" \"--output-format\" \"json\"",
+            command);
+        Assert.Equal("\"a\"\"b\"", WindowsCmd.QuoteArgument("a\"b"));
+        Assert.Equal("\"%%PATH%%\"", WindowsCmd.QuoteArgument("%PATH%"));
     }
 }

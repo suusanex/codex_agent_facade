@@ -40,7 +40,9 @@ startup_timeout_sec = 60
 tool_timeout_sec = 1800
 ```
 
-`C:/path/to/codex_agent_facade` はクローンしたパスに置き換える。Codex App では MCP server を保存したあと Restart する。
+別リポジトリを編集するときは、編集対象ではなく **ユーザー設定** `~/.codex/config.toml` に書く。`command` は `dotnet run --file` でも、`dotnet publish` した `CodexAgentFacade.exe` でもよい。exe を使う場合は成果物フォルダごと配置し、ソースツリーは不要。
+
+Codex App では MCP server を保存したあと Restart する。
 
 ## MCP tool
 
@@ -65,14 +67,31 @@ tool_timeout_sec = 1800
 
 失敗時はフォールバックせず MCP tool error になる。
 
-## Codex Skill 入口（任意）
+## 編集対象リポジトリへの Skill 導入
 
-UX は固定しない。入口の例は `examples/codex-skills/` にある。
+Skill は **編集する work repository** の root で APM から入れる。この Facade リポジトリへ入れる必要はない。MCP server は APM では入らない。
 
-- `examples/codex-skills/github-copilot/SKILL.md`
-- `examples/codex-skills/grok-build/SKILL.md`
+```powershell
+apm install suusanex/codex_agent_facade/apm-packages/github-copilot --target codex,agent-skills
+apm install suusanex/codex_agent_facade/apm-packages/grok-build --target codex,agent-skills
+```
 
-使う場合は、Codex が読む skills ディレクトリへコピーする。Skill 無しで `run_agent` を直接呼んでもよい。
+ローカル checkout から入れる場合:
+
+```powershell
+apm install "C:\path\to\codex_agent_facade\apm-packages\github-copilot" --target codex,agent-skills
+apm install "C:\path\to\codex_agent_facade\apm-packages\grok-build" --target codex,agent-skills
+```
+
+展開先は `.agents/skills/github-copilot/` と `.agents/skills/grok-build/`。Codex 上では `$github-copilot` / `$grok-build` で本文を外部 agent へ渡す。Skill 無しで `run_agent` を直接呼んでもよい。
+
+更新・削除:
+
+```powershell
+apm update
+apm uninstall github-copilot
+apm uninstall grok-build
+```
 
 ## CLI 変換
 

@@ -169,9 +169,13 @@ internal static class GitHubCopilotOutputParser
                 lastJsonError);
         }
 
+        if (texts.Count == 0)
+        {
+            throw new InvalidOperationException("GitHub Copilot CLI JSONL did not contain assistant text.");
+        }
+
         sessionId ??= CliJson.FindCopilotResumeHint(stdout);
-        var outputText = texts.Count > 0 ? string.Join("\n", texts) : stdout.Trim();
-        return new ParsedCliOutput(sessionId ?? string.Empty, outputText);
+        return new ParsedCliOutput(sessionId ?? string.Empty, string.Join("\n", texts));
     }
 
     private static string? ReadAssistantText(JsonElement root)
