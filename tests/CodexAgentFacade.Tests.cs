@@ -1071,9 +1071,356 @@ public class AgentRunLogTests
         }
     }
 
+    [Fact]
+    public async Task CombinesThoughtFragmentsIntoOneHumanLine()
+    {
+        string[] parts = ["The", " file", "-", "based", " app", " has", " a", " bug", ":"];
+        await using var log = (AgentRunLog)TestRunLogs.CreateLog();
+        foreach (var part in parts)
+        {
+            WriteThoughtEvent(log, part);
+        }
+
+        var events = TestRunLogs.ReadShared(log.EventsPath);
+        var thoughtEvents = events.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Count(line => line.Contains("\"type\":\"thought\"", StringComparison.Ordinal));
+        Assert.Equal(parts.Length, thoughtEvents);
+
+        await log.DisposeAsync();
+        var text = TestRunLogs.ReadShared(log.TextLogPath);
+        var thoughtLines = HumanLines(text, "thought:");
+        Assert.Single(thoughtLines);
+        Assert.Contains("thought: The file-based app has a bug:", thoughtLines[0], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FlushesHumanFragmentsOnNewlines()
+    {
+        await using var log = (AgentRunLog)TestRunLogs.CreateLog();
+        WriteThoughtEvent(log, "first line\nsecond");
+        WriteThoughtEvent(log, " line\nthird");
+        var beforeDispose = HumanLines(TestRunLogs.ReadShared(log.TextLogPath), "thought:");
+        Assert.Equal(2, beforeDispose.Count);
+        Assert.Contains("thought: first line", beforeDispose[0], StringComparison.Ordinal);
+        Assert.Contains("thought: second line", beforeDispose[1], StringComparison.Ordinal);
+        Assert.DoesNotContain("thought: third", string.Join('\n', beforeDispose), StringComparison.Ordinal);
+
+        await log.DisposeAsync();
+        var afterDispose = HumanLines(TestRunLogs.ReadShared(log.TextLogPath), "thought:");
+        Assert.Equal(3, afterDispose.Count);
+        Assert.Contains("thought: third", afterDispose[2], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DoesNotTreatSplitCrLfAsTwoNewlines()
+    {
+        await using var log = (AgentRunLog)TestRunLogs.CreateLog();
+        WriteThoughtEvent(log, "hello\r");
+        Assert.Empty(HumanLines(TestRunLogs.ReadShared(log.TextLogPath), "thought:"));
+
+        WriteThoughtEvent(log, "\nworld");
+        var text = TestRunLogs.ReadShared(log.TextLogPath);
+        var thoughtLines = HumanLines(text, "thought:");
+        Assert.Single(thoughtLines);
+        Assert.Contains("thought: hello", thoughtLines[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("thought: \n", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("thought:\n", text, StringComparison.Ordinal);
+        Assert.False(thoughtLines.Any(line => line.TrimEnd().EndsWith("thought:", StringComparison.Ordinal)));
+
+        await log.DisposeAsync();
+        thoughtLines = HumanLines(TestRunLogs.ReadShared(log.TextLogPath), "thought:");
+        Assert.Equal(2, thoughtLines.Count);
+        Assert.Contains("thought: world", thoughtLines[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RemainderAfterNewlineUsesCurrentFragmentTimestamp()
+    {
+        var time = new FakeTimeProvider(new DateTimeOffset(2026, 8, 26, 12, 0, 0, TimeSpan.Zero));
+        await using var log = (AgentRunLog)TestRunLogs.CreateLog(time);
+        WriteThoughtEvent(log, "aaa");
+        time.Advance(TimeSpan.FromSeconds(5));
+        WriteThoughtEvent(log, "bbb\nccc");
+        await log.DisposeAsync();
+
+        var thoughtLines = HumanLines(TestRunLogs.ReadShared(log.TextLogPath), "thought:");
+        Assert.Equal(2, thoughtLines.Count);
+        Assert.StartsWith("2026-08-26T12:00:00.000Z thought: aaabbb", thoughtLines[0], StringComparison.Ordinal);
+        Assert.StartsWith("2026-08-26T12:00:05.000Z thought: ccc", thoughtLines[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FlushesHumanFragmentsWhenKindChanges()
+    {
+        await using var log = (AgentRunLog)TestRunLogs.CreateLog();
+        WriteThoughtEvent(log, "aaa");
+        var payload = JsonSerializer.SerializeToElement(new { type = "text", data = "bbb" });
+        log.WriteAgentEvent("text", payload, null);
+        log.AppendHumanFragment("assistant", "bbb");
+
+        var text = TestRunLogs.ReadShared(log.TextLogPath);
+        var thoughtLines = HumanLines(text, "thought:");
+        Assert.Single(thoughtLines);
+        Assert.Contains("thought: aaa", thoughtLines[0], StringComparison.Ordinal);
+        Assert.Empty(HumanLines(text, "assistant:"));
+
+        await log.DisposeAsync();
+        text = TestRunLogs.ReadShared(log.TextLogPath);
+        Assert.Single(HumanLines(text, "assistant:"));
+        Assert.Contains("assistant: bbb", HumanLines(text, "assistant:")[0], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FlushesHumanFragmentsBeforeHeartbeatAndCompleted()
+    {
+        var time = new FakeTimeProvider(new DateTimeOffset(2026, 8, 26, 12, 0, 0, TimeSpan.Zero));
+        await using var log = (AgentRunLog)TestRunLogs.CreateLog(time);
+        WriteThoughtEvent(log, "partial");
+        time.Advance(TimeSpan.FromSeconds(15));
+        log.WriteHeartbeat();
+
+        var text = TestRunLogs.ReadShared(log.TextLogPath);
+        var lines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        var thoughtIndex = Array.FindIndex(lines, line => line.Contains(" thought:", StringComparison.Ordinal));
+        var heartbeatIndex = Array.FindIndex(lines, line => line.Contains(" heartbeat ", StringComparison.Ordinal));
+        Assert.True(thoughtIndex >= 0);
+        Assert.True(heartbeatIndex > thoughtIndex);
+        Assert.StartsWith("2026-08-26T12:00:00.000Z thought:", lines[thoughtIndex], StringComparison.Ordinal);
+        Assert.Contains("heartbeat", lines[heartbeatIndex], StringComparison.Ordinal);
+
+        log.WriteCompleted(new AgentRunResult(
+            AgentFacade.GrokBuildAgent,
+            "sid",
+            0,
+            "ok",
+            "raw",
+            log.RunId,
+            log.EventsPath,
+            log.TextLogPath));
+        text = TestRunLogs.ReadShared(log.TextLogPath);
+        Assert.Contains("completed exitCode=0", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FlushesHumanFragmentsOnFailedAndCancelled()
+    {
+        await using (var failedLog = (AgentRunLog)TestRunLogs.CreateLog())
+        {
+            WriteThoughtEvent(failedLog, "boom-thought");
+            failedLog.WriteFailed(new InvalidOperationException("nope"));
+            var text = TestRunLogs.ReadShared(failedLog.TextLogPath);
+            Assert.Contains("thought: boom-thought", text, StringComparison.Ordinal);
+            Assert.Contains("failed", text, StringComparison.Ordinal);
+        }
+
+        await using var cancelledLog = (AgentRunLog)TestRunLogs.CreateLog();
+        WriteThoughtEvent(cancelledLog, "wait-thought");
+        cancelledLog.WriteCancelled();
+        var cancelledText = TestRunLogs.ReadShared(cancelledLog.TextLogPath);
+        Assert.Contains("thought: wait-thought", cancelledText, StringComparison.Ordinal);
+        Assert.Contains("cancelled", cancelledText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FlushesHumanFragmentsWhenBufferExceedsLimit()
+    {
+        await using var log = (AgentRunLog)TestRunLogs.CreateLog();
+        var huge = new string('a', AgentRunLog.MaxFragmentBufferChars + 8);
+        WriteThoughtEvent(log, huge);
+        var text = TestRunLogs.ReadShared(log.TextLogPath);
+        Assert.Single(HumanLines(text, "thought:"));
+        Assert.Contains("thought: " + huge, text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GrokDriverKeepsJsonlFragmentsButCombinesHumanThought()
+    {
+        var stdout =
+            """
+            {"type":"thought","data":"The"}
+            {"type":"thought","data":" file"}
+            {"type":"thought","data":"-"}
+            {"type":"thought","data":"based"}
+            {"type":"text","data":"done"}
+            {"type":"end","sessionId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","stopReason":"end_turn"}
+            """;
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(0, stdout, ""),
+        };
+        await using var log = TestRunLogs.CreateLog();
+        var result = await new GrokBuildDriver(runner).RunAsync(
+            new AgentRunRequest(AgentFacade.GrokBuildAgent, "go", Path.GetTempPath(), null, null),
+            log,
+            onStdoutLine: null,
+            CancellationToken.None);
+        var events = TestRunLogs.ReadShared(result.EventsLogPath);
+        Assert.Equal(4, events.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Count(line => line.Contains("\"type\":\"thought\"", StringComparison.Ordinal)));
+        var text = TestRunLogs.ReadShared(result.TextLogPath);
+        Assert.Single(HumanLines(text, "thought:"));
+        Assert.Contains("thought: The file-based", text, StringComparison.Ordinal);
+        Assert.Contains("assistant: done", text, StringComparison.Ordinal);
+        Assert.Equal("done", result.OutputText);
+    }
+
+    private static void WriteThoughtEvent(IAgentRunLog log, string data)
+    {
+        var payload = JsonSerializer.SerializeToElement(new { type = "thought", data });
+        log.WriteAgentEvent("thought", payload, null);
+        log.AppendHumanFragment("thought", data);
+    }
+
+    private static List<string> HumanLines(string text, string marker)
+    {
+        return text.Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Where(line => line.Contains(" " + marker, StringComparison.Ordinal)
+                || line.Contains(" " + marker.TrimEnd(':') + ":", StringComparison.Ordinal))
+            .ToList();
+    }
+
     private static async Task WaitForHeartbeatLoopAsync()
     {
         await Task.Delay(50);
+    }
+}
+
+public class AgentRunLogDirectoryTests
+{
+    private static readonly object EnvironmentLock = new();
+
+    [Fact]
+    public void GetDefaultLogDirectoryUsesUserProfileWhenOverrideIsAbsent()
+    {
+        lock (EnvironmentLock)
+        {
+            using (OverrideLogDirectory(null))
+            {
+                var expected = Path.GetFullPath(
+                    Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                        ".codex-agent-facade",
+                        "runs"));
+                Assert.Equal(expected, AgentRunLogFactory.GetDefaultLogDirectory());
+            }
+        }
+    }
+
+    [Fact]
+    public void GetDefaultLogDirectoryPrefersEnvironmentOverride()
+    {
+        lock (EnvironmentLock)
+        {
+            var overrideDir = Directory.CreateTempSubdirectory("caf-logdir-").FullName;
+            using (OverrideLogDirectory(overrideDir))
+            {
+                Assert.Equal(Path.GetFullPath(overrideDir), AgentRunLogFactory.GetDefaultLogDirectory());
+            }
+        }
+    }
+
+    [Fact]
+    public void GetDefaultLogDirectoryIgnoresWhitespaceOverride()
+    {
+        lock (EnvironmentLock)
+        {
+            using (OverrideLogDirectory("   "))
+            {
+                var expected = Path.GetFullPath(
+                    Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                        ".codex-agent-facade",
+                        "runs"));
+                Assert.Equal(expected, AgentRunLogFactory.GetDefaultLogDirectory());
+            }
+        }
+    }
+
+    [Fact]
+    public void GetDefaultLogDirectoryExpandsEnvironmentVariables()
+    {
+        lock (EnvironmentLock)
+        {
+            using (OverrideLogDirectory("%USERPROFILE%\\.codex-agent-facade-override-test"))
+            {
+                var expected = Path.GetFullPath(
+                    Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                        ".codex-agent-facade-override-test"));
+                Assert.Equal(expected, AgentRunLogFactory.GetDefaultLogDirectory());
+            }
+        }
+    }
+
+    [Fact]
+    public void GetDefaultLogDirectoryResolvesRelativeOverrideAgainstUserProfile()
+    {
+        lock (EnvironmentLock)
+        {
+            using (OverrideLogDirectory("relative-caf-log-dir"))
+            {
+                var expected = Path.GetFullPath(
+                    Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                        "relative-caf-log-dir"));
+                Assert.Equal(expected, AgentRunLogFactory.GetDefaultLogDirectory());
+            }
+        }
+    }
+
+    [Fact]
+    public void NormalizeLogDirectoryDoesNotKeepWindowsDriveRelativePaths()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var expected = Path.GetFullPath(
+            Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "logs"));
+        Assert.Equal(expected, AgentRunLogFactory.NormalizeLogDirectory("C:logs"));
+        Assert.Equal(expected, AgentRunLogFactory.NormalizeLogDirectory(@"\logs"));
+    }
+
+    [Fact]
+    public void ExplicitConstructorDirectoryIgnoresEnvironmentOverride()
+    {
+        lock (EnvironmentLock)
+        {
+            var injected = Directory.CreateTempSubdirectory("caf-injected-").FullName;
+            using (OverrideLogDirectory(Directory.CreateTempSubdirectory("caf-env-").FullName))
+            {
+                var factory = new AgentRunLogFactory(injected, TimeProvider.System);
+                Assert.Equal(Path.GetFullPath(injected), factory.LogDirectory);
+            }
+        }
+    }
+
+    private static IDisposable OverrideLogDirectory(string? value)
+    {
+        var previous = Environment.GetEnvironmentVariable(AgentRunLogFactory.LogDirectoryEnvironmentVariable);
+        Environment.SetEnvironmentVariable(AgentRunLogFactory.LogDirectoryEnvironmentVariable, value);
+        return new EnvironmentVariableRestore(AgentRunLogFactory.LogDirectoryEnvironmentVariable, previous);
+    }
+
+    private sealed class EnvironmentVariableRestore : IDisposable
+    {
+        private readonly string _name;
+        private readonly string? _previous;
+
+        public EnvironmentVariableRestore(string name, string? previous)
+        {
+            _name = name;
+            _previous = previous;
+        }
+
+        public void Dispose()
+        {
+            Environment.SetEnvironmentVariable(_name, _previous);
+        }
     }
 }
 

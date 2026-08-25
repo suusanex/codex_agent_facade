@@ -14,6 +14,7 @@ public interface IAgentRunLog : IAsyncDisposable, IDisposable
     void WriteStarted(AgentRunStartedInfo info);
     void WriteLaunch(ProcessLaunchInfo info);
     void WriteAgentEvent(string type, JsonElement payload, string? humanSummary);
+    void AppendHumanFragment(string kind, string text);
     void WriteProcessLine(string stream, string line);
     void NoteExternalOutput();
     void AttachProcess(IProcessLifetime process);
@@ -38,11 +39,12 @@ public sealed record AgentRunStartedInfo(
     IReadOnlyList<string> Arguments);
 
 /// <summary>
-/// LocalApplicationData 配下へ run log を作る。テストではディレクトリと TimeProvider を注入する。
+/// ユーザー領域へ run log を作る。テストではディレクトリと TimeProvider を注入する。
 /// </summary>
 public sealed class AgentRunLogFactory : IAgentRunLogFactory
 {
     public const string DefaultProductDirectoryName = "codex-agent-facade";
+    public const string LogDirectoryEnvironmentVariable = "CODEX_AGENT_FACADE_LOG_DIR";
 
     private readonly string _logDirectory;
     private readonly TimeProvider _timeProvider;
@@ -56,19 +58,59 @@ public sealed class AgentRunLogFactory : IAgentRunLogFactory
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(logDirectory);
         ArgumentNullException.ThrowIfNull(timeProvider);
-        _logDirectory = logDirectory;
+        _logDirectory = Path.GetFullPath(logDirectory);
         _timeProvider = timeProvider;
-        LogDirectory = logDirectory;
+        LogDirectory = _logDirectory;
     }
 
     public string LogDirectory { get; }
 
     public static string GetDefaultLogDirectory()
     {
-        return Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            DefaultProductDirectoryName,
-            "runs");
+        var overrideDir = Environment.GetEnvironmentVariable(LogDirectoryEnvironmentVariable);
+        if (!string.IsNullOrWhiteSpace(overrideDir))
+        {
+            return NormalizeLogDirectory(overrideDir);
+        }
+
+        return NormalizeLogDirectory(
+            Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "." + DefaultProductDirectoryName,
+                "runs"));
+    }
+
+    internal static string NormalizeLogDirectory(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        var expanded = Environment.ExpandEnvironmentVariables(path.Trim());
+        if (!Path.IsPathFullyQualified(expanded))
+        {
+            expanded = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ToUserProfileRelativePath(expanded));
+        }
+
+        return Path.GetFullPath(expanded);
+    }
+
+    /// <summary>
+    /// Windows の <c>C:logs</c> や <c>\logs</c> は rooted だがカレントドライブ依存なので、UserProfile 配下の相対パスへ直す。
+    /// </summary>
+    internal static string ToUserProfileRelativePath(string path)
+    {
+        var relative = path;
+        if (Path.IsPathRooted(relative))
+        {
+            if (relative.Length >= 2 && char.IsAsciiLetter(relative[0]) && relative[1] == ':')
+            {
+                relative = relative[2..];
+            }
+
+            relative = relative.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        }
+
+        return string.IsNullOrEmpty(relative) ? "." : relative;
     }
 
     public IAgentRunLog Start(AgentRunRequest request)
@@ -101,6 +143,7 @@ internal sealed class AgentRunLog : IAgentRunLog
 {
     internal static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(15);
     internal const int HumanSummaryMaxLength = 300;
+    internal const int MaxFragmentBufferChars = 16 * 1024;
 
     private static readonly Encoding Utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
@@ -116,6 +159,9 @@ internal sealed class AgentRunLog : IAgentRunLog
     private IProcessLifetime? _process;
     private Exception? _backgroundError;
     private bool _disposed;
+    private string? _fragmentKind;
+    private DateTimeOffset _fragmentStartedAt;
+    private readonly StringBuilder _fragmentBuffer = new();
 
     public AgentRunLog(string runId, string eventsPath, string textLogPath, TimeProvider timeProvider)
     {
@@ -189,6 +235,27 @@ internal sealed class AgentRunLog : IAgentRunLog
         ArgumentException.ThrowIfNullOrWhiteSpace(type);
         NoteExternalOutput();
         WriteEnvelope("agent", type, payload, humanSummary);
+    }
+
+    public void AppendHumanFragment(string kind, string text)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(kind);
+        ArgumentNullException.ThrowIfNull(text);
+        lock (_gate)
+        {
+            ThrowIfUnavailable();
+            _lastOutputAt = _timeProvider.GetUtcNow();
+            try
+            {
+                AppendHumanFragmentLocked(kind, text);
+            }
+            catch (Exception ex)
+            {
+                CliJson.TraceException(ex);
+                _backgroundError = ex;
+                throw;
+            }
+        }
     }
 
     public void WriteProcessLine(string stream, string line)
@@ -317,6 +384,19 @@ internal sealed class AgentRunLog : IAgentRunLog
 
         lock (_gate)
         {
+            try
+            {
+                if (!_disposed)
+                {
+                    FlushHumanFragmentsLocked();
+                }
+            }
+            catch (Exception ex)
+            {
+                CliJson.TraceException(ex);
+                _backgroundError ??= ex;
+            }
+
             _eventsWriter.Dispose();
             _textWriter.Dispose();
             _disposed = true;
@@ -336,6 +416,127 @@ internal sealed class AgentRunLog : IAgentRunLog
         }
 
         return oneLine[..HumanSummaryMaxLength];
+    }
+
+    private void AppendHumanFragmentLocked(string kind, string text)
+    {
+        if (text.Length == 0)
+        {
+            return;
+        }
+
+        if (!string.Equals(_fragmentKind, kind, StringComparison.Ordinal))
+        {
+            FlushHumanFragmentsLocked();
+            _fragmentKind = kind;
+        }
+
+        var now = _timeProvider.GetUtcNow();
+        if (_fragmentBuffer.Length == 0)
+        {
+            _fragmentStartedAt = now;
+        }
+
+        var pendingCarriageReturn = _fragmentBuffer.Length > 0 && _fragmentBuffer[^1] == '\r';
+        _fragmentBuffer.Append(text);
+        if (pendingCarriageReturn || ContainsNewline(text))
+        {
+            FlushCompleteFragmentLinesLocked(now);
+        }
+
+        if (_fragmentBuffer.Length >= MaxFragmentBufferChars)
+        {
+            FlushHumanFragmentsLocked();
+        }
+    }
+
+    private void FlushCompleteFragmentLinesLocked(DateTimeOffset fragmentReceivedAt)
+    {
+        while (TryFindCompleteNewline(_fragmentBuffer, out var index, out var skip))
+        {
+            var line = _fragmentBuffer.ToString(0, index);
+            WriteFragmentLineLocked(line);
+            _fragmentBuffer.Remove(0, index + skip);
+            if (_fragmentBuffer.Length > 0)
+            {
+                _fragmentStartedAt = fragmentReceivedAt;
+            }
+        }
+    }
+
+    private void FlushHumanFragmentsLocked()
+    {
+        if (_fragmentBuffer.Length == 0)
+        {
+            _fragmentKind = null;
+            return;
+        }
+
+        if (_fragmentBuffer[^1] == '\r')
+        {
+            _fragmentBuffer.Remove(_fragmentBuffer.Length - 1, 1);
+        }
+
+        if (_fragmentBuffer.Length > 0)
+        {
+            WriteFragmentLineLocked(_fragmentBuffer.ToString());
+        }
+
+        _fragmentBuffer.Clear();
+        _fragmentKind = null;
+    }
+
+    private void WriteFragmentLineLocked(string line)
+    {
+        var kind = _fragmentKind ?? "text";
+        WriteHumanLineLocked(_fragmentStartedAt, kind + ": " + line);
+    }
+
+    private void WriteHumanLineLocked(DateTimeOffset timestamp, string human)
+    {
+        var body = SecretRedactor.RedactText(human);
+        _textWriter.WriteLine(FormatTimestamp(timestamp) + " " + body);
+        _textWriter.Flush();
+    }
+
+    private static bool ContainsNewline(string text)
+    {
+        return text.AsSpan().IndexOfAny('\r', '\n') >= 0;
+    }
+
+    /// <summary>
+    /// 末尾の単独 <c>\r</c> は次 fragment が <c>\n</c> かどうか分かるまで改行とみなさない。
+    /// </summary>
+    private static bool TryFindCompleteNewline(StringBuilder buffer, out int index, out int skip)
+    {
+        for (var i = 0; i < buffer.Length; i++)
+        {
+            var c = buffer[i];
+            if (c == '\n')
+            {
+                index = i;
+                skip = 1;
+                return true;
+            }
+
+            if (c != '\r')
+            {
+                continue;
+            }
+
+            if (i + 1 >= buffer.Length)
+            {
+                break;
+            }
+
+            index = i;
+            skip = buffer[i + 1] == '\n' ? 2 : 1;
+            return true;
+        }
+
+        index = -1;
+        skip = 0;
+        return false;
     }
 
     private async Task RunHeartbeatAsync(CancellationToken cancellationToken)
@@ -381,13 +582,16 @@ internal sealed class AgentRunLog : IAgentRunLog
             ThrowIfUnavailable();
             try
             {
+                if (!string.IsNullOrWhiteSpace(humanSummary))
+                {
+                    FlushHumanFragmentsLocked();
+                }
+
                 _eventsWriter.WriteLine(json);
                 _eventsWriter.Flush();
                 if (!string.IsNullOrWhiteSpace(humanSummary))
                 {
-                    var human = SecretRedactor.RedactText(TruncateHuman(humanSummary));
-                    _textWriter.WriteLine(ts + " " + human);
-                    _textWriter.Flush();
+                    WriteHumanLineLocked(_timeProvider.GetUtcNow(), TruncateHuman(humanSummary));
                 }
             }
             catch (Exception ex)
