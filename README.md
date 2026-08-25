@@ -102,20 +102,22 @@ Codex UI へのストリーミング表示とは独立して、各 `run_agent` i
 既定の保存先:
 
 ```text
-%LOCALAPPDATA%\codex-agent-facade\runs\
+%USERPROFILE%\.codex-agent-facade\runs\
 ```
+
+環境変数 `CODEX_AGENT_FACADE_LOG_DIR` が空でなければ、そのディレクトリを優先する。`%USERPROFILE%` などの環境変数は展開する。相対パスはユーザープロファイル基準で正規化する。
 
 1 invocation につき一意な `runId` を付け、同じ ID で次の 2 ファイルを同時に append する。
 
 | ファイル | 用途 |
 | --- | --- |
-| `{runId}.events.jsonl` | 機械解析・監査向け。agent の構造化イベントと Facade の started / heartbeat / completed / failed / cancelled |
-| `{runId}.log` | 人間が実行中に読むテキスト。assistant / thought / tool 概要 / plan / 完了。巨大な tool 入出力はここに展開しない |
+| `{runId}.events.jsonl` | 機械解析・監査向け。agent の構造化イベントを元の粒度のまま保存する。Facade の started / heartbeat / completed / failed / cancelled も含む |
+| `{runId}.log` | 人間が実行中に読むテキスト。thought / assistant の細かい streaming fragment は読みやすい行へ結合する。tool 概要 / plan / 完了も含む。巨大な tool 入出力はここに展開しない |
 
 実行中の追従例:
 
 ```powershell
-Get-Content -Wait "$env:LOCALAPPDATA\codex-agent-facade\runs\<runId>.log"
+Get-Content -Wait "$env:USERPROFILE\.codex-agent-facade\runs\<runId>.log"
 ```
 
 `runId` とパスは tool の戻り JSON に含まれる。heartbeat は 15 秒間隔で、経過時間・process 生存・最後の外部出力からの経過を記録する。出力が無いこととハングは同義ではない。認証情報・credential・token は書き込み前に `[REDACTED]` へ置換する。起動時には PATH 解決後の実行ファイルと、Windows で `.cmd` を `cmd.exe` 経由にしたかどうかも残す。

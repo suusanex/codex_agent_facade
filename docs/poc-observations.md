@@ -70,4 +70,4 @@ Grok Build 固有:
 
 ## Run log（issue #4）
 
-Codex UI 上の逐次本文表示は引き続き部分成立 / 人手確認待ち。Facade は invocation ごとに `%LOCALAPPDATA%\codex-agent-facade\runs\` へ `{runId}.events.jsonl` と `{runId}.log` を書く。MCP progress とは別経路。単体テストでファイル生成・heartbeat・Grok NDJSON の tool 要約は確認済み。実 CLI を `Get-Content -Wait` で追う観測は人手確認待ち。durable job 化は対象外。
+Codex UI 上の逐次本文表示は引き続き部分成立 / 人手確認待ち。Facade は invocation ごとに `%USERPROFILE%\.codex-agent-facade\runs\` へ `{runId}.events.jsonl` と `{runId}.log` を書く（`CODEX_AGENT_FACADE_LOG_DIR` で上書き可）。MCP progress とは別経路。単体テストでファイル生成・heartbeat・Grok NDJSON の tool 要約は確認済み。実 CLI を `Get-Content -Wait` で追う観測は人手確認待ち。durable job 化は対象外。

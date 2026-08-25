@@ -188,17 +188,29 @@ internal sealed class GrokStreamAccumulator
 
         _jsonEventCount++;
         var type = CliJson.FindFirstString(root, "type") ?? "unknown";
-        _runLog.WriteAgentEvent(type, root, GrokBuildHumanSummary.Format(type, root));
-
-        if (string.Equals(type, "text", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(type, "thought", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(type, "text", StringComparison.OrdinalIgnoreCase))
         {
+            _runLog.WriteAgentEvent(type, root, humanSummary: null);
             var chunk = ReadDataString(root);
             if (!string.IsNullOrEmpty(chunk))
             {
-                _text.Append(chunk);
+                var kind = string.Equals(type, "thought", StringComparison.OrdinalIgnoreCase)
+                    ? "thought"
+                    : "assistant";
+                _runLog.AppendHumanFragment(kind, chunk);
+                if (string.Equals(type, "text", StringComparison.OrdinalIgnoreCase))
+                {
+                    _text.Append(chunk);
+                }
             }
         }
-        else if (string.Equals(type, "end", StringComparison.OrdinalIgnoreCase))
+        else
+        {
+            _runLog.WriteAgentEvent(type, root, GrokBuildHumanSummary.Format(type, root));
+        }
+
+        if (string.Equals(type, "end", StringComparison.OrdinalIgnoreCase))
         {
             _sessionId = CliJson.FindExplicitSessionId(root) ?? _sessionId;
         }
