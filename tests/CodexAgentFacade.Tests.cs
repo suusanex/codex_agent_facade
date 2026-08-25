@@ -1112,6 +1112,44 @@ public class AgentRunLogTests
     }
 
     [Fact]
+    public async Task DoesNotTreatSplitCrLfAsTwoNewlines()
+    {
+        await using var log = (AgentRunLog)TestRunLogs.CreateLog();
+        WriteThoughtEvent(log, "hello\r");
+        Assert.Empty(HumanLines(TestRunLogs.ReadShared(log.TextLogPath), "thought:"));
+
+        WriteThoughtEvent(log, "\nworld");
+        var text = TestRunLogs.ReadShared(log.TextLogPath);
+        var thoughtLines = HumanLines(text, "thought:");
+        Assert.Single(thoughtLines);
+        Assert.Contains("thought: hello", thoughtLines[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("thought: \n", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("thought:\n", text, StringComparison.Ordinal);
+        Assert.False(thoughtLines.Any(line => line.TrimEnd().EndsWith("thought:", StringComparison.Ordinal)));
+
+        await log.DisposeAsync();
+        thoughtLines = HumanLines(TestRunLogs.ReadShared(log.TextLogPath), "thought:");
+        Assert.Equal(2, thoughtLines.Count);
+        Assert.Contains("thought: world", thoughtLines[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RemainderAfterNewlineUsesCurrentFragmentTimestamp()
+    {
+        var time = new FakeTimeProvider(new DateTimeOffset(2026, 8, 26, 12, 0, 0, TimeSpan.Zero));
+        await using var log = (AgentRunLog)TestRunLogs.CreateLog(time);
+        WriteThoughtEvent(log, "aaa");
+        time.Advance(TimeSpan.FromSeconds(5));
+        WriteThoughtEvent(log, "bbb\nccc");
+        await log.DisposeAsync();
+
+        var thoughtLines = HumanLines(TestRunLogs.ReadShared(log.TextLogPath), "thought:");
+        Assert.Equal(2, thoughtLines.Count);
+        Assert.StartsWith("2026-08-26T12:00:00.000Z thought: aaabbb", thoughtLines[0], StringComparison.Ordinal);
+        Assert.StartsWith("2026-08-26T12:00:05.000Z thought: ccc", thoughtLines[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task FlushesHumanFragmentsWhenKindChanges()
     {
         await using var log = (AgentRunLog)TestRunLogs.CreateLog();
@@ -1329,6 +1367,22 @@ public class AgentRunLogDirectoryTests
                 Assert.Equal(expected, AgentRunLogFactory.GetDefaultLogDirectory());
             }
         }
+    }
+
+    [Fact]
+    public void NormalizeLogDirectoryDoesNotKeepWindowsDriveRelativePaths()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var expected = Path.GetFullPath(
+            Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "logs"));
+        Assert.Equal(expected, AgentRunLogFactory.NormalizeLogDirectory("C:logs"));
+        Assert.Equal(expected, AgentRunLogFactory.NormalizeLogDirectory(@"\logs"));
     }
 
     [Fact]

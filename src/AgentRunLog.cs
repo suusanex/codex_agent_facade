@@ -84,14 +84,33 @@ public sealed class AgentRunLogFactory : IAgentRunLogFactory
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         var expanded = Environment.ExpandEnvironmentVariables(path.Trim());
-        if (!Path.IsPathRooted(expanded))
+        if (!Path.IsPathFullyQualified(expanded))
         {
             expanded = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                expanded);
+                ToUserProfileRelativePath(expanded));
         }
 
         return Path.GetFullPath(expanded);
+    }
+
+    /// <summary>
+    /// Windows の <c>C:logs</c> や <c>\logs</c> は rooted だがカレントドライブ依存なので、UserProfile 配下の相対パスへ直す。
+    /// </summary>
+    internal static string ToUserProfileRelativePath(string path)
+    {
+        var relative = path;
+        if (Path.IsPathRooted(relative))
+        {
+            if (relative.Length >= 2 && char.IsAsciiLetter(relative[0]) && relative[1] == ':')
+            {
+                relative = relative[2..];
+            }
+
+            relative = relative.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        }
+
+        return string.IsNullOrEmpty(relative) ? "." : relative;
     }
 
     public IAgentRunLog Start(AgentRunRequest request)
@@ -412,35 +431,36 @@ internal sealed class AgentRunLog : IAgentRunLog
             _fragmentKind = kind;
         }
 
+        var now = _timeProvider.GetUtcNow();
         if (_fragmentBuffer.Length == 0)
         {
-            _fragmentStartedAt = _timeProvider.GetUtcNow();
+            _fragmentStartedAt = now;
         }
 
+        var pendingCarriageReturn = _fragmentBuffer.Length > 0 && _fragmentBuffer[^1] == '\r';
         _fragmentBuffer.Append(text);
-        FlushCompleteFragmentLinesLocked();
+        if (pendingCarriageReturn || ContainsNewline(text))
+        {
+            FlushCompleteFragmentLinesLocked(now);
+        }
+
         if (_fragmentBuffer.Length >= MaxFragmentBufferChars)
         {
             FlushHumanFragmentsLocked();
         }
     }
 
-    private void FlushCompleteFragmentLinesLocked()
+    private void FlushCompleteFragmentLinesLocked(DateTimeOffset fragmentReceivedAt)
     {
-        while (true)
+        while (TryFindCompleteNewline(_fragmentBuffer, out var index, out var skip))
         {
-            var buffer = _fragmentBuffer.ToString();
-            var newline = IndexOfNewline(buffer);
-            if (newline < 0)
-            {
-                return;
-            }
-
-            var line = buffer[..newline];
-            var skip = NewlineLength(buffer, newline);
+            var line = _fragmentBuffer.ToString(0, index);
             WriteFragmentLineLocked(line);
-            _fragmentBuffer.Clear();
-            _fragmentBuffer.Append(buffer[(newline + skip)..]);
+            _fragmentBuffer.Remove(0, index + skip);
+            if (_fragmentBuffer.Length > 0)
+            {
+                _fragmentStartedAt = fragmentReceivedAt;
+            }
         }
     }
 
@@ -452,7 +472,16 @@ internal sealed class AgentRunLog : IAgentRunLog
             return;
         }
 
-        WriteFragmentLineLocked(_fragmentBuffer.ToString());
+        if (_fragmentBuffer[^1] == '\r')
+        {
+            _fragmentBuffer.Remove(_fragmentBuffer.Length - 1, 1);
+        }
+
+        if (_fragmentBuffer.Length > 0)
+        {
+            WriteFragmentLineLocked(_fragmentBuffer.ToString());
+        }
+
         _fragmentBuffer.Clear();
         _fragmentKind = null;
     }
@@ -470,31 +499,44 @@ internal sealed class AgentRunLog : IAgentRunLog
         _textWriter.Flush();
     }
 
-    private static int IndexOfNewline(string text)
+    private static bool ContainsNewline(string text)
     {
-        var n = text.IndexOf('\n');
-        var r = text.IndexOf('\r');
-        if (n < 0)
-        {
-            return r;
-        }
-
-        if (r < 0)
-        {
-            return n;
-        }
-
-        return Math.Min(n, r);
+        return text.AsSpan().IndexOfAny('\r', '\n') >= 0;
     }
 
-    private static int NewlineLength(string text, int index)
+    /// <summary>
+    /// 末尾の単独 <c>\r</c> は次 fragment が <c>\n</c> かどうか分かるまで改行とみなさない。
+    /// </summary>
+    private static bool TryFindCompleteNewline(StringBuilder buffer, out int index, out int skip)
     {
-        if (text[index] == '\r' && index + 1 < text.Length && text[index + 1] == '\n')
+        for (var i = 0; i < buffer.Length; i++)
         {
-            return 2;
+            var c = buffer[i];
+            if (c == '\n')
+            {
+                index = i;
+                skip = 1;
+                return true;
+            }
+
+            if (c != '\r')
+            {
+                continue;
+            }
+
+            if (i + 1 >= buffer.Length)
+            {
+                break;
+            }
+
+            index = i;
+            skip = buffer[i + 1] == '\n' ? 2 : 1;
+            return true;
         }
 
-        return 1;
+        index = -1;
+        skip = 0;
+        return false;
     }
 
     private async Task RunHeartbeatAsync(CancellationToken cancellationToken)
