@@ -14,17 +14,25 @@ Codex / Facade は planner や orchestrator にならない。ユーザーの pr
 
 ## 起動
 
+Facade は Codex の子プロセスとしては起動しない。先に 1 プロセスを立て、複数の Codex thread がその loopback endpoint を共有する。
+
+ユーザー環境に Bearer token を置く。空だと起動に失敗する。
+
 ```powershell
+[System.Environment]::SetEnvironmentVariable("CODEX_AGENT_FACADE_TOKEN", "<secret>", "User")
+$env:CODEX_AGENT_FACADE_TOKEN = "<secret>"
 dotnet run --file src/CodexAgentFacade.cs
 ```
 
-stdio MCP server として起動する。ログは stderr へ出す。
+既定の listen 先は `http://127.0.0.1:18765/mcp`。`127.0.0.1` のみに bind する。ポートを変える場合は `CODEX_AGENT_FACADE_PORT` と Codex 側の `url` を同じ値に揃える。ログは stderr へ出す。token はログに出さない。
 
-ビルド確認だけする場合:
+`dotnet publish` した exe でもよい。exe を使う場合は成果物フォルダごと配置し、ソースツリーは不要。
 
 ```powershell
 dotnet publish src/CodexAgentFacade.cs
 ```
+
+ポートが既に使われている場合は別ポートへ逃げず、起動失敗する。
 
 ## Codex への接続
 
@@ -36,38 +44,22 @@ dotnet publish src/CodexAgentFacade.cs
 
 `run_agent` は長時間の同期実行になる。`direct_only_tool_namespaces` を指定しないと、Codex 側が進捗確認とタイムアウトを行い、期待どおり完了しない。`tool_timeout_sec` の既定は 60 秒なので、agent 実行向けに延長する。いずれもホスト側設定であり、Facade の迂回実装ではない。
 
-実機で確認した設定（`command` / `cwd` は配置先に置き換える）:
+Facade を再起動したあと、Codex が自動 reconnect するとは限らない。その場合は既存 thread を捨てず、Codex 側の MCP refresh / reconnect を行う。
 
 ```toml
 [features.code_mode]
 direct_only_tool_namespaces = ["mcp__codex_agent_facade"]
 
 [mcp_servers.codex_agent_facade]
-command = "C:/path/to/CodexAgentFacade/CodexAgentFacade.exe"
-args = []
-cwd = "C:/path/to/CodexAgentFacade"
-startup_timeout_sec = 120
+url = "http://127.0.0.1:18765/mcp"
+bearer_token_env_var = "CODEX_AGENT_FACADE_TOKEN"
+startup_timeout_sec = 30
 tool_timeout_sec = 1800
 default_tools_approval_mode = "auto"
 enabled = true
 ```
 
-`command` は `dotnet run --file` でも、`dotnet publish` した `CodexAgentFacade.exe` でもよい。exe を使う場合は成果物フォルダごと配置し、ソースツリーは不要。
-
-開発時に `dotnet run --file` で起動する例（`[features.code_mode]` は同じ）:
-
-```toml
-[mcp_servers.codex_agent_facade]
-command = "dotnet"
-args = ["run", "--file", "C:/path/to/codex_agent_facade/src/CodexAgentFacade.cs"]
-cwd = "C:/path/to/codex_agent_facade"
-startup_timeout_sec = 120
-tool_timeout_sec = 1800
-default_tools_approval_mode = "auto"
-enabled = true
-```
-
-Codex App では設定を保存したあと Restart する。
+`url` は `localhost` ではなく `127.0.0.1` を使う。Codex App では設定を保存したあと Restart する。
 
 ## MCP tool
 
@@ -186,6 +178,8 @@ PoC の成果物は実装に加え、成立 / 不可の記録である。`docs/p
 
 ## 人手での作業が必要
 
+- `CODEX_AGENT_FACADE_TOKEN` をユーザー環境に設定し、Facade プロセスを事前起動する
 - GitHub Copilot CLI と Grok Build CLI へのログイン
-- Codex への MCP 登録（`enabled = true`、`direct_only_tool_namespaces`、`tool_timeout_sec` 延長）
-- Desktop Codex App の composer / 完了通知 / 別 thread 並行（Codex CLI 0.149.0 からの MCP `run_agent` 往復は確認済み）
+- Codex への MCP 登録（`url`、`bearer_token_env_var`、`enabled = true`、`direct_only_tool_namespaces`、`tool_timeout_sec` 延長）
+- Facade 再起動後に自動 reconnect しない場合の、同一 thread 上での MCP refresh / reconnect
+- Desktop Codex App の composer / 完了通知 / 別 thread 並行（Codex CLI 0.149.0 からの MCP `run_agent` 往復は確認済み。HTTP 移行後の実機確認は `docs/poc-observations.md`）

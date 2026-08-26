@@ -2,7 +2,7 @@
 
 `$github-copilot` は、Codex thread の本文を Codex Agent Facade の MCP tool `run_agent` 経由で GitHub Copilot CLI へ渡す Skill です。
 
-MCP server 本体はこの package に含まれません。Facade の publish 成果物と `~/.codex/config.toml` は OS user 単位で別に設定します。必須項目（`enabled = true`、`direct_only_tool_namespaces` など）はリポジトリ root の README「Codex への接続」を参照してください。
+MCP server 本体はこの package に含まれません。Facade の publish 成果物と `~/.codex/config.toml` は OS user 単位で別に設定します。必須項目（`url`、`bearer_token_env_var`、`enabled = true`、`direct_only_tool_namespaces` など）はリポジトリ root の README「Codex への接続」を参照してください。
 
 ## Install
 

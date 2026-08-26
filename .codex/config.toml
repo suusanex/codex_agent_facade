@@ -1,9 +1,14 @@
 # このファイルは Codex が MCP server を発見するためのプロジェクト設定。
+# Facade は事前起動した loopback HTTP endpoint を共有する。
 # tool_timeout_sec の延長はホスト側設定であり、Facade の迂回ではない。
 
+[features.code_mode]
+direct_only_tool_namespaces = ["mcp__codex_agent_facade"]
+
 [mcp_servers.codex_agent_facade]
-command = "dotnet"
-args = ["run", "--file", "src/CodexAgentFacade.cs"]
-startup_timeout_sec = 120
+url = "http://127.0.0.1:18765/mcp"
+bearer_token_env_var = "CODEX_AGENT_FACADE_TOKEN"
+startup_timeout_sec = 30
 tool_timeout_sec = 1800
 default_tools_approval_mode = "auto"
+enabled = true
