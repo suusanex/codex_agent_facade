@@ -68,6 +68,24 @@ Grok Build 固有:
 
 - Skill 変換、session フラグ、JSON スキーマ、permission モデル、ACP
 
+## Streamable HTTP（issue #7）
+
+stdio をやめ、固定 loopback の stateless Streamable HTTP を標準 transport にした。Facade process は Codex thread の lifetime から分離する。外部 agent の継続状態は従来どおり各 CLI の `session_id` / `--resume` に置き、Facade 内に durable session store は持たない。
+
+単体テスト（実 `copilot` / `grok` なし）:
+
+- `127.0.0.1` のみ listen
+- Bearer token 必須（欠落・不一致は 401）
+- 不正 Host は拒否
+- 複数 MCP client が 1 host を共有し、session header 無しで `run_agent` できる
+
+人手確認待ち（Codex App / CLI 実機）:
+
+- 複数 Codex thread から同じ `http://127.0.0.1:18765/mcp` を使っても Facade process が増えない
+- Facade を kill → 同じ port で再起動したあと、**既存 thread を捨てずに** MCP refresh / reconnect できる
+- 復旧後に同じ `session_id` で `--resume` できる
+- HTTP server 再起動成功と Codex 側の自動 reconnect は別問題として記録する（`openai/codex#22571`）
+
 ## Run log（issue #4）
 
 Codex UI 上の逐次本文表示は引き続き部分成立 / 人手確認待ち。Facade は invocation ごとに `%USERPROFILE%\.codex-agent-facade\runs\` へ `{runId}.events.jsonl` と `{runId}.log` を書く（`CODEX_AGENT_FACADE_LOG_DIR` で上書き可）。MCP progress とは別経路。単体テストでファイル生成・heartbeat・Grok NDJSON の tool 要約は確認済み。実 CLI を `Get-Content -Wait` で追う観測は人手確認待ち。durable job 化は対象外。

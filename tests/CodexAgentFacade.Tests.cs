@@ -1,3 +1,4 @@
+#:sdk Microsoft.NET.Sdk.Web
 #:property TargetFramework=net10.0
 #:property Nullable=enable
 #:property ImplicitUsings=enable
@@ -6,18 +7,27 @@
 #:property NoWarn=CA2266
 #:package Ardalis.SingleFileTestRunner.xUnitV3@1.1.0
 #:package Microsoft.Extensions.TimeProvider.Testing@9.0.0
+#:package ModelContextProtocol.AspNetCore@2.2.0
 #:include ../src/AgentFacade.cs
 #:include ../src/ProcessRunner.cs
 #:include ../src/AgentRunLog.cs
 #:include ../src/SecretRedactor.cs
 #:include ../src/GitHubCopilotDriver.cs
 #:include ../src/GrokBuildDriver.cs
+#:include ../src/AgentTools.cs
+#:include ../src/McpHttpHost.cs
 
 using System.Diagnostics;
+using System.Net;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using Ardalis.SingleFileTestRunner;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.Time.Testing;
+using ModelContextProtocol.Client;
+using ModelContextProtocol.Protocol;
 using Xunit;
 
 return await TestRunner.RunTestsAsync();
@@ -55,11 +65,14 @@ public sealed class RecordingProcessRunner : IProcessRunner
     public ProcessRunRequest? LastRequest { get; private set; }
     public ProcessRunResult Result { get; set; } = new(0, "{}", "");
     public Exception? ExceptionToThrow { get; set; }
+    private int _callCount;
+    public int CallCount => _callCount;
     public StubProcessLifetime ProcessLifetime { get; } = new();
 
     public Task<ProcessRunResult> RunAsync(ProcessRunRequest request, CancellationToken cancellationToken)
     {
         LastRequest = request;
+        Interlocked.Increment(ref _callCount);
         cancellationToken.ThrowIfCancellationRequested();
         if (ExceptionToThrow is not null)
         {
@@ -1452,6 +1465,260 @@ public class SecretRedactorTests
         Assert.DoesNotContain("literal-secret", redacted, StringComparison.Ordinal);
         Assert.Contains("\"apiKey\":\"" + SecretRedactor.Replacement + "\"", redacted, StringComparison.Ordinal);
         Assert.Contains("src/main.rs", redacted, StringComparison.Ordinal);
+    }
+}
+
+public class McpHttpHostTests
+{
+    private static readonly object EnvironmentLock = new();
+
+    [Fact]
+    public void FromEnvironmentThrowsWhenTokenIsMissing()
+    {
+        lock (EnvironmentLock)
+        {
+            using (OverrideEnv(McpHttpHost.TokenEnvironmentVariable, null))
+            using (OverrideEnv(McpHttpHost.PortEnvironmentVariable, null))
+            {
+                var ex = Assert.Throws<InvalidOperationException>(McpHttpHost.FromEnvironment);
+                Assert.Contains(McpHttpHost.TokenEnvironmentVariable, ex.Message, StringComparison.Ordinal);
+            }
+        }
+    }
+
+    [Fact]
+    public void FromEnvironmentThrowsWhenPortIsInvalid()
+    {
+        lock (EnvironmentLock)
+        {
+            using (OverrideEnv(McpHttpHost.TokenEnvironmentVariable, "secret"))
+            using (OverrideEnv(McpHttpHost.PortEnvironmentVariable, "0"))
+            {
+                var ex = Assert.Throws<ArgumentException>(McpHttpHost.FromEnvironment);
+                Assert.Contains(McpHttpHost.PortEnvironmentVariable, ex.Message, StringComparison.Ordinal);
+            }
+        }
+    }
+
+    [Fact]
+    public void FromEnvironmentUsesDefaultPort()
+    {
+        lock (EnvironmentLock)
+        {
+            using (OverrideEnv(McpHttpHost.TokenEnvironmentVariable, "secret"))
+            using (OverrideEnv(McpHttpHost.PortEnvironmentVariable, null))
+            {
+                var options = McpHttpHost.FromEnvironment();
+                Assert.Equal("secret", options.Token);
+                Assert.Equal(McpHttpHost.DefaultPort, options.Port);
+            }
+        }
+    }
+
+    [Fact]
+    public void CreateThrowsWhenTokenIsBlank()
+    {
+        var ex = Assert.Throws<ArgumentException>(() => McpHttpHost.Create(
+            [],
+            new McpHttpHostOptions { Token = "  ", Port = 0 }));
+        Assert.Contains("Token is required", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task BindsLoopbackOnlyAndServesRunAgent()
+    {
+        await using var session = await McpHttpTestHost.StartAsync();
+        session.Runner.Result = GrokResult("ok", "22222222-2222-2222-2222-222222222222");
+
+        var addresses = session.App.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!;
+        Assert.NotEmpty(addresses.Addresses);
+        Assert.All(addresses.Addresses, address =>
+            Assert.StartsWith("http://127.0.0.1:", address, StringComparison.Ordinal));
+        Assert.DoesNotContain(addresses.Addresses, address =>
+            address.Contains("0.0.0.0", StringComparison.Ordinal)
+            || address.Contains("[::]", StringComparison.OrdinalIgnoreCase));
+
+        await using var client = await session.CreateClientAsync();
+        var payload = await CallRunAgentAsync(client, AgentFacade.GrokBuildAgent, "hello");
+        Assert.Equal(AgentFacade.GrokBuildAgent, payload.Agent);
+        Assert.Equal("ok", payload.OutputText);
+        Assert.Equal("22222222-2222-2222-2222-222222222222", payload.SessionId);
+        Assert.Equal(1, session.Runner.CallCount);
+        Assert.Equal("grok", session.Runner.LastRequest!.FileName);
+    }
+
+    [Fact]
+    public async Task MissingOrInvalidBearerReturns401()
+    {
+        await using var session = await McpHttpTestHost.StartAsync();
+        using var http = new HttpClient();
+
+        var missing = new HttpRequestMessage(HttpMethod.Post, session.Endpoint)
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json"),
+        };
+        missing.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        missing.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+        using (var missingResponse = await http.SendAsync(missing))
+        {
+            Assert.Equal(HttpStatusCode.Unauthorized, missingResponse.StatusCode);
+        }
+
+        var wrong = new HttpRequestMessage(HttpMethod.Post, session.Endpoint)
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json"),
+        };
+        wrong.Headers.Authorization = new AuthenticationHeaderValue("Bearer", "wrong-token");
+        wrong.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        using (var wrongResponse = await http.SendAsync(wrong))
+        {
+            Assert.Equal(HttpStatusCode.Unauthorized, wrongResponse.StatusCode);
+        }
+
+        Assert.Equal(0, session.Runner.CallCount);
+    }
+
+    [Fact]
+    public async Task DisallowedHostIsRejected()
+    {
+        await using var session = await McpHttpTestHost.StartAsync();
+        using var http = new HttpClient();
+        var request = new HttpRequestMessage(HttpMethod.Post, session.Endpoint)
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json"),
+        };
+        request.Headers.Host = "evil.example";
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", session.Token);
+        using var response = await http.SendAsync(request);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(0, session.Runner.CallCount);
+    }
+
+    [Fact]
+    public async Task TwoClientsShareOneHostWithoutSessionHeader()
+    {
+        await using var session = await McpHttpTestHost.StartAsync();
+        session.Runner.Result = GrokResult("hi", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+
+        await using var first = await session.CreateClientAsync();
+        var firstResult = await CallRunAgentAsync(first, AgentFacade.GrokBuildAgent, "one");
+        Assert.Equal("hi", firstResult.OutputText);
+
+        await using var second = await session.CreateClientAsync();
+        var t1 = CallRunAgentAsync(second, AgentFacade.GrokBuildAgent, "two");
+        await using var third = await session.CreateClientAsync();
+        var t2 = CallRunAgentAsync(third, AgentFacade.GrokBuildAgent, "three");
+        await Task.WhenAll(t1, t2);
+
+        Assert.Equal(3, session.Runner.CallCount);
+        Assert.Equal("hi", (await t1).OutputText);
+        Assert.Equal("hi", (await t2).OutputText);
+    }
+
+    private static ProcessRunResult GrokResult(string text, string sessionId)
+    {
+        var stdout = "{\"type\":\"text\",\"data\":" + JsonSerializer.Serialize(text)
+            + "}\n{\"type\":\"end\",\"sessionId\":" + JsonSerializer.Serialize(sessionId) + "}";
+        return new ProcessRunResult(0, stdout, "");
+    }
+
+    private static async Task<AgentRunResult> CallRunAgentAsync(McpClient client, string agent, string prompt)
+    {
+        var call = await client.CallToolAsync(
+            "run_agent",
+            new Dictionary<string, object?>
+            {
+                ["agent"] = agent,
+                ["prompt"] = prompt,
+                ["working_directory"] = Path.GetTempPath(),
+            });
+        Assert.True(call.IsError != true);
+        var text = string.Concat(call.Content.OfType<TextContentBlock>().Select(block => block.Text));
+        var result = JsonSerializer.Deserialize<AgentRunResult>(text, AgentJson.Options);
+        Assert.NotNull(result);
+        return result;
+    }
+
+    private static IDisposable OverrideEnv(string name, string? value)
+    {
+        var previous = Environment.GetEnvironmentVariable(name);
+        Environment.SetEnvironmentVariable(name, value);
+        return new EnvironmentVariableRestore(name, previous);
+    }
+
+    private sealed class EnvironmentVariableRestore : IDisposable
+    {
+        private readonly string _name;
+        private readonly string? _previous;
+
+        public EnvironmentVariableRestore(string name, string? previous)
+        {
+            _name = name;
+            _previous = previous;
+        }
+
+        public void Dispose()
+        {
+            Environment.SetEnvironmentVariable(_name, _previous);
+        }
+    }
+}
+
+internal sealed class McpHttpTestHost
+{
+    public static async Task<McpHttpTestSession> StartAsync()
+    {
+        var runner = new RecordingProcessRunner();
+        var factory = TestRunLogs.CreateFactory();
+        var token = "test-token-" + Guid.NewGuid().ToString("N");
+        var app = McpHttpHost.Create(
+            [],
+            new McpHttpHostOptions
+            {
+                Token = token,
+                Port = 0,
+                ProcessRunner = runner,
+                RunLogFactory = factory,
+            });
+        await app.StartAsync();
+        return new McpHttpTestSession(app, runner, token, McpHttpHost.GetMcpEndpoint(app));
+    }
+}
+
+internal sealed class McpHttpTestSession : IAsyncDisposable
+{
+    public McpHttpTestSession(WebApplication app, RecordingProcessRunner runner, string token, Uri endpoint)
+    {
+        App = app;
+        Runner = runner;
+        Token = token;
+        Endpoint = endpoint;
+    }
+
+    public WebApplication App { get; }
+    public RecordingProcessRunner Runner { get; }
+    public string Token { get; }
+    public Uri Endpoint { get; }
+
+    public Task<McpClient> CreateClientAsync()
+    {
+        var transport = new HttpClientTransport(new HttpClientTransportOptions
+        {
+            Endpoint = Endpoint,
+            TransportMode = HttpTransportMode.StreamableHttp,
+            AdditionalHeaders = new Dictionary<string, string>
+            {
+                ["Authorization"] = "Bearer " + Token,
+            },
+            EnableStandaloneGetStream = false,
+        });
+        return McpClient.CreateAsync(transport);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await App.StopAsync();
+        await App.DisposeAsync();
     }
 }
 
