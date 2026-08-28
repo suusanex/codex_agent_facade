@@ -30,7 +30,6 @@ public sealed class AgentJob
     private string _status = AgentJobStatus.Running;
     private AgentRunResult? _result;
     private string? _error;
-    private DateTimeOffset _lastUpdatedAt;
 
     public AgentJob(string jobId, string requestId, AgentRunRequest request, DateTimeOffset createdAt)
     {
@@ -41,7 +40,6 @@ public sealed class AgentJob
         RequestId = requestId;
         Request = request;
         CreatedAt = createdAt;
-        _lastUpdatedAt = createdAt;
     }
 
     public string JobId { get; }
@@ -134,7 +132,6 @@ public sealed class AgentJob
             _status = status;
             _result = result;
             _error = error;
-            _lastUpdatedAt = DateTimeOffset.UtcNow;
         }
     }
 

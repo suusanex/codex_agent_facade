@@ -374,6 +374,69 @@ public class AgentJobServiceTests
         runner.Gate.TrySetResult(true);
     }
 
+    [Fact]
+    public async Task PersistFailureUnregistersJobSoRetryCanStart()
+    {
+        var parent = Directory.CreateTempSubdirectory("caf-jobs-parent-").FullName;
+        var store = Path.Combine(parent, "jobs");
+        var service = CreateService(out var runner, grokText: "ok", store);
+        Directory.Delete(store, recursive: true);
+        File.WriteAllText(store, "not-a-directory");
+
+        var ex = Assert.ThrowsAny<Exception>(() => service.Start("req-persist-fail", Grok("hello")));
+        Assert.False(ex is ArgumentException);
+        Assert.Equal(0, runner.CallCount);
+
+        File.Delete(store);
+        Directory.CreateDirectory(store);
+        var started = service.Start("req-persist-fail", Grok("hello"));
+        var completed = started.Status == AgentJobStatus.Running
+            ? await WaitAsync(service, started.JobId)
+            : started;
+        Assert.Equal(AgentJobStatus.Completed, completed.Status);
+        Assert.Equal(1, runner.CallCount);
+    }
+
+    [Fact]
+    public async Task CancelWithoutDiskRecordKeepsRequestFingerprint()
+    {
+        var store = Directory.CreateTempSubdirectory("caf-jobs-").FullName;
+        var first = CreateService(out var runner, grokText: "ok", store);
+        runner.Gate = NewGate();
+        var started = first.Start("req-cancel-fp", Grok("hello"));
+        foreach (var file in Directory.EnumerateFiles(store, "req-*.json"))
+        {
+            File.Delete(file);
+        }
+
+        var cancelled = first.Cancel(started.JobId);
+        Assert.Equal(AgentJobStatus.Cancelled, cancelled.Status);
+
+        var second = CreateService(out var runner2, grokText: "other", store);
+        var recovered = second.Start("req-cancel-fp", Grok("hello"));
+        Assert.Equal(started.JobId, recovered.JobId);
+        Assert.Equal(AgentJobStatus.Cancelled, recovered.Status);
+        Assert.Equal(0, runner2.CallCount);
+        runner.Gate.TrySetCanceled();
+        await Task.CompletedTask;
+    }
+
+    [Fact]
+    public async Task TerminalJobIsReloadedFromDiskAfterEviction()
+    {
+        var store = Directory.CreateTempSubdirectory("caf-jobs-").FullName;
+        var service = CreateService(out var runner, grokText: "done", store);
+        var started = service.Start("req-evict", Grok("hello"));
+        var completed = await WaitAsync(service, started.JobId);
+        Assert.Equal(AgentJobStatus.Completed, completed.Status);
+
+        var again = service.Start("req-evict", Grok("hello"));
+        Assert.Equal(started.JobId, again.JobId);
+        Assert.Equal("done", again.Result!.OutputText);
+        Assert.Equal(1, runner.CallCount);
+        Assert.Equal("done", service.Get(started.JobId).Result!.OutputText);
+    }
+
     private static AgentJobService CreateService(out RecordingProcessRunner runner, string grokText, string? storeDirectory = null)
     {
         var facade = AgentFacadeTests.CreateFacade(out runner, out _);
@@ -863,6 +926,20 @@ public class ProcessRunnerTests
     }
 
     [Fact]
+    public async Task JobGuardFailureKillsStartedProcess()
+    {
+        var guard = new ThrowingProcessJobGuard();
+        var runner = new ProcessRunner(guard);
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => runner.RunAsync(
+            new ProcessRunRequest("dotnet", ["--version"], Directory.GetCurrentDirectory()),
+            CancellationToken.None));
+        Assert.Contains("job assign failed", ex.Message, StringComparison.Ordinal);
+        Assert.True(guard.AssignCount >= 1);
+        Assert.True(guard.ProcessId > 0);
+        Assert.True(ProcessHasExited(guard.ProcessId));
+    }
+
+    [Fact]
     public async Task ReportsResolvedLaunchPath()
     {
         ProcessLaunchInfo? launch = null;
@@ -923,6 +1000,38 @@ public class ProcessRunnerTests
             command);
         Assert.Equal("\"a\"\"b\"", WindowsCmd.QuoteArgument("a\"b"));
         Assert.Equal("\"%%PATH%%\"", WindowsCmd.QuoteArgument("%PATH%"));
+    }
+
+    private static bool ProcessHasExited(int processId)
+    {
+        try
+        {
+            var process = Process.GetProcessById(processId);
+            return process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            return true;
+        }
+    }
+}
+
+public sealed class ThrowingProcessJobGuard : IProcessJobGuard
+{
+    public int AssignCount { get; private set; }
+
+    public int ProcessId { get; private set; }
+
+    public IDisposable? Assign(Process process)
+    {
+        ArgumentNullException.ThrowIfNull(process);
+        AssignCount++;
+        ProcessId = process.Id;
+        throw new InvalidOperationException("job assign failed");
     }
 }
 
