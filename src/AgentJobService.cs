@@ -80,7 +80,17 @@ public sealed class AgentJobService
             throw new InvalidOperationException("Failed to register agent job.");
         }
 
-        Persist(ToRecord(created.CreateSnapshot(DefaultPollAfterMs), fingerprint));
+        try
+        {
+            Persist(ToRecord(created.CreateSnapshot(DefaultPollAfterMs), fingerprint));
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            Unregister(created);
+            throw;
+        }
+
         _ = RunWorkerAsync(created, fingerprint);
         return created.CreateSnapshot(DefaultPollAfterMs);
     }
@@ -119,8 +129,8 @@ public sealed class AgentJobService
         {
             live.RequestCancel();
             var snapshot = live.CreateSnapshot(DefaultPollAfterMs);
-            var stored = TryReadByJobId(id);
-            Persist(ToRecord(snapshot, stored?.RequestFingerprint ?? string.Empty));
+            Persist(ToRecord(snapshot, ComputeRequestFingerprint(live.Request)));
+            Evict(live);
             return snapshot;
         }
 
@@ -157,6 +167,24 @@ public sealed class AgentJobService
         }
 
         Persist(ToRecord(job.CreateSnapshot(DefaultPollAfterMs), fingerprint));
+        Evict(job);
+    }
+
+    private void Unregister(AgentJob job)
+    {
+        _byRequestId.TryRemove(job.RequestId, out _);
+        _byJobId.TryRemove(job.JobId, out _);
+        job.Discard();
+    }
+
+    private void Evict(AgentJob job)
+    {
+        if (!job.IsTerminal)
+        {
+            return;
+        }
+
+        Unregister(job);
     }
 
     private AgentJobRecord RecoverStored(AgentJobRecord stored)

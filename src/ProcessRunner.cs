@@ -39,10 +39,31 @@ public sealed record ProcessRunRequest(
 public sealed record ProcessRunResult(int ExitCode, string StandardOutput, string StandardError);
 
 /// <summary>
+/// 起動済み子プロセスを OS の終了保証へ関連付ける。Windows では Job Object。テストでは失敗を注入する。
+/// </summary>
+public interface IProcessJobGuard
+{
+    IDisposable? Assign(Process process);
+}
+
+/// <summary>
 /// UseShellExecute を使わず stdout/stderr を収集する。Windows の .cmd shim は cmd.exe /c で起動する。
 /// </summary>
 public sealed class ProcessRunner : IProcessRunner
 {
+    private readonly IProcessJobGuard _jobGuard;
+
+    public ProcessRunner()
+        : this(OperatingSystem.IsWindows() ? new WindowsKillOnCloseJobGuard() : NullProcessJobGuard.Instance)
+    {
+    }
+
+    public ProcessRunner(IProcessJobGuard jobGuard)
+    {
+        ArgumentNullException.ThrowIfNull(jobGuard);
+        _jobGuard = jobGuard;
+    }
+
     public async Task<ProcessRunResult> RunAsync(ProcessRunRequest request, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(request.FileName);
@@ -76,7 +97,20 @@ public sealed class ProcessRunner : IProcessRunner
         }
 
         process.StandardInput.Close();
-        using var killOnClose = KillOnCloseJob.AssignOrThrow(process);
+        IDisposable? killOnClose = null;
+        try
+        {
+            killOnClose = _jobGuard.Assign(process);
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            TryKill(process);
+            throw;
+        }
+
+        using (killOnClose)
+        {
         request.OnProcessStarted?.Invoke(new ProcessLifetime(process));
 
         await using var killOnCancel = cancellationToken.Register(() =>
@@ -119,6 +153,7 @@ public sealed class ProcessRunner : IProcessRunner
         }
 
         return new ProcessRunResult(process.ExitCode, stdout.ToString(), stderr.ToString());
+        }
     }
 
     private static ProcessStartInfo CreateStartInfo(
@@ -298,6 +333,25 @@ internal static class WindowsCmd
         }
 
         return builder.ToString();
+    }
+}
+
+public sealed class NullProcessJobGuard : IProcessJobGuard
+{
+    public static NullProcessJobGuard Instance { get; } = new();
+
+    public IDisposable? Assign(Process process)
+    {
+        ArgumentNullException.ThrowIfNull(process);
+        return null;
+    }
+}
+
+public sealed class WindowsKillOnCloseJobGuard : IProcessJobGuard
+{
+    public IDisposable? Assign(Process process)
+    {
+        return KillOnCloseJob.AssignOrThrow(process);
     }
 }
 
