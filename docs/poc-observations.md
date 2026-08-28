@@ -77,7 +77,7 @@ stdio をやめ、固定 loopback の stateless Streamable HTTP を標準 transp
 - `127.0.0.1` のみ listen
 - Bearer token 必須（欠落・不一致は 401）
 - 不正 Host は拒否
-- 複数 MCP client が 1 host を共有し、session header 無しで `run_agent` できる
+- 複数 MCP client が 1 host を共有し、session header 無しで `start_agent` / `get_agent_job` できる
 
 人手確認待ち（Codex App / CLI 実機）:
 
@@ -88,4 +88,51 @@ stdio をやめ、固定 loopback の stateless Streamable HTTP を標準 transp
 
 ## Run log（issue #4）
 
-Codex UI 上の逐次本文表示は引き続き部分成立 / 人手確認待ち。Facade は invocation ごとに `%USERPROFILE%\.codex-agent-facade\runs\` へ `{runId}.events.jsonl` と `{runId}.log` を書く（`CODEX_AGENT_FACADE_LOG_DIR` で上書き可）。MCP progress とは別経路。単体テストでファイル生成・heartbeat・Grok NDJSON の tool 要約は確認済み。実 CLI を `Get-Content -Wait` で追う観測は人手確認待ち。durable job 化は対象外。
+Codex UI 上の逐次本文表示は引き続き部分成立 / 人手確認待ち。Facade は invocation ごとに `%USERPROFILE%\.codex-agent-facade\runs\` へ `{runId}.events.jsonl` と `{runId}.log` を書く（`CODEX_AGENT_FACADE_LOG_DIR` で上書き可）。MCP progress とは別経路。単体テストでファイル生成・heartbeat・Grok NDJSON の tool 要約は確認済み。実 CLI を `Get-Content -Wait` で追う観測は人手確認待ち。run log は観測専用のまま。
+
+## Durable job（issue #3）
+
+### 設計判断
+
+Issue 原文は「実装は設計判断のあと」と書いていた。HTTP 化（#7）後も `run_agent` は MCP `tools/call` の CT で CLI process tree を殺す。これはコード上の結合であり、Desktop の別 thread / 通知の人手確認を待たなくても、blocking RPC では接続断・timeout から復旧できない。blocking は採用しない。最小 lifecycle をこの issue で実装する。
+
+| 項目 | 判断 |
+| --- | --- |
+| blocking MCP call | 不採用。`start_agent` と `get_agent_job` に分離する |
+| 最小 contract | 必須 `request_id`、`start_agent` / `get_agent_job` / `cancel_agent_job`。`get` は再実行しない |
+| MCP Tasks | 使わない。Codex 公式 MCP 文書（2026-08-27）は STDIO / Streamable HTTP / Bearer / OAuth / `tool_timeout_sec` のみ。`io.modelcontextprotocol/tasks` の client opt-in は確認できない。C# SDK の `ModelContextProtocol.Extensions.Tasks` は server 側だけあっても、opt-in 無しでは `CreateTaskResult` を返してはならない |
+| process ownership | Codex は Facade を所有しない。Facade process が in-process worker と CLI 子プロセスを所有する。Windows では Job Object の `KILL_ON_JOB_CLOSE` で Facade 終了時に CLI process tree を落とす。独立 worker process は作らない |
+| 永続化 | 実行中 worker はメモリ。`request_id`・jobId・status・terminal result は `%USERPROFILE%\.codex-agent-facade\jobs\`。外部 session は CLI の `session_id` / `--resume`（Facade は第 2 session store にしない） |
+| 再取得 | MCP 切断後は同じ Facade 上で `request_id` 再 start または `jobId` で get。完了 result は disk から再取得できる |
+| crash / 再起動 | 実行中 job は fail-closed で `failed`（facade process exited）。同じ `request_id` で再実行しない。やり直すなら新しい `request_id` |
+| WAITING_FOR_INPUT | 実装しない。PoC #4 どおり現行 CLI は質問待ちプロセスにならない |
+| streaming | MCP progress は短命 RPC には載せない。観測は run log |
+
+将来 Codex が `io.modelcontextprotocol/tasks` を request `_meta` で opt-in するようになったら再評価する。そのときの境界は `AgentJobService`（core lifecycle）と `AgentTools`（MCP adapter）。Driver / ProcessRunner は変えない。
+
+状態の対応（独自 JSON → Tasks）:
+
+| 本実装 | MCP Tasks |
+| --- | --- |
+| `running` | `working` |
+| （未使用） | `input_required` |
+| `completed` | `completed` |
+| `failed` | `failed` |
+| `cancelled` | `cancelled` |
+| `request_id` | 独自。Tasks の taskId は server 生成 |
+
+単体テスト（実 `copilot` / `grok` なし）:
+
+- プロセス完了前に `jobId` を返す
+- 別 MCP client から running を poll できる
+- 同じ `request_id` では CallCount が増えない
+- unknown `jobId` は tool error
+- `cancel_agent_job` が runner CT を cancel する
+- Facade 再起動相当のあと、完了 result を同じ `request_id` で再取得し、実行中だった job は fail-closed で再実行しない
+
+人手確認待ち（Codex App / CLI 実機）:
+
+- `start_agent` の tool result を取り損ねたあと、同じ `request_id` で再試行して同じ `jobId` を得る
+- 接続復旧後に `get_agent_job` で実行中または完了結果を得る
+- 完了後の `session_id` で `--resume` できる
+- Desktop で別 thread へ移っても job が継続する（観測 #6 の残り）

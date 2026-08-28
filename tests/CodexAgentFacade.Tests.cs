@@ -15,6 +15,8 @@
 #:include ../src/GitHubCopilotDriver.cs
 #:include ../src/GrokBuildDriver.cs
 #:include ../src/AgentTools.cs
+#:include ../src/AgentJob.cs
+#:include ../src/AgentJobService.cs
 #:include ../src/McpHttpHost.cs
 
 using System.Diagnostics;
@@ -65,14 +67,17 @@ public sealed class RecordingProcessRunner : IProcessRunner
     public ProcessRunRequest? LastRequest { get; private set; }
     public ProcessRunResult Result { get; set; } = new(0, "{}", "");
     public Exception? ExceptionToThrow { get; set; }
+    public TaskCompletionSource<bool>? Gate { get; set; }
+    public CancellationToken LastCancellationToken { get; private set; }
     private int _callCount;
     public int CallCount => _callCount;
     public StubProcessLifetime ProcessLifetime { get; } = new();
 
-    public Task<ProcessRunResult> RunAsync(ProcessRunRequest request, CancellationToken cancellationToken)
+    public async Task<ProcessRunResult> RunAsync(ProcessRunRequest request, CancellationToken cancellationToken)
     {
         LastRequest = request;
         Interlocked.Increment(ref _callCount);
+        LastCancellationToken = cancellationToken;
         cancellationToken.ThrowIfCancellationRequested();
         if (ExceptionToThrow is not null)
         {
@@ -86,6 +91,13 @@ public sealed class RecordingProcessRunner : IProcessRunner
             request.FileName,
             request.Arguments,
             UsedWindowsCmdWrapper: false));
+
+        if (Gate is not null)
+        {
+            using var registration = cancellationToken.Register(() => Gate.TrySetCanceled(cancellationToken));
+            await Gate.Task.ConfigureAwait(false);
+        }
+
         foreach (var line in SplitLines(Result.StandardOutput))
         {
             request.StdoutLineCallback?.Invoke(line);
@@ -96,7 +108,7 @@ public sealed class RecordingProcessRunner : IProcessRunner
             request.StderrLineCallback?.Invoke(line);
         }
 
-        return Task.FromResult(Result);
+        return Result;
     }
 
     internal static IEnumerable<string> SplitLines(string text)
@@ -202,6 +214,223 @@ public class AgentFacadeTests
         runner = new RecordingProcessRunner();
         factory = TestRunLogs.CreateFactory();
         return new AgentFacade(new GitHubCopilotDriver(runner), new GrokBuildDriver(runner), factory);
+    }
+}
+
+public class AgentJobServiceTests
+{
+    [Fact]
+    public void StartReturnsRunningBeforeProcessCompletes()
+    {
+        var service = CreateService(out var runner, grokText: "ok");
+        runner.Gate = NewGate();
+        var started = service.Start("req-1", Grok("hello"));
+        Assert.Equal(AgentJobStatus.Running, started.Status);
+        Assert.Equal("req-1", started.RequestId);
+        Assert.False(string.IsNullOrWhiteSpace(started.JobId));
+        Assert.Equal(AgentJobService.DefaultPollAfterMs, started.PollAfterMs);
+        Assert.Equal(1, runner.CallCount);
+        runner.Gate.SetResult(true);
+    }
+
+    [Fact]
+    public async Task SameRequestIdDoesNotStartSecondWorker()
+    {
+        var service = CreateService(out var runner, grokText: "ok");
+        runner.Gate = NewGate();
+        var first = service.Start("req-dup", Grok("hello"));
+        var second = service.Start("req-dup", Grok("hello"));
+        Assert.Equal(first.JobId, second.JobId);
+        Assert.Equal(1, runner.CallCount);
+        runner.Gate.SetResult(true);
+        var completed = await WaitAsync(service, first.JobId);
+        Assert.Equal(AgentJobStatus.Completed, completed.Status);
+        Assert.Equal("ok", completed.Result!.OutputText);
+        Assert.Equal(first.JobId, completed.Result.RunId);
+        Assert.Equal(1, runner.CallCount);
+    }
+
+    [Fact]
+    public async Task SameRequestIdWithDifferentPromptFailsAndKeepsOriginalJob()
+    {
+        var service = CreateService(out var runner, grokText: "ok");
+        runner.Gate = NewGate();
+        var first = service.Start("req-conflict", Grok("hello"));
+        var ex = Assert.Throws<ArgumentException>(() => service.Start("req-conflict", Grok("other")));
+        Assert.Contains("already bound", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(1, runner.CallCount);
+        Assert.Equal(AgentJobStatus.Running, service.Get(first.JobId).Status);
+        runner.Gate.SetResult(true);
+        var completed = await WaitAsync(service, first.JobId);
+        Assert.Equal(AgentJobStatus.Completed, completed.Status);
+    }
+
+    [Fact]
+    public async Task ConcurrentSameRequestIdStartsOnce()
+    {
+        var service = CreateService(out var runner, grokText: "ok");
+        runner.Gate = NewGate();
+        var request = Grok("hello");
+        var first = Task.Run(() => service.Start("req-race", request));
+        var second = Task.Run(() => service.Start("req-race", request));
+        await Task.WhenAll(first, second);
+        Assert.Equal(first.Result.JobId, second.Result.JobId);
+        Assert.Equal(1, runner.CallCount);
+        runner.Gate.SetResult(true);
+        await WaitAsync(service, first.Result.JobId);
+    }
+
+    [Fact]
+    public async Task GetIsIdempotentAfterCompletion()
+    {
+        var service = CreateService(out var runner, grokText: "done");
+        var started = service.Start("req-get", Grok("hello"));
+        var first = await WaitAsync(service, started.JobId);
+        var second = service.Get(started.JobId);
+        Assert.Equal(AgentJobStatus.Completed, first.Status);
+        Assert.Equal(first.Result!.OutputText, second.Result!.OutputText);
+        Assert.Equal(1, runner.CallCount);
+    }
+
+    [Fact]
+    public void UnknownJobThrows()
+    {
+        var service = CreateService(out _, grokText: "ok");
+        var ex = Assert.Throws<KeyNotFoundException>(() => service.Get("missing"));
+        Assert.Contains("Unknown job", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EmptyRequestIdThrowsWithoutStarting()
+    {
+        var service = CreateService(out var runner, grokText: "ok");
+        Assert.Throws<ArgumentException>(() => service.Start("  ", Grok("hello")));
+        Assert.Equal(0, runner.CallCount);
+    }
+
+    [Fact]
+    public async Task CancelStopsRunningJob()
+    {
+        var service = CreateService(out var runner, grokText: "ok");
+        runner.Gate = NewGate();
+        var started = service.Start("req-cancel", Grok("hello"));
+        var cancelled = service.Cancel(started.JobId);
+        Assert.Equal(AgentJobStatus.Cancelled, cancelled.Status);
+        await WaitCanceledAsync(runner);
+        var snapshot = service.Get(started.JobId);
+        Assert.Equal(AgentJobStatus.Cancelled, snapshot.Status);
+        Assert.True(runner.LastCancellationToken.IsCancellationRequested);
+    }
+
+    [Fact]
+    public async Task StartDoesNotUseCallerCancellationToken()
+    {
+        var service = CreateService(out var runner, grokText: "ok");
+        runner.Gate = NewGate();
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var started = service.Start("req-ct", Grok("hello"));
+        Assert.Equal(AgentJobStatus.Running, started.Status);
+        Assert.False(runner.LastCancellationToken.IsCancellationRequested);
+        runner.Gate.SetResult(true);
+        var completed = await WaitAsync(service, started.JobId);
+        Assert.Equal(AgentJobStatus.Completed, completed.Status);
+    }
+
+    [Fact]
+    public async Task RestartReturnsCompletedResultForSameRequestId()
+    {
+        var store = Directory.CreateTempSubdirectory("caf-jobs-").FullName;
+        var first = CreateService(out var runner, grokText: "once", store);
+        var started = first.Start("req-persist", Grok("hello"));
+        var completed = await WaitAsync(first, started.JobId);
+        Assert.Equal(AgentJobStatus.Completed, completed.Status);
+
+        var second = CreateService(out var runner2, grokText: "other", store);
+        var recovered = second.Start("req-persist", Grok("hello"));
+        Assert.Equal(started.JobId, recovered.JobId);
+        Assert.Equal(AgentJobStatus.Completed, recovered.Status);
+        Assert.Equal("once", recovered.Result!.OutputText);
+        Assert.Equal(0, runner2.CallCount);
+        Assert.Equal("once", second.Get(started.JobId).Result!.OutputText);
+    }
+
+    [Fact]
+    public void RestartDoesNotRerunInterruptedJob()
+    {
+        var store = Directory.CreateTempSubdirectory("caf-jobs-").FullName;
+        var first = CreateService(out var runner, grokText: "live", store);
+        runner.Gate = NewGate();
+        var started = first.Start("req-crash", Grok("hello"));
+        Assert.Equal(AgentJobStatus.Running, started.Status);
+        Assert.Equal(1, runner.CallCount);
+
+        var second = CreateService(out var runner2, grokText: "rerun", store);
+        var recovered = second.Start("req-crash", Grok("hello"));
+        Assert.Equal(started.JobId, recovered.JobId);
+        Assert.Equal(AgentJobStatus.Failed, recovered.Status);
+        Assert.Equal(AgentJobService.InterruptedError, recovered.Error);
+        Assert.Equal(0, runner2.CallCount);
+        runner.Gate.TrySetResult(true);
+    }
+
+    private static AgentJobService CreateService(out RecordingProcessRunner runner, string grokText, string? storeDirectory = null)
+    {
+        var facade = AgentFacadeTests.CreateFacade(out runner, out _);
+        runner.Result = GrokStdout(grokText, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        return new AgentJobService(
+            facade,
+            storeDirectory ?? Directory.CreateTempSubdirectory("caf-jobs-").FullName);
+    }
+
+    private static AgentRunRequest Grok(string prompt)
+    {
+        return new AgentRunRequest(AgentFacade.GrokBuildAgent, prompt, Path.GetTempPath(), null, null);
+    }
+
+    private static ProcessRunResult GrokStdout(string text, string sessionId)
+    {
+        var stdout = "{\"type\":\"text\",\"data\":" + JsonSerializer.Serialize(text)
+            + "}\n{\"type\":\"end\",\"sessionId\":" + JsonSerializer.Serialize(sessionId) + "}";
+        return new ProcessRunResult(0, stdout, "");
+    }
+
+    private static TaskCompletionSource<bool> NewGate()
+    {
+        return new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    private static async Task<AgentJobSnapshot> WaitAsync(AgentJobService service, string jobId)
+    {
+        for (var i = 0; i < 100; i++)
+        {
+            var snapshot = service.Get(jobId);
+            if (snapshot.Status != AgentJobStatus.Running)
+            {
+                return snapshot;
+            }
+
+            await Task.Delay(20);
+        }
+
+        throw new TimeoutException("job did not finish: " + jobId);
+    }
+
+    private static async Task WaitCanceledAsync(RecordingProcessRunner runner)
+    {
+        for (var i = 0; i < 100; i++)
+        {
+            if (runner.LastCancellationToken.CanBeCanceled
+                && runner.LastCancellationToken.IsCancellationRequested
+                && runner.Gate!.Task.IsCompleted)
+            {
+                return;
+            }
+
+            await Task.Delay(20);
+        }
+
+        throw new TimeoutException("runner was not cancelled.");
     }
 }
 
@@ -1525,7 +1754,7 @@ public class McpHttpHostTests
     }
 
     [Fact]
-    public async Task BindsLoopbackOnlyAndServesRunAgent()
+    public async Task BindsLoopbackOnlyAndServesStartAndGet()
     {
         await using var session = await McpHttpTestHost.StartAsync();
         session.Runner.Result = GrokResult("ok", "22222222-2222-2222-2222-222222222222");
@@ -1539,10 +1768,12 @@ public class McpHttpHostTests
             || address.Contains("[::]", StringComparison.OrdinalIgnoreCase));
 
         await using var client = await session.CreateClientAsync();
-        var payload = await CallRunAgentAsync(client, AgentFacade.GrokBuildAgent, "hello");
-        Assert.Equal(AgentFacade.GrokBuildAgent, payload.Agent);
-        Assert.Equal("ok", payload.OutputText);
-        Assert.Equal("22222222-2222-2222-2222-222222222222", payload.SessionId);
+        var started = await CallStartAgentAsync(client, "req-http-1", AgentFacade.GrokBuildAgent, "hello");
+        var payload = await WaitForMcpJobAsync(client, started.JobId);
+        Assert.Equal(AgentJobStatus.Completed, payload.Status);
+        Assert.Equal(AgentFacade.GrokBuildAgent, payload.Result!.Agent);
+        Assert.Equal("ok", payload.Result.OutputText);
+        Assert.Equal("22222222-2222-2222-2222-222222222222", payload.Result.SessionId);
         Assert.Equal(1, session.Runner.CallCount);
         Assert.Equal("grok", session.Runner.LastRequest!.FileName);
     }
@@ -1601,18 +1832,97 @@ public class McpHttpHostTests
         session.Runner.Result = GrokResult("hi", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
 
         await using var first = await session.CreateClientAsync();
-        var firstResult = await CallRunAgentAsync(first, AgentFacade.GrokBuildAgent, "one");
-        Assert.Equal("hi", firstResult.OutputText);
+        var firstStarted = await CallStartAgentAsync(first, "req-share-1", AgentFacade.GrokBuildAgent, "one");
+        var firstResult = await WaitForMcpJobAsync(first, firstStarted.JobId);
+        Assert.Equal("hi", firstResult.Result!.OutputText);
 
         await using var second = await session.CreateClientAsync();
-        var t1 = CallRunAgentAsync(second, AgentFacade.GrokBuildAgent, "two");
+        var t1 = StartAndWaitAsync(second, "req-share-2", AgentFacade.GrokBuildAgent, "two");
         await using var third = await session.CreateClientAsync();
-        var t2 = CallRunAgentAsync(third, AgentFacade.GrokBuildAgent, "three");
+        var t2 = StartAndWaitAsync(third, "req-share-3", AgentFacade.GrokBuildAgent, "three");
         await Task.WhenAll(t1, t2);
 
         Assert.Equal(3, session.Runner.CallCount);
-        Assert.Equal("hi", (await t1).OutputText);
-        Assert.Equal("hi", (await t2).OutputText);
+        Assert.Equal("hi", (await t1).Result!.OutputText);
+        Assert.Equal("hi", (await t2).Result!.OutputText);
+    }
+
+    [Fact]
+    public async Task ReconnectCanPollRunningJob()
+    {
+        await using var session = await McpHttpTestHost.StartAsync();
+        session.Runner.Result = GrokResult("later", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+        session.Runner.Gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        await using var starter = await session.CreateClientAsync();
+        var started = await CallStartAgentAsync(starter, "req-reconnect", AgentFacade.GrokBuildAgent, "hello");
+        Assert.Equal(AgentJobStatus.Running, started.Status);
+
+        await using var recovered = await session.CreateClientAsync();
+        var polled = await CallGetAgentJobAsync(recovered, started.JobId);
+        Assert.Equal(AgentJobStatus.Running, polled.Status);
+        Assert.Equal(started.JobId, polled.JobId);
+        Assert.Equal(1, session.Runner.CallCount);
+
+        session.Runner.Gate.SetResult(true);
+        var completed = await WaitForMcpJobAsync(recovered, started.JobId);
+        Assert.Equal("later", completed.Result!.OutputText);
+    }
+
+    [Fact]
+    public async Task LostStartResultIsRecoveredByRequestId()
+    {
+        await using var session = await McpHttpTestHost.StartAsync();
+        session.Runner.Result = GrokResult("once", "cccccccc-cccc-cccc-cccc-cccccccccccc");
+        session.Runner.Gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        await using var first = await session.CreateClientAsync();
+        var started = await CallStartAgentAsync(first, "req-lost-start", AgentFacade.GrokBuildAgent, "hello");
+
+        await using var retry = await session.CreateClientAsync();
+        var recovered = await CallStartAgentAsync(retry, "req-lost-start", AgentFacade.GrokBuildAgent, "hello");
+        Assert.Equal(started.JobId, recovered.JobId);
+        Assert.Equal(1, session.Runner.CallCount);
+
+        session.Runner.Gate.SetResult(true);
+        var completed = await WaitForMcpJobAsync(retry, recovered.JobId);
+        Assert.Equal("once", completed.Result!.OutputText);
+        Assert.Equal(1, session.Runner.CallCount);
+    }
+
+    [Fact]
+    public async Task UnknownJobIdIsToolError()
+    {
+        await using var session = await McpHttpTestHost.StartAsync();
+        await using var client = await session.CreateClientAsync();
+        var call = await client.CallToolAsync(
+            "get_agent_job",
+            new Dictionary<string, object?> { ["job_id"] = "missing-job" });
+        Assert.True(call.IsError);
+        var text = string.Concat(call.Content.OfType<TextContentBlock>().Select(block => block.Text));
+        Assert.Contains("Unknown job", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CancelAgentJobStopsRunner()
+    {
+        await using var session = await McpHttpTestHost.StartAsync();
+        session.Runner.Result = GrokResult("nope", "dddddddd-dddd-dddd-dddd-dddddddddddd");
+        session.Runner.Gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        await using var client = await session.CreateClientAsync();
+        var started = await CallStartAgentAsync(client, "req-http-cancel", AgentFacade.GrokBuildAgent, "hello");
+        var cancelled = await CallCancelAgentJobAsync(client, started.JobId);
+        Assert.Equal(AgentJobStatus.Cancelled, cancelled.Status);
+
+        for (var i = 0; i < 100 && !session.Runner.LastCancellationToken.IsCancellationRequested; i++)
+        {
+            await Task.Delay(20);
+        }
+
+        Assert.True(session.Runner.LastCancellationToken.IsCancellationRequested);
+        var snapshot = await CallGetAgentJobAsync(client, started.JobId);
+        Assert.Equal(AgentJobStatus.Cancelled, snapshot.Status);
     }
 
     private static ProcessRunResult GrokResult(string text, string sessionId)
@@ -1622,19 +1932,71 @@ public class McpHttpHostTests
         return new ProcessRunResult(0, stdout, "");
     }
 
-    private static async Task<AgentRunResult> CallRunAgentAsync(McpClient client, string agent, string prompt)
+    private static async Task<AgentJobSnapshot> StartAndWaitAsync(
+        McpClient client,
+        string requestId,
+        string agent,
+        string prompt)
+    {
+        var started = await CallStartAgentAsync(client, requestId, agent, prompt);
+        return await WaitForMcpJobAsync(client, started.JobId);
+    }
+
+    private static async Task<AgentJobSnapshot> CallStartAgentAsync(
+        McpClient client,
+        string requestId,
+        string agent,
+        string prompt)
     {
         var call = await client.CallToolAsync(
-            "run_agent",
+            "start_agent",
             new Dictionary<string, object?>
             {
+                ["request_id"] = requestId,
                 ["agent"] = agent,
                 ["prompt"] = prompt,
                 ["working_directory"] = Path.GetTempPath(),
             });
+        return ReadSnapshot(call);
+    }
+
+    private static async Task<AgentJobSnapshot> CallGetAgentJobAsync(McpClient client, string jobId)
+    {
+        var call = await client.CallToolAsync(
+            "get_agent_job",
+            new Dictionary<string, object?> { ["job_id"] = jobId });
+        return ReadSnapshot(call);
+    }
+
+    private static async Task<AgentJobSnapshot> CallCancelAgentJobAsync(McpClient client, string jobId)
+    {
+        var call = await client.CallToolAsync(
+            "cancel_agent_job",
+            new Dictionary<string, object?> { ["job_id"] = jobId });
+        return ReadSnapshot(call);
+    }
+
+    private static async Task<AgentJobSnapshot> WaitForMcpJobAsync(McpClient client, string jobId)
+    {
+        for (var i = 0; i < 100; i++)
+        {
+            var snapshot = await CallGetAgentJobAsync(client, jobId);
+            if (snapshot.Status != AgentJobStatus.Running)
+            {
+                return snapshot;
+            }
+
+            await Task.Delay(20);
+        }
+
+        throw new TimeoutException("job did not finish: " + jobId);
+    }
+
+    private static AgentJobSnapshot ReadSnapshot(CallToolResult call)
+    {
         Assert.True(call.IsError != true);
         var text = string.Concat(call.Content.OfType<TextContentBlock>().Select(block => block.Text));
-        var result = JsonSerializer.Deserialize<AgentRunResult>(text, AgentJson.Options);
+        var result = JsonSerializer.Deserialize<AgentJobSnapshot>(text, AgentJson.Options);
         Assert.NotNull(result);
         return result;
     }
@@ -1679,6 +2041,7 @@ internal sealed class McpHttpTestHost
                 Port = 0,
                 ProcessRunner = runner,
                 RunLogFactory = factory,
+                JobStoreDirectory = Directory.CreateTempSubdirectory("caf-jobs-").FullName,
             });
         await app.StartAsync();
         return new McpHttpTestSession(app, runner, token, McpHttpHost.GetMcpEndpoint(app));

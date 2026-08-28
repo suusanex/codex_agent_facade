@@ -26,6 +26,7 @@ public interface IAgentRunLog : IAsyncDisposable, IDisposable
 public interface IAgentRunLogFactory
 {
     IAgentRunLog Start(AgentRunRequest request);
+    IAgentRunLog Start(AgentRunRequest request, string runId);
 }
 
 public sealed record AgentRunStartedInfo(
@@ -115,11 +116,16 @@ public sealed class AgentRunLogFactory : IAgentRunLogFactory
 
     public IAgentRunLog Start(AgentRunRequest request)
     {
+        return Start(request, CreateRunId(_timeProvider));
+    }
+
+    public IAgentRunLog Start(AgentRunRequest request, string runId)
+    {
         ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         try
         {
             Directory.CreateDirectory(_logDirectory);
-            var runId = CreateRunId(_timeProvider);
             var eventsPath = Path.Combine(_logDirectory, runId + ".events.jsonl");
             var textPath = Path.Combine(_logDirectory, runId + ".log");
             return new AgentRunLog(runId, eventsPath, textPath, _timeProvider);

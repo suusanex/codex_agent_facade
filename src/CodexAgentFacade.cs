@@ -13,6 +13,8 @@
 #:include GitHubCopilotDriver.cs
 #:include GrokBuildDriver.cs
 #:include AgentTools.cs
+#:include AgentJob.cs
+#:include AgentJobService.cs
 #:include McpHttpHost.cs
 
 using System.Diagnostics;
