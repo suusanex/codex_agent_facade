@@ -62,10 +62,13 @@ public sealed class AgentFacade
     public async Task<AgentRunResult> RunAsync(
         AgentRunRequest request,
         Action<string>? onStdoutLine,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? runId = null)
     {
         Validate(request);
-        await using var log = _runLogFactory.Start(request);
+        await using var log = string.IsNullOrWhiteSpace(runId)
+            ? _runLogFactory.Start(request)
+            : _runLogFactory.Start(request, runId);
         try
         {
             var result = request.Agent.Trim() switch
@@ -100,7 +103,7 @@ public sealed class AgentFacade
         }
     }
 
-    private static void Validate(AgentRunRequest request)
+    internal static void Validate(AgentRunRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.Agent))
         {

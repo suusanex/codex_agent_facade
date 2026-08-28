@@ -1,133 +1,94 @@
 using System.ComponentModel;
-using System.Runtime.CompilerServices;
 using System.Text.Json;
 using ModelContextProtocol;
-using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
 /// <summary>
-/// Codex から見える唯一の MCP tool。agent 固有処理は持たない。
+/// Codex から見える MCP tools。agent 固有処理は持たない。
 /// </summary>
 [McpServerToolType]
 public sealed class AgentTools
 {
-    private readonly AgentFacade _facade;
+    private readonly AgentJobService _jobs;
 
-    public AgentTools(AgentFacade facade)
+    public AgentTools(AgentJobService jobs)
     {
-        _facade = facade;
+        _jobs = jobs;
     }
 
-    [McpServerTool(Name = "run_agent"), Description("Run a coding agent (github-copilot or grok-build) with the given prompt and return its response. This facade does not plan or split the task.")]
-    public async Task<string> RunAgent(
+    [McpServerTool(Name = "start_agent"), Description("Start a coding agent job (github-copilot or grok-build) and return a jobId immediately. Pass a caller-generated request_id and reuse it if this result is lost. Poll get_agent_job. This facade does not plan or split the task.")]
+    public string StartAgent(
+        [Description("Caller-generated idempotency key. Reuse the exact same value to recover a lost start_agent result without starting a second agent.")] string request_id,
         [Description("Target agent. github-copilot or grok-build.")] string agent,
         [Description("User prompt forwarded to the selected agent without reinterpretation.")] string prompt,
         [Description("Working directory or worktree for the agent process.")] string working_directory,
         [Description("Existing external agent session id. Omit to start a new session.")] string? session_id = null,
         [Description("Codex-format skill names. Each driver converts them to that agent's native invocation.")] string[]? skills = null,
-        [Description("When true (default), pass the CLI native non-interactive auto-approve flag. Set false to observe question/permission blocking on this same MCP path.")] bool auto_approve = true,
-        IProgress<ProgressNotificationValue>? progress = null,
-        CancellationToken cancellationToken = default)
+        [Description("When true (default), pass the CLI native non-interactive auto-approve flag. Set false to observe question/permission blocking on this same MCP path.")] bool auto_approve = true)
     {
-        PeriodicTimer? heartbeatTimer = null;
-        CancellationTokenSource? heartbeatCts = null;
-        Task heartbeatTask = Task.CompletedTask;
-        var progressCount = new StrongBox<int>(0);
         try
         {
-            var request = new AgentRunRequest(
-                Agent: agent,
-                Prompt: prompt,
-                WorkingDirectory: working_directory,
-                SessionId: session_id,
-                Skills: skills,
-                AutoApprove: auto_approve);
-
-            if (progress is not null)
-            {
-                heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                heartbeatTimer = new PeriodicTimer(AgentRunLog.HeartbeatInterval);
-                heartbeatTask = ReportProgressHeartbeatAsync(heartbeatTimer, progress, progressCount, heartbeatCts.Token);
-            }
-
-            var result = await _facade.RunAsync(
-                request,
-                onStdoutLine: line =>
-                {
-                    var count = Interlocked.Increment(ref progressCount.Value);
-                    progress?.Report(new ProgressNotificationValue
-                    {
-                        Progress = count,
-                        Message = TruncateProgress(line),
-                    });
-                },
-                cancellationToken).ConfigureAwait(false);
-
-            return JsonSerializer.Serialize(result, AgentJson.Options);
-        }
-        catch (OperationCanceledException ex)
-        {
-            CliJson.TraceException(ex);
-            throw;
+            var snapshot = _jobs.Start(
+                request_id,
+                new AgentRunRequest(
+                    Agent: agent,
+                    Prompt: prompt,
+                    WorkingDirectory: working_directory,
+                    SessionId: session_id,
+                    Skills: skills,
+                    AutoApprove: auto_approve));
+            return JsonSerializer.Serialize(snapshot, AgentJson.Options);
         }
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
-            var mcpException = new McpException("run_agent failed. See server traces for details.", ex);
-            CliJson.TraceException(mcpException);
-            throw mcpException;
-        }
-        finally
-        {
-            if (heartbeatCts is not null)
-            {
-                await heartbeatCts.CancelAsync().ConfigureAwait(false);
-            }
-
-            heartbeatTimer?.Dispose();
-            try
-            {
-                await heartbeatTask.ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                CliJson.TraceException(ex);
-                throw;
-            }
-            finally
-            {
-                heartbeatCts?.Dispose();
-            }
+            throw Wrap("start_agent failed. See server traces for details.", ex);
         }
     }
 
-    private static async Task ReportProgressHeartbeatAsync(
-        PeriodicTimer timer,
-        IProgress<ProgressNotificationValue> progress,
-        StrongBox<int> progressCount,
-        CancellationToken cancellationToken)
+    [McpServerTool(Name = "get_agent_job"), Description("Get the status or terminal result of a previously started agent job. Does not start or restart work.")]
+    public string GetAgentJob(
+        [Description("Job id returned by start_agent.")] string job_id)
     {
         try
         {
-            while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
-            {
-                var count = Interlocked.Increment(ref progressCount.Value);
-                progress.Report(new ProgressNotificationValue
-                {
-                    Progress = count,
-                    Message = "heartbeat",
-                });
-            }
+            var snapshot = _jobs.Get(job_id);
+            return JsonSerializer.Serialize(snapshot, AgentJson.Options);
         }
-        catch (OperationCanceledException ex)
+        catch (Exception ex)
         {
             CliJson.TraceException(ex);
+            throw Wrap("get_agent_job failed. See server traces for details.", ex);
         }
     }
 
-    private static string TruncateProgress(string line)
+    [McpServerTool(Name = "cancel_agent_job"), Description("Cancel a running agent job. Terminal jobs are left unchanged.")]
+    public string CancelAgentJob(
+        [Description("Job id returned by start_agent.")] string job_id)
     {
-        const int maxLength = 500;
-        return line.Length <= maxLength ? line : line[..maxLength];
+        try
+        {
+            var snapshot = _jobs.Cancel(job_id);
+            return JsonSerializer.Serialize(snapshot, AgentJson.Options);
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            throw Wrap("cancel_agent_job failed. See server traces for details.", ex);
+        }
+    }
+
+    private static McpException Wrap(string message, Exception exception)
+    {
+        if (exception is ArgumentException or KeyNotFoundException)
+        {
+            var mcpException = new McpException(exception.Message, exception);
+            CliJson.TraceException(mcpException);
+            return mcpException;
+        }
+
+        var wrapped = new McpException(message, exception);
+        CliJson.TraceException(wrapped);
+        return wrapped;
     }
 }

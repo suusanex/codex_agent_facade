@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 
 /// <summary>
@@ -75,6 +76,7 @@ public sealed class ProcessRunner : IProcessRunner
         }
 
         process.StandardInput.Close();
+        using var killOnClose = KillOnCloseJob.AssignOrThrow(process);
         request.OnProcessStarted?.Invoke(new ProcessLifetime(process));
 
         await using var killOnCancel = cancellationToken.Register(() =>
@@ -296,6 +298,143 @@ internal static class WindowsCmd
         }
 
         return builder.ToString();
+    }
+}
+
+/// <summary>
+/// Windows Job Object で KILL_ON_JOB_CLOSE を付け、Facade プロセス終了時に子 CLI も終了させる。
+/// 非 Windows では何もしない。
+/// </summary>
+internal sealed class KillOnCloseJob : IDisposable
+{
+    private const int JobObjectExtendedLimitInformationClass = 9;
+    private const uint JobObjectLimitKillOnJobClose = 0x2000;
+
+    private readonly nint _handle;
+    private int _disposed;
+
+    private KillOnCloseJob(nint handle)
+    {
+        _handle = handle;
+    }
+
+    public static KillOnCloseJob? AssignOrThrow(Process process)
+    {
+        ArgumentNullException.ThrowIfNull(process);
+        if (!OperatingSystem.IsWindows())
+        {
+            return null;
+        }
+
+        var handle = CreateJobObjectW(0, null);
+        if (handle == 0)
+        {
+            throw new InvalidOperationException("Failed to create a Windows job object.");
+        }
+
+        var job = new KillOnCloseJob(handle);
+        try
+        {
+            var info = new JobObjectExtendedLimitInformation
+            {
+                BasicLimitInformation = new JobObjectBasicLimitInformation
+                {
+                    LimitFlags = JobObjectLimitKillOnJobClose,
+                },
+            };
+            var size = Marshal.SizeOf<JobObjectExtendedLimitInformation>();
+            var buffer = Marshal.AllocHGlobal(size);
+            try
+            {
+                Marshal.StructureToPtr(info, buffer, false);
+                if (!SetInformationJobObject(handle, JobObjectExtendedLimitInformationClass, buffer, (uint)size))
+                {
+                    throw new InvalidOperationException("Failed to set KILL_ON_JOB_CLOSE on the Windows job object.");
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+
+            if (!AssignProcessToJobObject(handle, process.Handle))
+            {
+                throw new InvalidOperationException("Failed to assign the child process to the Windows job object.");
+            }
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            job.Dispose();
+            throw;
+        }
+
+        return job;
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
+        if (_handle != 0)
+        {
+            CloseHandle(_handle);
+        }
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern nint CreateJobObjectW(nint jobAttributes, string? name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetInformationJobObject(
+        nint job,
+        int infoClass,
+        nint jobObjectInfo,
+        uint jobObjectInfoLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AssignProcessToJobObject(nint job, nint process);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(nint handle);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JobObjectBasicLimitInformation
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public nuint MinimumWorkingSetSize;
+        public nuint MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public nuint Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IoCounters
+    {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JobObjectExtendedLimitInformation
+    {
+        public JobObjectBasicLimitInformation BasicLimitInformation;
+        public IoCounters IoInfo;
+        public nuint ProcessMemoryLimit;
+        public nuint JobMemoryLimit;
+        public nuint PeakProcessMemoryUsed;
+        public nuint PeakJobMemoryUsed;
     }
 }
 

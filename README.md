@@ -42,7 +42,7 @@ dotnet publish src/CodexAgentFacade.cs
 
 `/mcp` ではこの server を有効化できない。設定ファイルに最初から `enabled = true` を書く。
 
-`run_agent` は長時間の同期実行になる。`direct_only_tool_namespaces` を指定しないと、Codex 側が進捗確認とタイムアウトを行い、期待どおり完了しない。`tool_timeout_sec` の既定は 60 秒なので、agent 実行向けに延長する。いずれもホスト側設定であり、Facade の迂回実装ではない。
+`start_agent` / `get_agent_job` / `cancel_agent_job` は短時間の MCP RPC である。長時間の agent 実行は job として Facade process 内で継続する。`direct_only_tool_namespaces` を指定しないと、Codex 側が進捗確認とタイムアウトを行い、期待どおり完了しない。いずれもホスト側設定であり、Facade の迂回実装ではない。
 
 Facade を再起動したあと、Codex が自動 reconnect するとは限らない。その場合は既存 thread を捨てず、Codex 側の MCP refresh / reconnect を行う。
 
@@ -54,7 +54,7 @@ direct_only_tool_namespaces = ["mcp__codex_agent_facade"]
 url = "http://127.0.0.1:18765/mcp"
 bearer_token_env_var = "CODEX_AGENT_FACADE_TOKEN"
 startup_timeout_sec = 30
-tool_timeout_sec = 1800
+tool_timeout_sec = 60
 default_tools_approval_mode = "auto"
 enabled = true
 ```
@@ -63,10 +63,15 @@ enabled = true
 
 ## MCP tool
 
-公開 tool は `run_agent` のみ。
+公開 tool は `start_agent` / `get_agent_job` / `cancel_agent_job`。blocking な `run_agent` は無い。
+
+作業ごとに呼び出し側が `request_id` を一度生成して保持する。`start_agent` の結果を取り損ねたら、**同じ `request_id`** で再試行する。新しい id で打ち直すと別 job になる。
+
+### `start_agent`
 
 | フィールド | 必須 | 内容 |
 | --- | --- | --- |
+| `request_id` | はい | 呼び出し側が生成する冪等キー。同じ値の再呼び出しは既存 job を返す |
 | `agent` | はい | `github-copilot` または `grok-build` |
 | `prompt` | はい | 対象 agent へ渡す本文。Facade は再構成しない |
 | `working_directory` | はい | 対象 workspace / worktree |
@@ -76,20 +81,53 @@ enabled = true
 
 戻り JSON:
 
+- `jobId`
+- `requestId`
+- `status`（`running` / `completed` / `failed` / `cancelled`）
+- `pollAfterMs`
+
+同じ `request_id` で入力が違う場合は tool error。既存 job は継続する。MCP 接続が切れても job は止まらない。
+
+### `get_agent_job`
+
+| フィールド | 必須 | 内容 |
+| --- | --- | --- |
+| `job_id` | はい | `start_agent` が返した `jobId` |
+
+何度呼んでも agent を再実行しない。不明な `jobId` は tool error。`completed` のとき `result` に次を含む。
+
 - `agent`
 - `sessionId`（CLI が明示した session フィールド、または Copilot の `--resume=` hint。任意 UUID は使わない。読めなければ空）
 - `exitCode`
 - `outputText`
 - `rawOutput`
-- `runId`
+- `runId`（`jobId` と同じ）
 - `eventsLogPath`
 - `textLogPath`
 
-失敗時はフォールバックせず MCP tool error になる。
+`failed` / `cancelled` では `error` を返す。失敗時はフォールバックせず MCP tool error になる。
+
+### `cancel_agent_job`
+
+| フィールド | 必須 | 内容 |
+| --- | --- | --- |
+| `job_id` | はい | `start_agent` が返した `jobId` |
+
+実行中なら CLI process tree を止める。既に完了している job は状態を変えない。MCP 切断だけでは cancel しない。
+
+実行中の worker は Facade process 内にある。Windows では子 CLI を Job Object（`KILL_ON_JOB_CLOSE`）へ入れる。Facade プロセスが落ちると CLI も終了する。独立した worker process は持たない。
+
+`request_id` と terminal な job snapshot は `%USERPROFILE%\.codex-agent-facade\jobs\` へ残す。Facade 再起動後に同じ `request_id` で `start_agent` しても **新しい agent は起動しない**。
+
+- 完了済みなら保存してある result を返す
+- 実行中だった job は fail-closed で `failed`（error: facade process exited）。同じ作業をやり直すときは新しい `request_id` を使う
+- 外部 agent の会話継続は従来どおり completed `result.sessionId` / `--resume`
+
+Codex が `start_agent` の応答だけを取り損ねた場合（Facade は生きている）は、同じ `request_id` で再試行すれば実行中の同じ `jobId` が返る。
 
 ## Run log
 
-Codex UI へのストリーミング表示とは独立して、各 `run_agent` invocation の逐次出力を Facade 専用ディレクトリへ保存する。対象リポジトリの working tree は使わない。durable job 管理（切断後の生存・result 再取得）とは別の観測用ログである。
+Codex UI へのストリーミング表示とは独立して、各 agent job の逐次出力を Facade 専用ディレクトリへ保存する。対象リポジトリの working tree は使わない。run log は観測用であり、`get_agent_job` の代わりにはならない。
 
 既定の保存先:
 
@@ -112,7 +150,7 @@ Codex UI へのストリーミング表示とは独立して、各 `run_agent` i
 Get-Content -Wait "$env:USERPROFILE\.codex-agent-facade\runs\<runId>.log"
 ```
 
-`runId` とパスは tool の戻り JSON に含まれる。heartbeat は 15 秒間隔で、経過時間・process 生存・最後の外部出力からの経過を記録する。出力が無いこととハングは同義ではない。認証情報・credential・token は書き込み前に `[REDACTED]` へ置換する。起動時には PATH 解決後の実行ファイルと、Windows で `.cmd` を `cmd.exe` 経由にしたかどうかも残す。
+`runId` は `jobId` と同じ値である。パスは completed の `result` に含まれる。heartbeat は 15 秒間隔で、経過時間・process 生存・最後の外部出力からの経過を記録する。出力が無いこととハングは同義ではない。認証情報・credential・token は書き込み前に `[REDACTED]` へ置換する。起動時には PATH 解決後の実行ファイルと、Windows で `.cmd` を `cmd.exe` 経由にしたかどうかも残す。
 
 ## 編集対象リポジトリへの Skill 導入
 
@@ -130,7 +168,7 @@ apm install "C:\path\to\codex_agent_facade\apm-packages\github-copilot" --target
 apm install "C:\path\to\codex_agent_facade\apm-packages\grok-build" --target codex,agent-skills
 ```
 
-展開先は `.agents/skills/github-copilot/` と `.agents/skills/grok-build/`。Codex 上では `$github-copilot` / `$grok-build` で本文を外部 agent へ渡す。Skill 無しで `run_agent` を直接呼んでもよい。
+展開先は `.agents/skills/github-copilot/` と `.agents/skills/grok-build/`。Codex 上では `$github-copilot` / `$grok-build` で本文を外部 agent へ渡す。Skill 無しで `start_agent` / `get_agent_job` を直接呼んでもよい。
 
 更新・削除:
 
@@ -180,6 +218,6 @@ PoC の成果物は実装に加え、成立 / 不可の記録である。`docs/p
 
 - `CODEX_AGENT_FACADE_TOKEN` をユーザー環境に設定し、Facade プロセスを事前起動する
 - GitHub Copilot CLI と Grok Build CLI へのログイン
-- Codex への MCP 登録（`url`、`bearer_token_env_var`、`enabled = true`、`direct_only_tool_namespaces`、`tool_timeout_sec` 延長）
+- Codex への MCP 登録（`url`、`bearer_token_env_var`、`enabled = true`、`direct_only_tool_namespaces`）
 - Facade 再起動後に自動 reconnect しない場合の、同一 thread 上での MCP refresh / reconnect
-- Desktop Codex App の composer / 完了通知 / 別 thread 並行（Codex CLI 0.149.0 からの MCP `run_agent` 往復は確認済み。HTTP 移行後の実機確認は `docs/poc-observations.md`）
+- Desktop Codex App の composer / 完了通知 / 別 thread 並行（HTTP 移行後の start/get 実機確認は `docs/poc-observations.md`）
