@@ -24,15 +24,56 @@ $env:CODEX_AGENT_FACADE_TOKEN = "<secret>"
 dotnet run --file src/CodexAgentFacade.cs
 ```
 
-既定の listen 先は `http://127.0.0.1:18765/mcp`。`127.0.0.1` のみに bind する。ポートを変える場合は `CODEX_AGENT_FACADE_PORT` と Codex 側の `url` を同じ値に揃える。ログは stderr へ出す。token はログに出さない。
+既定の listen 先は `http://127.0.0.1:18765/mcp`。`127.0.0.1` のみに bind する。ポートを変える場合は `CODEX_AGENT_FACADE_PORT` と Codex 側の `url` を同じ値に揃える。token はログに出さない。
 
-`dotnet publish` した exe でもよい。exe を使う場合は成果物フォルダごと配置し、ソースツリーは不要。
+`dotnet publish` した exe でもよい。exe を使う場合は成果物フォルダごと配置し、ソースツリーは不要。publish 成果物は WinExe なので、直接起動してもコンソールウィンドウは出ない。
 
 ```powershell
 dotnet publish src/CodexAgentFacade.cs
 ```
 
 ポートが既に使われている場合は別ポートへ逃げず、起動失敗する。
+
+## Server log
+
+server / host 自身の診断ログは run log とは別ファイルへ書く。既定:
+
+```text
+%USERPROFILE%\.codex-agent-facade\server.log
+```
+
+`runs\` と `jobs\` には書かない。Grok / Copilot の stdout や agent run の詳細は従来どおり run log の責務である。
+
+- 既定レベル: `Information` 以上
+- 1 ファイル最大 1 MB
+- archive 最大 4 世代（`server.1.log` 形式。NLog の File.Move archive）
+- 総容量は数 MB 程度で打ち止め
+- 設定はコード固定。外部 `NLog.config` は無い
+
+起動・listen・停止・bind 失敗・token 不備・MCP / ASP.NET Core の警告・エラー・Facade 内部の重要な例外を残す。コンソールや `System.Diagnostics.Trace` には依存しない。
+
+## Windows 常駐（Task Scheduler）
+
+Facade は Windows Service にしない。GitHub Copilot CLI / Grok Build CLI のユーザー認証を使うため、対象ユーザーのログオンセッション内で `CodexAgentFacade.exe` を直接起動する。PowerShell や `Start-Process` の wrapper は不要。
+
+1. `CODEX_AGENT_FACADE_TOKEN` を対象ユーザーのユーザー環境変数として設定する
+2. `dotnet publish src/CodexAgentFacade.cs` したフォルダごと配置する（例: `D:\Tools\Development\CodexAgentFacade\`）
+3. タスク スケジューラで基本タスクではなく「タスクの作成」から登録する
+
+推奨設定:
+
+| 項目 | 値 |
+| --- | --- |
+| セキュリティ オプション | 「ユーザーがログオンしているときのみ実行する」 |
+| トリガー | 対象ユーザーのログオン時 |
+| 操作 | プログラム `D:\Tools\Development\CodexAgentFacade\CodexAgentFacade.exe`。引数なし。開始場所は exe と同じフォルダ |
+| 既に実行中の場合 | 新しいインスタンスを開始しない |
+| 停止条件 | 長時間実行前提なので、タスクを停止する期限は設定しない |
+| 異常終了 | 必要ならタスク スケジューラの再起動機能を使う |
+
+exe は GUI subsystem（WinExe）なので、ログオン時にコンソールウィンドウは出ない。起動・停止・異常終了はタスク スケジューラがプロセスとして追跡する。
+
+人手確認: 配置した `CodexAgentFacade.exe` を直接起動し、コンソールウィンドウが出ないこと、`127.0.0.1:18765` が LISTEN になること、`server.log` が生成されることを確認する。
 
 ## Codex への接続
 
@@ -216,7 +257,8 @@ PoC の成果物は実装に加え、成立 / 不可の記録である。`docs/p
 
 ## 人手での作業が必要
 
-- `CODEX_AGENT_FACADE_TOKEN` をユーザー環境に設定し、Facade プロセスを事前起動する
+- `CODEX_AGENT_FACADE_TOKEN` をユーザー環境に設定し、Facade プロセスを事前起動する（Windows では Task Scheduler から `CodexAgentFacade.exe` を直接起動してよい）
+- 常駐 exe を直接起動したときコンソールウィンドウが出ないことの確認（WinExe。自動テストでは検証しない）
 - GitHub Copilot CLI と Grok Build CLI へのログイン
 - Codex への MCP 登録（`url`、`bearer_token_env_var`、`enabled = true`、`direct_only_tool_namespaces`）
 - Facade 再起動後に自動 reconnect しない場合の、同一 thread 上での MCP refresh / reconnect

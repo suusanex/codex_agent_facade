@@ -163,7 +163,7 @@ public sealed class AgentJobService
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
-            job.Fail("agent job failed. See server traces for details.");
+            job.Fail("agent job failed. See the server log for details.");
         }
 
         Persist(ToRecord(job.CreateSnapshot(DefaultPollAfterMs), fingerprint));

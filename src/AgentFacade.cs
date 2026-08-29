@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
@@ -215,6 +214,6 @@ internal static class CliJson
 
     public static void TraceException(Exception exception)
     {
-        Trace.TraceError(SecretRedactor.RedactText(exception.ToString()));
+        FacadeLog.Exception(exception);
     }
 }

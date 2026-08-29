@@ -86,6 +86,23 @@ stdio をやめ、固定 loopback の stateless Streamable HTTP を標準 transp
 - 復旧後に同じ `session_id` で `--resume` できる
 - HTTP server 再起動成功と Codex 側の自動 reconnect は別問題として記録する（`openai/codex#22571`）
 
+## WinExe / server log / Task Scheduler 常駐
+
+観測日: 2026-08-29。`dotnet publish src/CodexAgentFacade.cs` した `CodexAgentFacade.exe` を直接起動。
+
+| 項目 | 状態 | 根拠 |
+| --- | --- | --- |
+| PE subsystem が Windows GUI（WinExe） | 成立 | Optional Header Subsystem = 2 |
+| 直接起動でコンソールウィンドウが出ない | 成立（この環境） | `MainWindowHandle = 0`。対話デスクトップでの目視は人手確認として README に残す |
+| loopback LISTEN | 成立 | `127.0.0.1:18766` LISTEN（スモークは既定 port を占有しないため 18766） |
+| `server.log` 生成 | 成立 | `%USERPROFILE%\.codex-agent-facade\server.log` に Starting / Listening / Application started |
+| 無認証は 401、token は log に出ない | 成立 | POST `/mcp` が 401。スモーク用 token の平文は `server.log` に無い |
+| start_agent → get_agent_job | 成立 | 実 `grok-build`。`status=completed`、`outputText=pong` |
+| 終了後の再起動 | 成立 | Kill 後に同じ exe を起動し、同じ port が再 LISTEN |
+| agent 詳細が server.log に重複しない | 成立 | Grok の `available_commands` / stdout 断片は `server.log` に無い（run log 側） |
+
+Windows Service 化はしていない。Task Scheduler からの登録自体は人手作業。
+
 ## Run log（issue #4）
 
 Codex UI 上の逐次本文表示は引き続き部分成立 / 人手確認待ち。Facade は invocation ごとに `%USERPROFILE%\.codex-agent-facade\runs\` へ `{runId}.events.jsonl` と `{runId}.log` を書く（`CODEX_AGENT_FACADE_LOG_DIR` で上書き可）。MCP progress とは別経路。単体テストでファイル生成・heartbeat・Grok NDJSON の tool 要約は確認済み。実 CLI を `Get-Content -Wait` で追う観測は人手確認待ち。run log は観測専用のまま。

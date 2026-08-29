@@ -8,10 +8,12 @@
 #:package Ardalis.SingleFileTestRunner.xUnitV3@1.1.0
 #:package Microsoft.Extensions.TimeProvider.Testing@9.0.0
 #:package ModelContextProtocol.AspNetCore@2.2.0
+#:package NLog.Extensions.Logging@6.2.0
 #:include ../src/AgentFacade.cs
 #:include ../src/ProcessRunner.cs
 #:include ../src/AgentRunLog.cs
 #:include ../src/SecretRedactor.cs
+#:include ../src/FacadeLogging.cs
 #:include ../src/GitHubCopilotDriver.cs
 #:include ../src/GrokBuildDriver.cs
 #:include ../src/AgentTools.cs
@@ -27,9 +29,12 @@ using System.Text.Json;
 using Ardalis.SingleFileTestRunner;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
+using NLog.Targets;
 using Xunit;
 
 return await TestRunner.RunTestsAsync();
@@ -1150,9 +1155,8 @@ public class AgentRunLogTests
         const string xai = "xai-supersecrettokenvalue";
         const string basic = "Authorization: Basic dXNlcjpwYXNz";
         const string pem = "-----BEGIN PRIVATE KEY-----\nMIISECRETKEYMATERIAL\n-----END PRIVATE KEY-----";
-        var listener = new CapturingTraceListener();
-        Trace.Listeners.Add(listener);
-        try
+        var capturing = new CapturingLoggerFactory();
+        using (FacadeLog.UseLoggerFactory(capturing))
         {
             var facade = AgentFacadeTests.CreateFacade(out var runner, out var factory);
             runner.Result = new ProcessRunResult(1, "token=" + xai, basic + "\n" + pem);
@@ -1163,9 +1167,9 @@ public class AgentRunLogTests
             Assert.DoesNotContain(xai, ex.Message, StringComparison.Ordinal);
             Assert.DoesNotContain("dXNlcjpwYXNz", ex.Message, StringComparison.Ordinal);
             Assert.DoesNotContain("MIISECRETKEYMATERIAL", ex.Message, StringComparison.Ordinal);
-            Assert.DoesNotContain(xai, listener.Buffer.ToString(), StringComparison.Ordinal);
-            Assert.DoesNotContain("dXNlcjpwYXNz", listener.Buffer.ToString(), StringComparison.Ordinal);
-            Assert.DoesNotContain("MIISECRETKEYMATERIAL", listener.Buffer.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain(xai, capturing.Logger.Buffer.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("dXNlcjpwYXNz", capturing.Logger.Buffer.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("MIISECRETKEYMATERIAL", capturing.Logger.Buffer.ToString(), StringComparison.Ordinal);
 
             var events = TestRunLogs.ReadShared(Directory.GetFiles(factory.LogDirectory, "*.events.jsonl").Single());
             var text = TestRunLogs.ReadShared(Directory.GetFiles(factory.LogDirectory, "*.log").Single());
@@ -1174,10 +1178,6 @@ public class AgentRunLogTests
             Assert.DoesNotContain("dXNlcjpwYXNz", events, StringComparison.Ordinal);
             Assert.DoesNotContain("MIISECRETKEYMATERIAL", events, StringComparison.Ordinal);
             Assert.DoesNotContain(xai, text, StringComparison.Ordinal);
-        }
-        finally
-        {
-            Trace.Listeners.Remove(listener);
         }
     }
 
@@ -1405,20 +1405,15 @@ public class AgentRunLogTests
     [Fact]
     public async Task HeartbeatCancellationIsTraced()
     {
-        var listener = new CapturingTraceListener();
-        Trace.Listeners.Add(listener);
-        try
+        var capturing = new CapturingLoggerFactory();
+        using (FacadeLog.UseLoggerFactory(capturing))
         {
             await using (var log = TestRunLogs.CreateLog())
             {
                 await Task.Delay(20);
             }
 
-            Assert.Contains("OperationCanceledException", listener.Buffer.ToString(), StringComparison.Ordinal);
-        }
-        finally
-        {
-            Trace.Listeners.Remove(listener);
+            Assert.Contains("OperationCanceledException", capturing.Logger.Buffer.ToString(), StringComparison.Ordinal);
         }
     }
 
@@ -2142,6 +2137,7 @@ internal sealed class McpHttpTestHost
         var runner = new RecordingProcessRunner();
         var factory = TestRunLogs.CreateFactory();
         var token = "test-token-" + Guid.NewGuid().ToString("N");
+        var serverLogDirectory = Directory.CreateTempSubdirectory("caf-serverlog-").FullName;
         var app = McpHttpHost.Create(
             [],
             new McpHttpHostOptions
@@ -2151,26 +2147,34 @@ internal sealed class McpHttpTestHost
                 ProcessRunner = runner,
                 RunLogFactory = factory,
                 JobStoreDirectory = Directory.CreateTempSubdirectory("caf-jobs-").FullName,
+                ServerLogDirectory = serverLogDirectory,
             });
         await app.StartAsync();
-        return new McpHttpTestSession(app, runner, token, McpHttpHost.GetMcpEndpoint(app));
+        return new McpHttpTestSession(app, runner, token, McpHttpHost.GetMcpEndpoint(app), serverLogDirectory);
     }
 }
 
 internal sealed class McpHttpTestSession : IAsyncDisposable
 {
-    public McpHttpTestSession(WebApplication app, RecordingProcessRunner runner, string token, Uri endpoint)
+    public McpHttpTestSession(
+        WebApplication app,
+        RecordingProcessRunner runner,
+        string token,
+        Uri endpoint,
+        string serverLogDirectory)
     {
         App = app;
         Runner = runner;
         Token = token;
         Endpoint = endpoint;
+        ServerLogDirectory = serverLogDirectory;
     }
 
     public WebApplication App { get; }
     public RecordingProcessRunner Runner { get; }
     public string Token { get; }
     public Uri Endpoint { get; }
+    public string ServerLogDirectory { get; }
 
     public Task<McpClient> CreateClientAsync()
     {
@@ -2194,17 +2198,191 @@ internal sealed class McpHttpTestSession : IAsyncDisposable
     }
 }
 
-internal sealed class CapturingTraceListener : TraceListener
+internal sealed class CapturingLogger : ILogger
 {
     public StringBuilder Buffer { get; } = new();
 
-    public override void Write(string? message)
+    public IDisposable BeginScope<TState>(TState state)
+        where TState : notnull
     {
-        Buffer.Append(message);
+        return NullScope.Instance;
     }
 
-    public override void WriteLine(string? message)
+    public bool IsEnabled(LogLevel logLevel)
     {
-        Buffer.AppendLine(message);
+        return true;
+    }
+
+    public void Log<TState>(
+        LogLevel logLevel,
+        EventId eventId,
+        TState state,
+        Exception? exception,
+        Func<TState, Exception?, string> formatter)
+    {
+        Buffer.AppendLine(formatter(state, exception));
+        if (exception is not null)
+        {
+            Buffer.AppendLine(exception.ToString());
+        }
+    }
+
+    private sealed class NullScope : IDisposable
+    {
+        public static readonly NullScope Instance = new();
+
+        public void Dispose()
+        {
+        }
+    }
+}
+
+internal sealed class CapturingLoggerFactory : ILoggerFactory
+{
+    public CapturingLogger Logger { get; } = new();
+
+    public void AddProvider(ILoggerProvider provider)
+    {
+    }
+
+    public ILogger CreateLogger(string categoryName)
+    {
+        return Logger;
+    }
+
+    public void Dispose()
+    {
+    }
+}
+
+public class ServerLogTests
+{
+    [Fact]
+    public void DefaultPathIsBesideRunsAndJobs()
+    {
+        var directory = FacadeLogging.GetDefaultDirectory();
+        Assert.Equal(
+            Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "." + AgentRunLogFactory.DefaultProductDirectoryName),
+            directory);
+        Assert.Equal("server.log", FacadeLogging.FileName);
+        Assert.DoesNotContain(
+            Path.DirectorySeparatorChar + "runs",
+            FacadeLogging.GetLogFilePath(directory),
+            StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            Path.DirectorySeparatorChar + "jobs",
+            FacadeLogging.GetLogFilePath(directory),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void RollingLimitsAreConfigured()
+    {
+        var directory = Directory.CreateTempSubdirectory("caf-nlog-cfg-").FullName;
+        var target = FacadeLogging.CreateFileTarget(directory);
+        Assert.Equal(FacadeLogging.ArchiveAboveSizeBytes, target.ArchiveAboveSize);
+        Assert.Equal(1 * 1024 * 1024, target.ArchiveAboveSize);
+        Assert.Equal(FacadeLogging.MaxArchiveFiles, target.MaxArchiveFiles);
+        Assert.InRange(target.MaxArchiveFiles, 3, 5);
+        Assert.Equal(FacadeLogging.ArchiveSuffixFormat, target.ArchiveSuffixFormat);
+        var rendered = target.FileName.Render(new NLog.LogEventInfo());
+        Assert.EndsWith("server.log", rendered, StringComparison.OrdinalIgnoreCase);
+        Assert.NotNull(target.ArchiveFileName);
+        var archiveRendered = target.ArchiveFileName.Render(new NLog.LogEventInfo());
+        Assert.EndsWith("server.log", archiveRendered, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void RollingSettingsCreateBoundedArchives()
+    {
+        var directory = Directory.CreateTempSubdirectory("caf-nlog-roll-").FullName;
+        using var nlog = FacadeLogging.CreateNLogFactory(directory, archiveAboveSizeBytes: 200, maxArchiveFiles: 2);
+        using var loggerFactory = FacadeLogging.CreateLoggerFactory(nlog);
+        var logger = loggerFactory.CreateLogger(FacadeLogging.LoggerCategory);
+        for (var i = 0; i < 80; i++)
+        {
+            logger.LogInformation("rolling-probe-{Index} {Padding}", i, new string('x', 80));
+        }
+
+        nlog.Flush();
+        var files = Directory.GetFiles(directory, "server*.log");
+        Assert.Contains(files, path => string.Equals(Path.GetFileName(path), "server.log", StringComparison.OrdinalIgnoreCase));
+        Assert.True(files.Length > 1);
+        Assert.True(files.Length <= 3);
+        Assert.All(files, path => Assert.True(new FileInfo(path).Length <= 200 * 4));
+    }
+
+    [Fact]
+    public async Task HostWritesInformationAndErrorToServerLogWithoutConsoleOrTrace()
+    {
+        var traceBefore = Trace.Listeners.Cast<TraceListener>().ToArray();
+        await using var session = await McpHttpTestHost.StartAsync();
+        var nlog = session.App.Services.GetRequiredService<NLog.LogFactory>();
+        var logger = session.App.Services.GetRequiredService<ILoggerFactory>().CreateLogger(FacadeLogging.LoggerCategory);
+        logger.LogInformation("host-information-probe");
+        logger.LogError("host-error-probe");
+        nlog.Flush();
+
+        var logPath = FacadeLogging.GetLogFilePath(session.ServerLogDirectory);
+        Assert.True(File.Exists(logPath));
+        var contents = TestRunLogs.ReadShared(logPath);
+        Assert.Contains("host-information-probe", contents, StringComparison.Ordinal);
+        Assert.Contains("host-error-probe", contents, StringComparison.Ordinal);
+
+        Assert.Equal(traceBefore.Length, Trace.Listeners.Count);
+        Assert.DoesNotContain(Trace.Listeners.Cast<TraceListener>(), listener => listener is ConsoleTraceListener);
+    }
+
+    [Fact]
+    public async Task ServerLogDoesNotContainBearerToken()
+    {
+        const string knownSecret = "xai-serverlogsecretvalue99";
+        await using var session = await McpHttpTestHost.StartAsync();
+        using var http = new HttpClient();
+        var missing = new HttpRequestMessage(HttpMethod.Post, session.Endpoint)
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json"),
+        };
+        missing.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        using (await http.SendAsync(missing))
+        {
+        }
+
+        var wrong = new HttpRequestMessage(HttpMethod.Post, session.Endpoint)
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json"),
+        };
+        wrong.Headers.Authorization = new AuthenticationHeaderValue("Bearer", session.Token);
+        wrong.Headers.Host = "evil.example";
+        using (await http.SendAsync(wrong))
+        {
+        }
+
+        CliJson.TraceException(new InvalidOperationException("Authorization: Bearer " + knownSecret));
+        session.App.Services.GetRequiredService<ILoggerFactory>()
+            .CreateLogger(FacadeLogging.LoggerCategory)
+            .LogError("token={Secret}", knownSecret);
+        session.App.Services.GetRequiredService<NLog.LogFactory>().Flush();
+
+        var contents = TestRunLogs.ReadShared(FacadeLogging.GetLogFilePath(session.ServerLogDirectory));
+        Assert.DoesNotContain(session.Token, contents, StringComparison.Ordinal);
+        Assert.DoesNotContain(knownSecret, contents, StringComparison.Ordinal);
+        Assert.Contains(SecretRedactor.Replacement, contents, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task HostStartsWithoutConsoleLoggingProvider()
+    {
+        await using var session = await McpHttpTestHost.StartAsync();
+        var addresses = session.App.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>();
+        Assert.NotNull(addresses);
+        Assert.NotEmpty(addresses.Addresses);
+        var factory = session.App.Services.GetRequiredService<ILoggerFactory>();
+        Assert.NotSame(NullLoggerFactory.Instance, factory);
+        factory.CreateLogger(FacadeLogging.LoggerCategory).LogInformation("startup-without-console");
+        session.App.Services.GetRequiredService<NLog.LogFactory>().Flush();
+        Assert.True(File.Exists(FacadeLogging.GetLogFilePath(session.ServerLogDirectory)));
     }
 }

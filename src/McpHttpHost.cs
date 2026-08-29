@@ -26,6 +26,10 @@ public sealed class McpHttpHostOptions
     public IAgentRunLogFactory? RunLogFactory { get; init; }
 
     public string? JobStoreDirectory { get; init; }
+
+    public string? ServerLogDirectory { get; init; }
+
+    public NLog.LogFactory? LogFactory { get; init; }
 }
 
 /// <summary>
@@ -92,10 +96,11 @@ public static class McpHttpHost
             kestrel.Limits.MinResponseDataRate = null;
             kestrel.Limits.KeepAliveTimeout = TimeSpan.FromHours(2);
         });
-        builder.Logging.AddConsole(logging =>
-        {
-            logging.LogToStandardErrorThreshold = LogLevel.Trace;
-        });
+
+        var logDirectory = options.ServerLogDirectory ?? FacadeLogging.GetDefaultDirectory();
+        var logFactory = options.LogFactory ?? FacadeLogging.CreateNLogFactory(logDirectory);
+        FacadeLogging.Configure(builder.Logging, logFactory);
+        builder.Services.AddSingleton(logFactory);
 
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton<IProcessRunner>(options.ProcessRunner ?? new ProcessRunner());
@@ -130,6 +135,11 @@ public static class McpHttpHost
             .WithTools<AgentTools>();
 
         var app = builder.Build();
+        FacadeLog.SetLoggerFactory(app.Services.GetRequiredService<ILoggerFactory>());
+        app.Lifetime.ApplicationStopped.Register(static () =>
+        {
+            FacadeLog.SetLoggerFactory(Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance);
+        });
         app.UseAuthentication();
         app.UseAuthorization();
         app.MapMcp(McpPath).RequireAuthorization();

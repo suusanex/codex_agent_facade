@@ -42,7 +42,7 @@ public sealed class AgentTools
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
-            throw Wrap("start_agent failed. See server traces for details.", ex);
+            throw Wrap("start_agent failed. See the server log for details.", ex);
         }
     }
 
@@ -58,7 +58,7 @@ public sealed class AgentTools
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
-            throw Wrap("get_agent_job failed. See server traces for details.", ex);
+            throw Wrap("get_agent_job failed. See the server log for details.", ex);
         }
     }
 
@@ -74,7 +74,7 @@ public sealed class AgentTools
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
-            throw Wrap("cancel_agent_job failed. See server traces for details.", ex);
+            throw Wrap("cancel_agent_job failed. See the server log for details.", ex);
         }
     }
 
