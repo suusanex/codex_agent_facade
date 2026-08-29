@@ -974,6 +974,42 @@ public class DevinCliDriverTests
     }
 
     [Fact]
+    public void LooksLikeJsonObjectLineRequiresLeadingBrace()
+    {
+        Assert.False(DevinStreamAccumulator.LooksLikeJsonObjectLine("pong"));
+        Assert.False(DevinStreamAccumulator.LooksLikeJsonObjectLine("[1,2]"));
+        Assert.False(DevinStreamAccumulator.LooksLikeJsonObjectLine("  [1,2]"));
+        Assert.True(DevinStreamAccumulator.LooksLikeJsonObjectLine("""{"type":"assistant"}"""));
+        Assert.True(DevinStreamAccumulator.LooksLikeJsonObjectLine("  {\"type\":\"assistant\"}"));
+        Assert.True(DevinStreamAccumulator.LooksLikeJsonObjectLine("{oops"));
+    }
+
+    [Fact]
+    public async Task MultilinePlainTextDoesNotRequireJson()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(
+                0,
+                "I'll create the DEVIN_SMOKE.txt file.\nDone. Created DEVIN_SMOKE.txt.",
+                ""),
+        };
+        await using var log = TestRunLogs.CreateLog();
+        var result = await new DevinCliDriver(runner).RunAsync(
+            new AgentRunRequest(AgentFacade.DevinCliAgent, "go", Path.GetTempPath(), null, null),
+            log,
+            onStdoutLine: null,
+            CancellationToken.None);
+        var events = TestRunLogs.ReadShared(result.EventsLogPath);
+        Assert.Equal(
+            "I'll create the DEVIN_SMOKE.txt file.\nDone. Created DEVIN_SMOKE.txt.",
+            result.OutputText);
+        Assert.Contains("\"source\":\"process\"", events, StringComparison.Ordinal);
+        Assert.Contains("\"type\":\"stdout\"", events, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"source\":\"agent\"", events, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ParsesJsonSessionAndText()
     {
         var runner = new RecordingProcessRunner

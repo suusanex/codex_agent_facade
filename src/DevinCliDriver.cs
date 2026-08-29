@@ -150,6 +150,7 @@ public sealed class DevinCliDriver
 /// <summary>
 /// Devin <c>--print</c> の stdout を 1 パスで蓄積する。JSON 必須にはしない。
 /// assistant JSON があるときはそれを最終応答とし、無いときだけ plain text を使う。
+/// JSON object に見えない行は Deserialize せず、例外も出さない。
 /// session ID は明示フィールドだけを採用し、任意 UUID や時刻推測は使わない。
 /// </summary>
 internal sealed class DevinStreamAccumulator
@@ -173,6 +174,12 @@ internal sealed class DevinStreamAccumulator
         }
 
         _sawNonWhitespace = true;
+        if (!LooksLikeJsonObjectLine(line))
+        {
+            RecordPlainText(line);
+            return;
+        }
+
         JsonElement root;
         try
         {
@@ -180,16 +187,15 @@ internal sealed class DevinStreamAccumulator
         }
         catch (JsonException ex)
         {
+            // `{` 始まりなのに壊れている行だけを例外として残す。plain text の --print は想定内なので投げない。
             CliJson.TraceException(ex);
-            _runLog.WriteProcessLine("stdout", line);
-            _plainTexts.Add(line);
+            RecordPlainText(line);
             return;
         }
 
         if (root.ValueKind != JsonValueKind.Object)
         {
-            _runLog.WriteProcessLine("stdout", line);
-            _plainTexts.Add(line);
+            RecordPlainText(line);
             return;
         }
 
@@ -201,6 +207,22 @@ internal sealed class DevinStreamAccumulator
         {
             _assistantTexts.Add(assistantText);
         }
+    }
+
+    private void RecordPlainText(string line)
+    {
+        _runLog.WriteProcessLine("stdout", line);
+        _plainTexts.Add(line);
+    }
+
+    /// <summary>
+    /// Devin <c>--print</c> は JSON とは限らない。先頭が <c>{</c> の行だけ JSON として読む。
+    /// それ以外を Deserialize すると JsonException が毎行 error ログになる。
+    /// </summary>
+    internal static bool LooksLikeJsonObjectLine(string line)
+    {
+        var trimmed = line.AsSpan().TrimStart();
+        return trimmed.Length > 0 && trimmed[0] == '{';
     }
 
     public ParsedCliOutput Complete()
