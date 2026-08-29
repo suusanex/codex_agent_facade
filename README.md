@@ -260,6 +260,14 @@ dotnet run --file tests/CodexAgentFacade.Tests.cs
 dotnet run --file src/PocSmoke.cs
 ```
 
+実 Streamable HTTP MCP 経路の Devin スモーク（実 `devin` を呼ぶ。通常テストでは実行しない）:
+
+```powershell
+dotnet run --file src/DevinMcpSmoke.cs
+```
+
+`DevinMcpSmoke.cs` は Facade を別プロセスで起動し、`ModelContextProtocol.Client` から `start_agent` / `get_agent_job` を呼ぶ。Free plan の quota を消費するため、人手で明示実行する。
+
 ## 観測
 
 PoC の成果物は実装に加え、成立 / 不可の記録である。`docs/poc-observations.md` を更新する。
