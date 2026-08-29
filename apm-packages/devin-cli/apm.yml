@@ -1,0 +1,11 @@
+name: devin-cli
+version: 0.1.0
+description: Forward Codex thread work to Devin CLI through the Codex Agent Facade MCP tool
+type: hybrid
+targets:
+  - codex
+  - agent-skills
+includes: auto
+
+dependencies:
+  apm: []

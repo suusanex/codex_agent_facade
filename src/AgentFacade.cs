@@ -43,18 +43,22 @@ public sealed class AgentFacade
 {
     public const string GitHubCopilotAgent = "github-copilot";
     public const string GrokBuildAgent = "grok-build";
+    public const string DevinCliAgent = "devin-cli";
 
     private readonly GitHubCopilotDriver _gitHubCopilot;
     private readonly GrokBuildDriver _grokBuild;
+    private readonly DevinCliDriver _devinCli;
     private readonly IAgentRunLogFactory _runLogFactory;
 
     public AgentFacade(
         GitHubCopilotDriver gitHubCopilot,
         GrokBuildDriver grokBuild,
+        DevinCliDriver devinCli,
         IAgentRunLogFactory runLogFactory)
     {
         _gitHubCopilot = gitHubCopilot;
         _grokBuild = grokBuild;
+        _devinCli = devinCli;
         _runLogFactory = runLogFactory;
     }
 
@@ -76,7 +80,9 @@ public sealed class AgentFacade
                     .ConfigureAwait(false),
                 GrokBuildAgent => await _grokBuild.RunAsync(request, log, onStdoutLine, cancellationToken)
                     .ConfigureAwait(false),
-                _ => throw new ArgumentException($"Unknown agent '{request.Agent}'. Supported agents: {GitHubCopilotAgent}, {GrokBuildAgent}."),
+                DevinCliAgent => await _devinCli.RunAsync(request, log, onStdoutLine, cancellationToken)
+                    .ConfigureAwait(false),
+                _ => throw new ArgumentException($"Unknown agent '{request.Agent}'. Supported agents: {GitHubCopilotAgent}, {GrokBuildAgent}, {DevinCliAgent}."),
             };
 
             var withLogs = result with

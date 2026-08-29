@@ -16,10 +16,10 @@ public sealed class AgentTools
         _jobs = jobs;
     }
 
-    [McpServerTool(Name = "start_agent"), Description("Start a coding agent job (github-copilot or grok-build) and return a jobId immediately. Pass a caller-generated request_id and reuse it if this result is lost. Poll get_agent_job. This facade does not plan or split the task.")]
+    [McpServerTool(Name = "start_agent"), Description("Start a coding agent job (github-copilot, grok-build, or devin-cli) and return a jobId immediately. Pass a caller-generated request_id and reuse it if this result is lost. Poll get_agent_job. This facade does not plan or split the task.")]
     public string StartAgent(
         [Description("Caller-generated idempotency key. Reuse the exact same value to recover a lost start_agent result without starting a second agent.")] string request_id,
-        [Description("Target agent. github-copilot or grok-build.")] string agent,
+        [Description("Target agent. github-copilot, grok-build, or devin-cli.")] string agent,
         [Description("User prompt forwarded to the selected agent without reinterpretation.")] string prompt,
         [Description("Working directory or worktree for the agent process.")] string working_directory,
         [Description("Existing external agent session id. Omit to start a new session.")] string? session_id = null,

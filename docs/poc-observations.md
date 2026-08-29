@@ -153,3 +153,69 @@ Issue 原文は「実装は設計判断のあと」と書いていた。HTTP 化
 - 接続復旧後に `get_agent_job` で実行中または完了結果を得る
 - 完了後の `session_id` で `--resume` できる
 - Desktop で別 thread へ移っても job が継続する（観測 #6 の残り）
+
+## Devin CLI（issue #10）
+
+issue [#10](https://github.com/suusanex/codex_agent_facade/issues/10)。既存 MCP job 経路へ第三 Driver として `devin-cli` を追加する。`devin acp` は使わず `devin --print` から始める。Devin 独自の workspace 管理層は追加しない。
+
+観測日: 2026-08-29  
+環境: Windows。単体テストは実 `devin` なし。公式 CLI 文書（Commands / Permissions / Skills / Self-serve plans）に基づく机上マッピング。
+
+qualification 1 の到達点（blocked）:
+
+- `Get-Command devin` は失敗。PATH に `devin` が無い
+- 公式 Windows 導入 `irm https://static.devin.ai/cli/setup.ps1 | iex` は OS error 5（アクセスが拒否されました）で失敗した。この task から CLI を導入できない
+- そのため `devin --help`、未認証の `devin --print`、Free / 認証境界の実エラー本文は取得できていない
+- 以降の disposable 編集、MCP job 経路、session、Skill はすべて未実施
+
+人手での作業が必要: 十分な権限で Devin CLI を導入し、`devin auth login` する。導入後に残る確認は下記 checklist。
+
+状態の意味は冒頭の定義に従う。
+
+| # | 観測項目 | 状態 | 根拠 |
+| --- | --- | --- | --- |
+| 1 | Codex から `devin-cli` を選び、指定 worktree で作業できるか | 人手確認待ち | Facade routing / stub runner / `start_agent` の agent 識別子は実装済み。この環境に `devin` が無く、実 `devin --print` と Codex App e2e は未実施 |
+| 2 | 既存 job lifecycle / cancel / run log を壊さないか | 部分成立 | 既存 job テストは `DevinCliDriver` を含む `AgentFacade` コンストラクタで維持。実 CLI の cancel は人手確認待ち |
+| 3 | 完了後に最終応答を `get_agent_job` の result として返せるか | 人手確認待ち | Driver は assistant JSON があればそれを、無ければ plain text を `outputText` にする。`--print` の実形式は未確認のため、最終応答の安定抽出は未成立 |
+| 4 | 同一 Devin session を `--resume` で継続できるか | 不可（この環境では未成立） | 引数は `--resume <session_id>`。`--continue` は並列取り違えのため使わない。session ID は明示 JSON フィールドだけ。stdout に ID が無い場合の `--export` は未実装。実出力を見ていないため継続は qualification 未成立 |
+| 5 | `.agents/skills/` を利用した指示ができるか | 人手確認待ち | Driver は Codex Skill 名を `/name` 行へ前置する。実 invoke は未確認 |
+| 6 | `auto_approve` を permission mode へ対応できるか | 実装上の境界 | `true` のとき `--permission-mode dangerous`。`false` のときは付けない（既定 `normal`）。`autonomous` は `--sandbox` 必須で native Windows では使わない。質問待ち橋渡しは作らない |
+| 7 | Free plan / trial で CLI が使えるか | 不可（この環境では未到達） | CLI 導入が OS error 5 で blocked。Free 制限の実エラーは未取得。**作業仮説:** Free の説明に Devin CLI は無く、Pro の quota 説明に Devin CLI がある |
+| 8 | ACP が必要か | 実装上の境界 | 最初の成立条件は `--print` の最終応答と既存 process log。structured event が必要になるまで ACP は導入しない |
+
+### 机上の CLI 変換
+
+```text
+devin --respect-workspace-trust false [--permission-mode dangerous] [--resume <session_id>] --print -- <prompt>
+```
+
+- `--respect-workspace-trust false` は非対話 `--print` が workspace trust prompt を出せないための公式条件。常に付ける
+- working directory は `ProcessRunner` の cwd。`--cwd` は付けない
+- Skill 変換は Grok と同じ `/name` 行だが、共通 runtime にはしない
+- stdout が JSON でなくても成立とする。明示 `sessionId` フィールドだけを session 継続に使う。任意 UUID や `devin list` の時刻差は使わない
+
+単体テスト（実 `devin` なし）:
+
+- `BuildArguments` の non-interactive flags / `auto_approve=false` / `--resume` / Skill 前置
+- Facade が `FileName=devin` へルーティングする
+- plain text stdout と JSON 行の sessionId / text
+- 空 stdout・非 0 exit・任意 UUID を sessionId にしないこと
+
+人手確認待ち（qualification 1 が OS error 5 で blocked。以降は CLI 導入後）:
+
+1. 十分な権限で Devin CLI をインストールし `devin auth login` する。公式スクリプトはこの環境で Access Denied になった
+2. Facade を介さない `devin --print` の最小応答と stdout / stderr 形式。Free で遮られる場合はそのエラー本文を記録する
+3. disposable worktree での小さなファイル編集
+4. 既存 MCP job 経路（`start_agent` / `get_agent_job` / `cancel_agent_job`）で同じ編集と run log
+5. Codex App → MCP → Facade → Devin CLI の e2e
+6. session ID。stdout に明示フィールドが無ければ `--export` を run 固有パスへ足すか、継続不能と確定する。`devin list` と時刻差は使わない
+7. `.agents/skills/` の実 invoke
+8. Free / trial でどこまで通ったか、課金が必要だった境界
+
+有料契約後に残る最小確認（1 が課金で遮られた場合）:
+
+- 非対話 `--print` が最終応答を stdout に出すこと
+- `working_directory`（process cwd）でファイル編集できること
+- `get_agent_job.result.outputText` に最終応答が載ること
+- 可能なら `--resume` と Skill invoke
+

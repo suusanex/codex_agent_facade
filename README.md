@@ -1,13 +1,13 @@
 # codex_agent_facade
 
-Codex App を薄い UI shell として、GitHub Copilot と Grok Build へ作業を中継する feasibility PoC。
+Codex App を薄い UI shell として、GitHub Copilot、Grok Build、Devin CLI へ作業を中継する feasibility PoC。
 
 Codex / Facade は planner や orchestrator にならない。ユーザーの prompt を構造化 MCP 入力として受け、選択した agent の CLI へ変換して実行し、応答を同じ Codex thread へ返す。
 
 ## 必要環境
 
 - .NET 11 SDK（Preview 可）。`#:include` で複数ファイルをコンパイルする
-- PATH 上の `copilot`（GitHub Copilot CLI）および / または `grok`（Grok Build CLI）
+- PATH 上の `copilot`（GitHub Copilot CLI）、`grok`（Grok Build CLI）、および / または `devin`（Devin CLI）
 - 実作業には各 CLI へのログインが必要
 
 このリポジトリは File-based apps を使う。`.csproj` は無い。
@@ -113,7 +113,7 @@ enabled = true
 | フィールド | 必須 | 内容 |
 | --- | --- | --- |
 | `request_id` | はい | 呼び出し側が生成する冪等キー。同じ値の再呼び出しは既存 job を返す |
-| `agent` | はい | `github-copilot` または `grok-build` |
+| `agent` | はい | `github-copilot`、`grok-build`、または `devin-cli` |
 | `prompt` | はい | 対象 agent へ渡す本文。Facade は再構成しない |
 | `working_directory` | はい | 対象 workspace / worktree |
 | `session_id` | いいえ | 同一外部 session の継続。省略時は新規 |
@@ -200,6 +200,7 @@ Skill は **編集する work repository** の root で APM から入れる。�
 ```powershell
 apm install suusanex/codex_agent_facade/apm-packages/github-copilot --target codex,agent-skills
 apm install suusanex/codex_agent_facade/apm-packages/grok-build --target codex,agent-skills
+apm install suusanex/codex_agent_facade/apm-packages/devin-cli --target codex,agent-skills
 ```
 
 ローカル checkout から入れる場合:
@@ -207,9 +208,10 @@ apm install suusanex/codex_agent_facade/apm-packages/grok-build --target codex,a
 ```powershell
 apm install "C:\path\to\codex_agent_facade\apm-packages\github-copilot" --target codex,agent-skills
 apm install "C:\path\to\codex_agent_facade\apm-packages\grok-build" --target codex,agent-skills
+apm install "C:\path\to\codex_agent_facade\apm-packages\devin-cli" --target codex,agent-skills
 ```
 
-展開先は `.agents/skills/github-copilot/` と `.agents/skills/grok-build/`。Codex 上では `$github-copilot` / `$grok-build` で本文を外部 agent へ渡す。Skill 無しで `start_agent` / `get_agent_job` を直接呼んでもよい。
+展開先は `.agents/skills/github-copilot/`、`.agents/skills/grok-build/`、`.agents/skills/devin-cli/`。Codex 上では `$github-copilot` / `$grok-build` / `$devin-cli` で本文を外部 agent へ渡す。Skill 無しで `start_agent` / `get_agent_job` を直接呼んでもよい。
 
 更新・削除:
 
@@ -217,6 +219,7 @@ apm install "C:\path\to\codex_agent_facade\apm-packages\grok-build" --target cod
 apm update
 apm uninstall github-copilot
 apm uninstall grok-build
+apm uninstall devin-cli
 ```
 
 ## CLI 変換
@@ -233,13 +236,19 @@ Grok Build:
 grok --no-auto-update -p <prompt> --cwd <working_directory> --output-format streaming-json [--always-approve] [--resume <session_id>]
 ```
 
-`--allow-all` / `--always-approve` は `auto_approve=true` のときだけ付ける。Windows では `copilot.cmd` を使う（拡張子なし npm shim は起動できない）。
+Devin CLI（プロセス cwd = `working_directory`）:
 
-Skill 変換は共通化しない。Copilot は `Use the /name skill.`、Grok は `/name` 行。詳細は `docs/poc-observations.md`。
+```text
+devin --respect-workspace-trust false [--permission-mode dangerous] [--resume <session_id>] --print -- <prompt>
+```
+
+`--allow-all` / `--always-approve` / `--permission-mode dangerous` は `auto_approve=true` のときだけ付ける。Windows では `copilot.cmd` を使う（拡張子なし npm shim は起動できない）。`devin` は PATH 上の実行ファイルを使う。
+
+Skill 変換は共通化しない。Copilot は `Use the /name skill.`、Grok と Devin は `/name` 行。詳細は `docs/poc-observations.md`。
 
 ## テスト
 
-CI / 通常テストは実 `copilot` / `grok` を呼ばない（`dotnet --version` の収集確認だけ実プロセスを使う）。
+CI / 通常テストは実 `copilot` / `grok` / `devin` を呼ばない（`dotnet --version` の収集確認だけ実プロセスを使う）。
 
 ```powershell
 dotnet run --file tests/CodexAgentFacade.Tests.cs
@@ -259,7 +268,7 @@ PoC の成果物は実装に加え、成立 / 不可の記録である。`docs/p
 
 - `CODEX_AGENT_FACADE_TOKEN` をユーザー環境に設定し、Facade プロセスを事前起動する（Windows では Task Scheduler から `CodexAgentFacade.exe` を直接起動してよい）
 - 常駐 exe を直接起動したときコンソールウィンドウが出ないことの確認（WinExe。自動テストでは検証しない）
-- GitHub Copilot CLI と Grok Build CLI へのログイン
+- GitHub Copilot CLI と Grok Build CLI、Devin CLI へのログイン
 - Codex への MCP 登録（`url`、`bearer_token_env_var`、`enabled = true`、`direct_only_tool_namespaces`）
 - Facade 再起動後に自動 reconnect しない場合の、同一 thread 上での MCP refresh / reconnect
 - Desktop Codex App の composer / 完了通知 / 別 thread 並行（HTTP 移行後の start/get 実機確認は `docs/poc-observations.md`）
