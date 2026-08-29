@@ -153,3 +153,102 @@ Issue 原文は「実装は設計判断のあと」と書いていた。HTTP 化
 - 接続復旧後に `get_agent_job` で実行中または完了結果を得る
 - 完了後の `session_id` で `--resume` できる
 - Desktop で別 thread へ移っても job が継続する（観測 #6 の残り）
+
+## Devin CLI（issue #10）
+
+issue [#10](https://github.com/suusanex/codex_agent_facade/issues/10)。既存 MCP job 経路へ第三 Driver として `devin-cli` を追加する。`devin acp` は使わず `devin --print` から始める。Devin 独自の workspace 管理層は追加しない。
+
+### 実 HTTP MCP スモーク（2026-08-29）
+
+観測日: 2026-08-29  
+環境: Windows。Devin CLI `3000.6.7 (260a97c8)`、.NET SDK `11.0.100-preview.7.26381.103`、Codex CLI `0.149.0`。`devin auth status` は Logged in / Tier: Devin Free / Plan: Free。  
+経路: `src/DevinMcpSmoke.cs` → 別プロセスの `src/CodexAgentFacade.cs`（Streamable HTTP `http://127.0.0.1:18767/mcp`）→ MCP `start_agent` / `get_agent_job` → `AgentJobService` → `AgentFacade` → `DevinCliDriver` → 実 `devin.exe`。`AgentFacade` を直接生成して Driver を呼ぶ経路は使っていない。  
+ハーネス: `dotnet run --file src/DevinMcpSmoke.cs`。通常 unit test からは呼ばない。
+
+Free plan で利用できたこと:
+
+- 認証済み Free アカウントで非対話 `--print` が動く
+- アカウント既定モデルでは disposable workspace の 1 ファイル作成まで完了した
+- `DEVIN_MODEL=swe-1-6-fast` は **Pro 必須**。stderr: `Error: Upgrade to Pro to access this model (https://devin.ai/pricing)`、Devin CLI exit 1。これは最初のスモークで確認し、2 回目は `DEVIN_MODEL` を付けずに既定モデルを使った
+- 2 回目の実 Devin 呼び出しは 1 回だけ（ファイル作成）。session resume は Free quota 節約のため未実施
+
+MCP `start_agent` / poll / completion:
+
+- MCP tools: `cancel_agent_job,get_agent_job,start_agent`
+- `start_agent` status=`running`、`jobId=20260829T082846Z-6ee2f384`
+- `get_agent_job` を数回 poll し、terminal status=`completed`
+- `result.agent=devin-cli`、`exitCode=0`
+- `outputText` / `rawOutput` は plain text（JSON 行ではない）:
+  `I'll create the DEVIN_SMOKE.txt file with the specified content.Done. Created DEVIN_SMOKE.txt with the single line "devin facade smoke ok".`
+- job 完了後も Facade server process は生存（`facadeAliveAfterJob=True`）
+
+workspace 変更:
+
+- disposable git workspace に `DEVIN_SMOKE.txt` が作成され、内容は `devin facade smoke ok`
+- README.md 以外の想定外変更は無し（`.devin/` も無し）
+
+logs:
+
+- `eventsLogPath` / `textLogPath` は存在し、started / launch / stdout / completed を含む
+- `result.sessionId` は空。events log の `completed` も `"sessionId":""`
+- stdout に明示 `sessionId` / `session_id` フィールドは無い。`DevinStreamAccumulator` は取得できていない。これは失敗とはしない
+- resume は実施していない（ID が空、かつ 2 回目の Devin 呼び出しを避けるため）
+
+Codex CLI 追加 E2E（Devin 判定には使わない）:
+
+- `codex exec --json --ignore-user-config` から同じ Facade endpoint を登録
+- MCP tool は Codex から見えた（`start_agent` / `get_agent_job` / `cancel_agent_job` を agent_message に列挙）
+- tool call まで到達した: `mcp_tool_call` server=`codex_agent_facade` tool=`get_agent_job` job_id=`mcp-smoke-probe-missing`
+- Codex 側で失敗: `MCP tool call requires approval, but approval policy is never`
+- そのため Facade server log への request 到達は確認できず（`codexReachedFacadeServerLog=False`）。Windows で tool がモデルへ公開されない既知問題は、この実行では再現していない
+- `start_agent` は呼んでいない（Devin を二重に消費しない）
+
+未解決事項:
+
+- session ID が `--print` stdout に出ない。時刻差や任意 UUID では結び付けない。後続は Issue #10 で検討済みの `--export` / ATIF、または継続不能の確定
+- Codex `codex exec` から Facade へ実際に RPC を通すには、probe 側の approval（`default_tools_approval_mode=auto` または bypass）が必要。Desktop Codex App の composer / 通知は未操作
+- Skill の実 invoke、`auto_approve=false` の質問待ち、実 cancel は未実施
+- `swe-1-6-fast` など一部モデルは Free では使えない。既定モデル名は今回の stdout に出ていない
+
+状態の意味は冒頭の定義に従う。
+
+| # | 観測項目 | 状態 | 根拠 |
+| --- | --- | --- | --- |
+| 1 | Codex から `devin-cli` を選び、指定 worktree で作業できるか | 部分成立 | 直接 MCP client → HTTP Facade → 実 Devin で disposable worktree のファイル作成まで成立。Codex CLI は tool を見たが approval `never` で Facade へ未到達。Desktop App は未操作 |
+| 2 | 既存 job lifecycle / cancel / run log を壊さないか | 部分成立 | 既存 115 unit test は維持。実 MCP job は `start_agent` 即時 jobId → poll → `completed` と run log を確認。実 CLI cancel は未実施 |
+| 3 | 完了後に最終応答を `get_agent_job` の result として返せるか | 成立 | `status=completed`、`outputText` に最終応答、workspace に期待ファイル。`--print` の実形式は JSON ではなく 1 行の plain text |
+| 4 | 同一 Devin session を `--resume` で継続できるか | 不可（この経路では未成立） | 引数は `--resume <session_id>`。実 stdout に明示 session フィールドが無く `result.sessionId` は空。`--export` は未実装。`devin list` と時刻差は使わない |
+| 5 | `.agents/skills/` を利用した指示ができるか | 人手確認待ち | Driver は Codex Skill 名を `/name` 行へ前置する。実 invoke は未確認 |
+| 6 | `auto_approve` を permission mode へ対応できるか | 実装上の境界 | 実スモークは `auto_approve=true` で `--permission-mode dangerous`。`false` の実観測は未実施。`autonomous` は native Windows では使わない |
+| 7 | Free plan / trial で CLI が使えるか | 部分成立 | Free で認証済み CLI が既定モデルの `--print` 編集まで通る。`swe-1-6-fast` は Pro 必須で遮られる |
+| 8 | ACP が必要か | 実装上の境界 | 最終応答とファイル編集は `--print` の plain text で足りた。session ID が stdout に無い点は ACP ではなく `--export` / ATIF の後続候補 |
+
+### 机上の CLI 変換
+
+```text
+devin --respect-workspace-trust false [--permission-mode dangerous] [--resume <session_id>] --print -- <prompt>
+```
+
+- `--respect-workspace-trust false` は非対話 `--print` が workspace trust prompt を出せないための公式条件。常に付ける
+- working directory は `ProcessRunner` の cwd。`--cwd` は付けない
+- Skill 変換は Grok と同じ `/name` 行だが、共通 runtime にはしない
+- stdout が JSON でなくても成立とする。明示 `sessionId` フィールドだけを session 継続に使う。任意 UUID や `devin list` の時刻差は使わない
+- 実測: Free 既定モデルの `--print` stdout は JSONL ではなく 1 行の plain text。session フィールドは含まれない
+
+単体テスト（実 `devin` なし）:
+
+- `BuildArguments` の non-interactive flags / `auto_approve=false` / `--resume` / Skill 前置
+- Facade が `FileName=devin` へルーティングする
+- plain text stdout と JSON 行の sessionId / text
+- 空 stdout・非 0 exit・任意 UUID を sessionId にしないこと
+
+人手確認待ちに残るもの:
+
+1. Desktop Codex App → MCP → Facade → Devin CLI の e2e
+2. session ID。stdout に明示フィールドが無いので `--export` を run 固有パスへ足すか、継続不能と確定する。`devin list` と時刻差は使わない
+3. `.agents/skills/` の実 invoke
+4. `codex exec` の approval を通したあとに、Facade server log へ request が載ること
+5. 実 `cancel_agent_job` と `auto_approve=false`
+
+以前の blocked 記録（同日の導入前）: 公式 Windows 導入スクリプトが OS error 5 で失敗し、当時は PATH に `devin` が無かった。その後この環境へ CLI を導入し、上記の実 MCP スモークまで到達した。
+

@@ -10,6 +10,7 @@
 #:include SecretRedactor.cs
 #:include GitHubCopilotDriver.cs
 #:include GrokBuildDriver.cs
+#:include DevinCliDriver.cs
 
 var workspace = Directory.CreateTempSubdirectory("codex-agent-facade-poc-");
 File.WriteAllText(Path.Combine(workspace.FullName, "NOTE.txt"), "poc observation workspace. do not keep.");
@@ -18,6 +19,7 @@ Console.WriteLine("workspace=" + workspace.FullName);
 var facade = new AgentFacade(
     new GitHubCopilotDriver(new ProcessRunner()),
     new GrokBuildDriver(new ProcessRunner()),
+    new DevinCliDriver(new ProcessRunner()),
     new AgentRunLogFactory());
 const string prompt = "Reply with only the word pong. Do not create, edit, or delete any files.";
 const string followUp = "Reply with only the word pingpong. Do not create, edit, or delete any files.";
@@ -26,6 +28,7 @@ const string skillPrompt = "If a skill was invoked, name it in one short sentenc
 
 var copilot = await RunTrial(facade, "copilot-auto", AgentFacade.GitHubCopilotAgent, workspace.FullName, prompt, autoApprove: true, sessionId: null, skills: null, timeoutSeconds: 180);
 var grok = await RunTrial(facade, "grok-auto", AgentFacade.GrokBuildAgent, workspace.FullName, prompt, autoApprove: true, sessionId: null, skills: null, timeoutSeconds: 180);
+var devin = await RunTrial(facade, "devin-auto", AgentFacade.DevinCliAgent, workspace.FullName, prompt, autoApprove: true, sessionId: null, skills: null, timeoutSeconds: 180);
 
 if (!string.IsNullOrWhiteSpace(copilot))
 {
@@ -37,10 +40,17 @@ if (!string.IsNullOrWhiteSpace(grok))
     await RunTrial(facade, "grok-continue", AgentFacade.GrokBuildAgent, workspace.FullName, followUp, autoApprove: true, sessionId: grok, skills: null, timeoutSeconds: 180);
 }
 
+if (!string.IsNullOrWhiteSpace(devin))
+{
+    await RunTrial(facade, "devin-continue", AgentFacade.DevinCliAgent, workspace.FullName, followUp, autoApprove: true, sessionId: devin, skills: null, timeoutSeconds: 180);
+}
+
 await RunTrial(facade, "copilot-no-approve", AgentFacade.GitHubCopilotAgent, workspace.FullName, question, autoApprove: false, sessionId: null, skills: null, timeoutSeconds: 45);
 await RunTrial(facade, "grok-no-approve", AgentFacade.GrokBuildAgent, workspace.FullName, question, autoApprove: false, sessionId: null, skills: null, timeoutSeconds: 45);
+await RunTrial(facade, "devin-no-approve", AgentFacade.DevinCliAgent, workspace.FullName, question, autoApprove: false, sessionId: null, skills: null, timeoutSeconds: 45);
 await RunTrial(facade, "copilot-skill", AgentFacade.GitHubCopilotAgent, workspace.FullName, skillPrompt, autoApprove: true, sessionId: null, skills: ["$dotnet-file-based-apps"], timeoutSeconds: 120);
 await RunTrial(facade, "grok-skill", AgentFacade.GrokBuildAgent, workspace.FullName, skillPrompt, autoApprove: true, sessionId: null, skills: ["$dotnet-file-based-apps"], timeoutSeconds: 120);
+await RunTrial(facade, "devin-skill", AgentFacade.DevinCliAgent, workspace.FullName, skillPrompt, autoApprove: true, sessionId: null, skills: ["$dotnet-file-based-apps"], timeoutSeconds: 120);
 
 static async Task<string?> RunTrial(
     AgentFacade facade,
