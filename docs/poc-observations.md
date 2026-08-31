@@ -32,13 +32,19 @@ Desktop Codex App の composer / 通知 UI は未操作。公式には CLI と A
 正常系（`auto_approve=true`）:
 
 ```text
-copilot --prompt <prompt> --output-format json --allow-all [--resume <id>]
+<prompt-source> | copilot --output-format json --allow-all [--resume <id>]
 grok --no-auto-update -p <prompt> --cwd <dir> --output-format streaming-json --always-approve [--resume <id>]
 ```
 
-Windows では拡張子なし `copilot` npm shim は PE ではない。通常の PATH 解決で
-公式 npm-generated `copilot.ps1` を選び、汎用 ProcessRunner の `pwsh.exe` host で
-`ArgumentList` 起動する。npm loader や package 内 native executable の解析は行わない。
+GitHub の公式 programmatic usage は `-p/--prompt` または stdin pipe であり、
+`-p/--prompt` 併用時は stdin が無視される。Facade の Skill付きpromptは後者を使い、
+`--prompt` を付けずに UTF-8 stdin へ渡す（公式説明:
+https://docs.github.com/en/copilot/how-tos/copilot-cli/automate-copilot-cli/run-cli-programmatically）。
+ローカル `copilot --help` と npm README には stdin 契約が載っていなかったため、
+当初は誤って「公式stdin契約なし」と判断したが、公式 Docs の確認後に設計を訂正した。
+Windows の `copilot` は通常の PATH 解決を使い、現環境の `copilot.CMD` は汎用 cmd
+経路でstdin handleをchildへ継承する。npm loader、package 内 native executable、
+shim 内容の解析は行わない。
 
 Grok は headless `streaming-json`（NDJSON）を使う。最終 `outputText` / `sessionId` は `text` chunk と `end` から復元する。tool_call / plan 等は run log へ流す。実機での長時間 tail は人手確認待ち。Copilot JSONL の session は `type=result` の `sessionId`。assistant 本文は `type=assistant.message` の `data.content`。
 
@@ -53,7 +59,7 @@ Facade 共通（2 Driver で実際に同じだったもの）:
 
 GitHub Copilot 固有:
 
-- Windows は `copilot.ps1`、非 Windows は `copilot`。`--prompt`、`--output-format json`、`--allow-all`、`--resume`
+- 全OSで `copilot`。`--output-format json`、`--allow-all`、`--resume`。promptはstdin
 - JSONL。`result.sessionId`。`assistant.message.data.content`
 - Skill は `Use the /name skill.`（先頭 `/name` は CLI command）
 - `--output-format json` でも slash command 扱いになると TUI 行が混ざる
@@ -96,11 +102,12 @@ cmd のバッチ引数 ABI では raw command や環境変数展開から CR/LF 
 `a!b` は delayed expansion の走査で `ab` になり、LF/CRLF は対象バッチへ届く前に
 分割された。これは対象スクリプトを解析・変更せず、遅延展開にも依存しないための
 境界である。したがって `ApplyCopilotSkills("issue #25 を調査してください。", ["github-copilot"])`
-が生成する LF 複数行 prompt は、汎用 `.cmd` / `.bat` 経路ではなく、
-Windows の `copilot.ps1` → `pwsh.exe` の `ArgumentList` 経路へ渡す。`copilot.ps1` は
-PATH 上の公式 npm-generated shim を通常の script として選んでいるだけであり、npm
-loader や package 内 native executable の解析は行わない。実 Copilot smoke の結果は
-下記の実装後観測へ記録する。
+が生成する LF 複数行 prompt は、汎用 `.cmd` / `.bat` の argv 経路ではなく、
+公式の stdin 経路へ渡す。GitHubCopilotDriver は全OSで `copilot` を通常の PATH 解決で
+選び、`--prompt`を付けず、`ProcessRunRequest.StandardInputText`へ完全なpromptを設定する。
+Windowsの現環境では `copilot.CMD` が汎用 cmd hostとして起動されるが、promptはcmd argvを
+通らずstdin handleでchildへ継承される。npm loader、package内native executable、
+shim内容の解析は行わない。実 Copilot smoke の新stdin経路結果は下記に記録する。
 
 stderr は byte-based line reader で読み、strict UTF-8 を優先する。Windows wrapper で
 UTF-8 として不正な bytes は BCL の UTF-8 妥当性検査後に OS OEM encoding を strict に
@@ -118,10 +125,12 @@ background exception だけを `Exception.ToString()` 付きで trace し、run 
 BCL の妥当性検査で UTF-8 を先に判定し、正常なOEM行で例外を発生させず、OEM decode
 失敗は上位へ伝播する。
 
-### 実装後の配備と実 Copilot smoke（2026-08-31）
+### 前回の配備と実 Copilot smoke（旧 copilot.ps1 / argv 経路、2026-08-31）
 
-親レビューで `approve-powershell-shim` の契約を確認し、未コミット build を配備して
-実 Copilot smoke を行った。ProductVersion は従来と同じ
+親レビューで `approve-powershell-shim` の契約を確認した時点の旧実装を配備して
+実 Copilot smoke を行った。この記録は `copilot.ps1` を PowerShell host の
+`ArgumentList` で起動していた旧 argv 経路の実測であり、現在の stdin 経路の成功結果
+ではない。ProductVersion は従来と同じ
 `1.0.0+d2633320a70114cb73199165636cee8da689e975` だったため、build の識別には DLL
 SHA256 を使う。
 
@@ -152,14 +161,85 @@ Copilot:
 | text | `C:\Users\suusa\.codex-agent-facade\runs\20260831T134929Z-5e7ad586.log` |
 | launch | resolved `C:\Users\suusa\AppData\Roaming\npm\copilot.ps1`; process `C:\Program Files\PowerShell\7\pwsh.exe`; wrapper `powershell` |
 
-LF 付き Skill prompt は logical/process arguments に同値で記録され、PowerShell
+LF 付き Skill prompt は logical/process arguments に同値で記録され、旧 PowerShell
 `ArgumentList` 経路で cmd batch ABI を通らずに届いた。配備後の `server.log` は
 ERROR `0`、`OperationCanceledException` `0`、replacement-character 文字化け `0` だった。
 
 この smoke workspace には指定した `github-copilot` skill 自体が存在せず、Copilot 内部
 tool event は `skill-not-found` になった。ただしこれは Skill 配備状態の観測であり、
 LF prompt transport、CLI job 完了、exit code 0、workspace 不変の成功判定は隠さず分離して
-記録する。成功 run の結果は成立とするが、Skill invoke 自体は未成立である。
+記録する。旧経路のrun/job結果は成立とするが、Skill invoke 自体は未成立である。
+
+### 新 stdin 経路の実配備と実 Copilot smoke（2026-08-31）
+
+公式 Docs のstdin契約を採用し、現在の GitHubCopilotDriver は全OSで `copilot` を
+要求する。`BuildArguments` には `--output-format json`、必要時の `--allow-all` と
+`--resume <id>` だけを残し、Skill付き完全promptは `ProcessRunRequest.StandardInputText`
+へ渡す。Windowsの現環境では PATH 上の `copilot.CMD` を汎用 cmd 経路で起動するが、
+promptはargvではなくstdin handleを通ってchildへ継承される。ProcessRunnerは指定された
+textをUTF-8 BOMなしで`WriteAsync`、`FlushAsync`、closeし、末尾改行を追加しない。
+launchには本文を記録せず、`HasStandardInput`とUTF-8 byte countだけを記録する。新stdin
+経路の実 Copilot smoke は、Release publish と配備更新後に完了した。自動テスト、
+publish、差分検査も同じ変更について成功した。
+
+配備:
+
+| 項目 | 実測値 |
+| --- | --- |
+| Scheduled Task | `\CodexAgentFacade` |
+| 旧 PID | `59080` |
+| 新 PID | `61520` |
+| listener | `127.0.0.1:18765` |
+| 新配備 DLL SHA256 | `83F9B1DD350CD4DD1A565B832D09F8F20588D5E19C1FF03E00D5A986A0D927F9` |
+| ProductVersion | `1.0.0+c2e658bd9a6d5229439d6370be28c126cdc24d0d` |
+| rollback backup | `D:\Tools\Development\CodexAgentFacade.backup-pre-stdin-20260831-233034` |
+| 起動ログ | `2026-08-31 23:31:06.3940 Starting`、`23:31:07.2921 listen開始` |
+
+検証:
+
+- 自動テスト: `dotnet run --file tests\CodexAgentFacade.Tests.cs`、130/130成功
+- Release publish: 成功
+- `git diff --check`: 成功
+- server起動後ログ: ERROR `0`、`OperationCanceledException` `0`、replacement character文字化け `0`
+
+Copilot smoke:
+
+| 項目 | 実測値 |
+| --- | --- |
+| GitHub Copilot CLI | `1.0.82` |
+| request ID | `copilot-mcp-smoke-9f5d50d9086b488aaa16d0df923ba4c5` |
+| run/job ID | `20260831T143122Z-72d77c1d` |
+| session ID | `ce1b676c-5a2d-43ab-afcf-0857002f9434` |
+| outputText | `CAF_SMOKE_OK` |
+| exit code | `0` |
+| workspace unchanged | `true` |
+| events log | `C:\Users\suusa\.codex-agent-facade\runs\20260831T143122Z-72d77c1d.events.jsonl` |
+| text log | `C:\Users\suusa\.codex-agent-facade\runs\20260831T143122Z-72d77c1d.log` |
+
+launch metadata は次のとおりだった。
+
+- `requestedFileName`: `copilot`
+- `resolvedExecutable`: `C:\Users\suusa\AppData\Roaming\npm\copilot.CMD`
+- `processFileName`: `C:\WINDOWS\system32\cmd.exe`
+- `wrapper`: `windows-cmd`
+- logical arguments: `--output-format json --allow-all`
+- raw arguments に prompt 本文なし
+- `--prompt` / `-p` なし
+- `hasStandardInput`: `true`
+- `standardInputByteCount`: `118`
+- UTF-8で再計算した prompt byte count: `118`
+
+実際の Skill 適用後 prompt はLFを含み、次の完全一致だった。
+
+`Use the /github-copilot skill.\nReply with exactly CAF_SMOKE_OK and nothing else. Do not create, edit, or delete files.`
+
+この smoke workspace には `github-copilot` skill が存在せず、Copilot内部のskill tool
+eventには skill-not-found 相当が残った。ただし旧smokeと同様、これはSkill配置状態の
+観測であり、prompt transport、CLI job、固定応答、workspace非変更の成功判定とは分離する。
+新stdin経路では、promptがargvへ入らず、`.NET RedirectStandardInput` → `cmd.exe` →
+`npm shim` → Copilot CLI 1.0.82 の実経路でUTF-8 stdinとして到達し、実行はexit code 0で
+完了した。したがって、GitHub公式stdin経路への変更に関する完了条件は達成済みである。
+`.ps1` runner は汎用機能として残るが、Copilot Driver はWindowsで `.ps1` を固定選択しない。
 
 ### Purpose review 最終状態
 
@@ -167,9 +247,11 @@ purpose-review-runner の run `f6b3a2b7-9a7e-4124-8b6c-e373b701a203` は round 3
 `HUMAN_DECISION_REQUIRED` で終了した。残存 `PUR-001` は review 開始時の旧 purpose
 context にあった `copilot.CMD` 必須条件を reviewer が保持したことによるもので、
 product authority であるユーザーの ask_user と明示承認 `approve-powershell-shim` により
-判断は解決済みである。現設計は採用・配備・実 Copilot smoke 成功済みだが、runner status
-自体は `HUMAN_DECISION_REQUIRED` のまま記録する。skill仕様に従い round 4、新run、
-session再構築は行わない。
+判断は解決済みである。旧 `copilot.ps1` / argv 経路は上記の配備・実 Copilot smoke まで成功済みであり、
+その後の新 stdin 経路も別の実配備・実 Copilot smoke として完了した。ここで記録している
+round 3 の terminal 状態、PUR-001 の経緯、承認内容は review 当時の履歴として維持する。
+runner status 自体は `HUMAN_DECISION_REQUIRED` のまま記録し、skill仕様に従い round 4、
+新run、session再構築は行わない。
 
 ## Streamable HTTP（issue #7）
 

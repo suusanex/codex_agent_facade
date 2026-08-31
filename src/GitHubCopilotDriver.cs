@@ -19,7 +19,6 @@ public sealed class GitHubCopilotDriver
         Action<string>? onStdoutLine,
         CancellationToken cancellationToken)
     {
-        var executable = GetExecutableName();
         var arguments = BuildArguments(request);
         var prompt = ApplyCopilotSkills(request.Prompt, request.Skills);
         runLog.WriteStarted(new AgentRunStartedInfo(
@@ -29,7 +28,7 @@ public sealed class GitHubCopilotDriver
             AutoApprove: request.AutoApprove,
             Skills: request.Skills,
             Prompt: prompt,
-            FileName: executable,
+            FileName: "copilot",
             Arguments: arguments));
 
         var accumulator = new GitHubCopilotStreamAccumulator(runLog);
@@ -38,9 +37,10 @@ public sealed class GitHubCopilotDriver
         {
             processResult = await _processRunner.RunAsync(
                 new ProcessRunRequest(
-                    FileName: executable,
+                    FileName: "copilot",
                     Arguments: arguments,
                     WorkingDirectory: request.WorkingDirectory,
+                    StandardInputText: prompt,
                     StdoutLineCallback: line =>
                     {
                         accumulator.OnStdoutLine(line);
@@ -78,18 +78,10 @@ public sealed class GitHubCopilotDriver
             TextLogPath: runLog.TextLogPath);
     }
 
-    internal static string GetExecutableName()
-    {
-        return OperatingSystem.IsWindows() ? "copilot.ps1" : "copilot";
-    }
-
     internal static List<string> BuildArguments(AgentRunRequest request)
     {
-        var prompt = ApplyCopilotSkills(request.Prompt, request.Skills);
         var arguments = new List<string>
         {
-            "--prompt",
-            prompt,
             "--output-format",
             "json",
         };

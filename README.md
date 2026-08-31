@@ -227,7 +227,7 @@ apm uninstall devin-cli
 GitHub Copilot（プロセス cwd = `working_directory`）:
 
 ```text
-copilot --prompt <prompt> --output-format json [--allow-all] [--resume <session_id>]
+<UTF-8 prompt source> | copilot --output-format json [--allow-all] [--resume <session_id>]
 ```
 
 Grok Build:
@@ -242,14 +242,14 @@ Devin CLI（プロセス cwd = `working_directory`）:
 devin --respect-workspace-trust false [--permission-mode dangerous] [--resume <session_id>] --print -- <prompt>
 ```
 
-`--allow-all` / `--always-approve` / `--permission-mode dangerous` は `auto_approve=true` のときだけ付ける。Windows の Copilot は PATH 上の公式 npm-generated `copilot.ps1` を選び、Facade の汎用 PowerShell host が `pwsh.exe -NoLogo -NoProfile -NonInteractive -File <script> ...` として `ArgumentList` で起動する。拡張子なし npm shim や npm loader の解析は行わない。`devin` は PATH 上の実行ファイルを使う。
+`--allow-all` / `--always-approve` / `--permission-mode dangerous` は `auto_approve=true` のときだけ付ける。Copilot は全OSで PATH 上の `copilot` を選び、`--prompt` は使わず、Skill付き完全promptをUTF-8 stdinへ渡す。GitHub公式の [programmatic usage](https://docs.github.com/en/copilot/how-tos/copilot-cli/automate-copilot-cli/run-cli-programmatically) に従う。Windowsの`copilot.CMD`は汎用cmd経路でstdin handleをchildへ継承し、PATH上で`copilot.exe`が先に解決される環境では通常のnative経路を使う。npm shim内容やnpm loaderの解析は行わない。`devin` は PATH 上の実行ファイルを使う。
 
 Skill 変換は共通化しない。Copilot は `Use the /name skill.`、Grok と Devin は `/name` 行。詳細は `docs/poc-observations.md`。
 
 ## テスト
 
 CI / 通常テストは実 `copilot` / `grok` / `devin` を呼ばない（`dotnet --version` の収集確認だけ実プロセスを使う）。
-Windows の `.cmd` / `.bat` は `ProcessStartInfo.Arguments` の raw command string として `cmd.exe /d /v:off /s /c` で起動する。`.NET` の `ArgumentList` は使わず、引用符は二重化し、`%` はプロセス限定環境変数の置換結果で保護してから cmd に渡す。`&`、`|`、`^`、空白、日本語、`!`、括弧、`<`、`>`、引用符を含む値は実プロセス fixture で検証している。NUL と CR/LF は cmd のバッチ引数 ABI で忠実かつ安全に表現できないため、`.cmd` / `.bat` 経路では実行前エラーになる。複数行 prompt を渡す GitHub Copilot は `copilot.ps1` を PowerShell の `ArgumentList` で起動するため、この制約を通らない。通常の `.exe` は従来どおり `ArgumentList` を使う。stdout は UTF-8 JSONL のまま、wrapper の stderr は strict UTF-8 を優先し、不正な場合だけ OS の OEM encoding で厳密にデコードする。両方で解釈できなければ実行を失敗させる。
+Windows の `.cmd` / `.bat` は `ProcessStartInfo.Arguments` の raw command string として `cmd.exe /d /v:off /s /c` で起動する。`.NET` の `ArgumentList` は使わず、引用符は二重化し、`%` はプロセス限定環境変数の置換結果で保護してから cmd に渡す。`&`、`|`、`^`、空白、日本語、`!`、括弧、`<`、`>`、引用符を含む値は実プロセス fixture で検証している。NUL と CR/LF は cmd のバッチ引数 ABI で忠実かつ安全に表現できないため、`.cmd` / `.bat` 経路では実行前エラーになる。Copilotの複数行promptは公式stdin経路で渡し、`--prompt`と併用しない。stdin指定時はUTF-8 BOMなしで本文をそのままwrite/flush/closeし、launch logには本文を記録せず、指定有無とbyte countだけを記録する。通常の`.ps1`は汎用`pwsh.exe -NoLogo -NoProfile -NonInteractive -File <script>`の`ArgumentList`、通常の`.exe`は従来どおり`ArgumentList`を使う。stdout は UTF-8 JSONL のまま、wrapper の stderr は strict UTF-8 を優先し、不正な場合だけ OS の OEM encoding で厳密にデコードする。両方で解釈できなければ実行を失敗させる。
 
 ```powershell
 dotnet run --file tests/CodexAgentFacade.Tests.cs
