@@ -249,7 +249,7 @@ Skill 変換は共通化しない。Copilot は `Use the /name skill.`、Grok �
 ## テスト
 
 CI / 通常テストは実 `copilot` / `grok` / `devin` を呼ばない（`dotnet --version` の収集確認だけ実プロセスを使う）。
-Windows の `.cmd` / `.bat` は `ProcessStartInfo.Arguments` の raw command string として `cmd.exe /d /v:off /s /c` で起動する。`.NET` の `ArgumentList` は使わず、引用符は二重化し、`%` はプロセス限定環境変数の置換結果で保護してから cmd に渡す。`&`、`|`、`^`、空白、日本語、`!`、括弧、`<`、`>`、引用符を含む値は実プロセス fixture で検証している。NUL と CR/LF は cmd のバッチ引数 ABI で忠実かつ安全に表現できないため、`.cmd` / `.bat` 経路では実行前エラーになる。Copilotの複数行promptは公式stdin経路で渡し、`--prompt`と併用しない。stdin指定時はUTF-8 BOMなしで本文をそのままwrite/flush/closeし、launch logには本文を記録せず、指定有無とbyte countだけを記録する。通常の`.ps1`は汎用`pwsh.exe -NoLogo -NoProfile -NonInteractive -File <script>`の`ArgumentList`、通常の`.exe`は従来どおり`ArgumentList`を使う。stdout は UTF-8 JSONL のまま、wrapper の stderr は strict UTF-8 を優先し、不正な場合だけ OS の OEM encoding で厳密にデコードする。両方で解釈できなければ実行を失敗させる。
+Windows の `.cmd` / `.bat` は `ProcessStartInfo.Arguments` の raw command string として `cmd.exe /d /v:off /s /c` で起動する。`.NET` の `ArgumentList` は使わず、引用符は二重化し、`%` はプロセス限定環境変数の置換結果で保護してから cmd に渡す。`&`、`|`、`^`、空白、日本語、`!`、括弧、`<`、`>`、引用符を含む値は実プロセス fixture で検証している。NUL と CR/LF は cmd のバッチ引数 ABI で忠実かつ安全に表現できないため、`.cmd` / `.bat` 経路では実行前エラーになる。Copilotの複数行promptは公式stdin経路で渡し、`--prompt`と併用しない。stdin指定時はUTF-8 BOMなしで本文をそのままwrite/flush/closeし、launch logには本文を記録せず、指定有無とbyte countだけを記録する。通常の`.ps1`は汎用`pwsh.exe -NoLogo -NoProfile -NonInteractive -File <script>`の`ArgumentList`、通常の`.exe`は従来どおり`ArgumentList`を使う。stdout は UTF-8 JSONL のまま、Windows の `.cmd` / `.bat` wrapper の stderr は OS の OEM encoding、wrapperなし（native executable と PowerShell host）は UTF-8として厳密にデコードする。選択した encoding で解釈できなければ実行を失敗させる。
 
 ```powershell
 dotnet run --file tests/CodexAgentFacade.Tests.cs

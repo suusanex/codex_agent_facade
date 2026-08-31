@@ -240,8 +240,7 @@ internal sealed class AgentRunLog : IAgentRunLog
             AgentJson.Options);
         var human = "launch resolved=" + info.ResolvedExecutable
             + " processFileName=" + info.ProcessFileName
-            + " wrapper=" + wrapper
-            + (info.RawArguments is null ? "" : " rawArguments=" + info.RawArguments);
+            + " wrapper=" + wrapper;
         WriteEnvelope("facade", "launch", data, human);
     }
 

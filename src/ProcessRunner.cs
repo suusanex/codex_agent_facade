@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Text.Unicode;
 
 /// <summary>
 /// 外部 CLI プロセス起動のテスト境界。実OS変更を伴う処理はここだけに閉じる。
@@ -586,6 +585,8 @@ internal sealed class SystemProcessEncodingProvider : IProcessEncodingProvider
 {
     public static SystemProcessEncodingProvider Instance { get; } = new();
 
+    private static readonly Lazy<Encoding> WindowsOemEncoding = new(ResolveWindowsOemEncoding);
+
     public Encoding GetWindowsOemEncoding()
     {
         if (!OperatingSystem.IsWindows())
@@ -593,6 +594,11 @@ internal sealed class SystemProcessEncodingProvider : IProcessEncodingProvider
             throw new PlatformNotSupportedException("Windows OEM encoding is only available on Windows.");
         }
 
+        return WindowsOemEncoding.Value;
+    }
+
+    private static Encoding ResolveWindowsOemEncoding()
+    {
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
         var codePage = GetOEMCP();
         if (codePage == 0)
@@ -624,17 +630,13 @@ internal static class StderrDecoder
         ArgumentNullException.ThrowIfNull(bytes);
         ArgumentNullException.ThrowIfNull(encodingProvider);
 
-        if (Utf8.IsValid(bytes))
+        if (windowsCmdWrapper)
         {
-            return Utf8Strict.GetString(bytes);
+            // Windows の cmd.exe wrapper は OEM code page、その他の host は UTF-8 とする。
+            return encodingProvider.GetWindowsOemEncoding().GetString(bytes);
         }
 
-        if (!windowsCmdWrapper)
-        {
-            throw new DecoderFallbackException("stderr contains invalid UTF-8.");
-        }
-
-        return encodingProvider.GetWindowsOemEncoding().GetString(bytes);
+        return Utf8Strict.GetString(bytes);
     }
 }
 

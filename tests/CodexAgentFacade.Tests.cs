@@ -1340,7 +1340,8 @@ public class ProcessRunnerTests
             @"C:\tools\copilot.cmd",
             ["a\"b", "%PATH%"]);
         Assert.Contains("\"a\"\"b\"", quoteLaunch.Command, StringComparison.Ordinal);
-        Assert.Contains("%PATH%", quoteLaunch.Command, StringComparison.Ordinal);
+        var percentVariable = quoteLaunch.EnvironmentVariables.Single().Key;
+        Assert.Contains("%" + percentVariable + "%PATH%" + percentVariable + "%", quoteLaunch.Command, StringComparison.Ordinal);
         Assert.Throws<ArgumentException>(() => WindowsCmd.BuildCommandWithEnvironment(
             @"C:\tools\copilot.cmd",
             ["nul\0value"]));
@@ -1712,12 +1713,25 @@ public class ProcessRunnerTests
             DecoderFallback.ExceptionFallback));
         Assert.Equal("日本語", StderrDecoder.Decode(
             Encoding.UTF8.GetBytes("日本語"),
-            windowsCmdWrapper: true,
+            windowsCmdWrapper: false,
             provider));
         Assert.Equal("日本語", StderrDecoder.Decode(
             provider.Encoding.GetBytes("日本語"),
             windowsCmdWrapper: true,
             provider));
+    }
+
+    [Fact]
+    public void WindowsCmdWrapperUsesOemForUtf8AmbiguousBytes()
+    {
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        var provider = new StubProcessEncodingProvider(Encoding.GetEncoding(
+            932,
+            EncoderFallback.ExceptionFallback,
+            DecoderFallback.ExceptionFallback));
+        var bytes = Convert.FromHexString("EAA3A1");
+
+        Assert.Equal("凜｡", StderrDecoder.Decode(bytes, windowsCmdWrapper: true, provider));
     }
 
     [Fact]
@@ -1758,6 +1772,18 @@ public class ProcessRunnerTests
             windowsCmdWrapper: true,
             provider));
         Assert.Same(expected, actual);
+    }
+
+    [Fact]
+    public void WindowsOemEncodingIsCached()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var provider = new SystemProcessEncodingProvider();
+        Assert.Same(provider.GetWindowsOemEncoding(), provider.GetWindowsOemEncoding());
     }
 
     private static string DecodeSingleBase64Line(string standardError)
@@ -2045,6 +2071,11 @@ public class AgentRunLogTests
     public async Task LaunchEventRedactsLogicalAndRawArguments()
     {
         var token = "gho_" + new string('a', 36);
+        var humanPrefix = "launch resolved=" + @"C:\tools\fixture.cmd"
+            + " processFileName=cmd.exe wrapper=windows-cmd rawArguments=";
+        var rawArguments = new string(
+            'x',
+            AgentRunLog.HumanSummaryMaxLength - humanPrefix.Length - 3) + " " + token;
         await using var log = TestRunLogs.CreateLog();
         log.WriteLaunch(new ProcessLaunchInfo(
             "fixture.cmd",
@@ -2053,17 +2084,19 @@ public class AgentRunLogTests
             ["/d", "/s", "/c"],
             [token],
             UsedWindowsCmdWrapper: true,
-            RawArguments: "\"fixture.cmd\" \"" + token + "\"",
+            RawArguments: rawArguments,
             HasStandardInput: true,
             StandardInputByteCount: 42));
 
         var events = TestRunLogs.ReadShared(log.EventsPath);
         var text = TestRunLogs.ReadShared(log.TextLogPath);
         Assert.Contains("\"logicalArguments\"", events, StringComparison.Ordinal);
+        Assert.Contains("\"rawArguments\"", events, StringComparison.Ordinal);
         Assert.DoesNotContain(token, events, StringComparison.Ordinal);
         Assert.DoesNotContain(token, text, StringComparison.Ordinal);
+        Assert.DoesNotContain(token[..2], text, StringComparison.Ordinal);
         Assert.Contains(SecretRedactor.Replacement, events, StringComparison.Ordinal);
-        Assert.Contains(SecretRedactor.Replacement, text, StringComparison.Ordinal);
+        Assert.DoesNotContain("rawArguments=", text, StringComparison.Ordinal);
         Assert.Contains("\"hasStandardInput\":true", events, StringComparison.Ordinal);
         Assert.Contains("\"standardInputByteCount\":42", events, StringComparison.Ordinal);
     }
