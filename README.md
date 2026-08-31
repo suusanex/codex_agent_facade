@@ -191,7 +191,7 @@ Codex UI へのストリーミング表示とは独立して、各 agent job の
 Get-Content -Wait "$env:USERPROFILE\.codex-agent-facade\runs\<runId>.log"
 ```
 
-`runId` は `jobId` と同じ値である。パスは completed の `result` に含まれる。heartbeat は 15 秒間隔で、経過時間・process 生存・最後の外部出力からの経過を記録する。出力が無いこととハングは同義ではない。認証情報・credential・token は書き込み前に `[REDACTED]` へ置換する。起動時には PATH 解決後の実行ファイルと、Windows で `.cmd` を `cmd.exe` 経由にしたかどうかも残す。
+`runId` は `jobId` と同じ値である。パスは completed の `result` に含まれる。heartbeat は 15 秒間隔で、経過時間・process 生存・最後の外部出力からの経過を記録する。出力が無いこととハングは同義ではない。認証情報・credential・token は書き込み前に `[REDACTED]` へ置換する。起動時には PATH 解決後の実行ファイル、wrapper 種別、host / wrapper switch と論理引数を記録する。
 
 ## 編集対象リポジトリへの Skill 導入
 
@@ -242,13 +242,14 @@ Devin CLI（プロセス cwd = `working_directory`）:
 devin --respect-workspace-trust false [--permission-mode dangerous] [--resume <session_id>] --print -- <prompt>
 ```
 
-`--allow-all` / `--always-approve` / `--permission-mode dangerous` は `auto_approve=true` のときだけ付ける。Windows では `copilot.cmd` を使う（拡張子なし npm shim は起動できない）。`devin` は PATH 上の実行ファイルを使う。
+`--allow-all` / `--always-approve` / `--permission-mode dangerous` は `auto_approve=true` のときだけ付ける。Windows の Copilot は PATH 上の公式 npm-generated `copilot.ps1` を選び、Facade の汎用 PowerShell host が `pwsh.exe -NoLogo -NoProfile -NonInteractive -File <script> ...` として `ArgumentList` で起動する。拡張子なし npm shim や npm loader の解析は行わない。`devin` は PATH 上の実行ファイルを使う。
 
 Skill 変換は共通化しない。Copilot は `Use the /name skill.`、Grok と Devin は `/name` 行。詳細は `docs/poc-observations.md`。
 
 ## テスト
 
 CI / 通常テストは実 `copilot` / `grok` / `devin` を呼ばない（`dotnet --version` の収集確認だけ実プロセスを使う）。
+Windows の `.cmd` / `.bat` は `ProcessStartInfo.Arguments` の raw command string として `cmd.exe /d /v:off /s /c` で起動する。`.NET` の `ArgumentList` は使わず、引用符は二重化し、`%` はプロセス限定環境変数の置換結果で保護してから cmd に渡す。`&`、`|`、`^`、空白、日本語、`!`、括弧、`<`、`>`、引用符を含む値は実プロセス fixture で検証している。NUL と CR/LF は cmd のバッチ引数 ABI で忠実かつ安全に表現できないため、`.cmd` / `.bat` 経路では実行前エラーになる。複数行 prompt を渡す GitHub Copilot は `copilot.ps1` を PowerShell の `ArgumentList` で起動するため、この制約を通らない。通常の `.exe` は従来どおり `ArgumentList` を使う。stdout は UTF-8 JSONL のまま、wrapper の stderr は strict UTF-8 を優先し、不正な場合だけ OS の OEM encoding で厳密にデコードする。両方で解釈できなければ実行を失敗させる。
 
 ```powershell
 dotnet run --file tests/CodexAgentFacade.Tests.cs
