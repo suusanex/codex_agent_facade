@@ -158,7 +158,7 @@ internal sealed class AgentRunLog : IAgentRunLog
     private readonly object _gate = new();
     private readonly StreamWriter _eventsWriter;
     private readonly StreamWriter _textWriter;
-    private readonly CancellationTokenSource _heartbeatCts = new();
+    private readonly PeriodicTimer _heartbeatTimer;
     private readonly Task _heartbeatTask;
 
     private DateTimeOffset _lastOutputAt;
@@ -184,7 +184,8 @@ internal sealed class AgentRunLog : IAgentRunLog
         _lastOutputAt = _startedAt;
         _eventsWriter = OpenWriter(eventsPath);
         _textWriter = OpenWriter(textLogPath);
-        _heartbeatTask = RunHeartbeatAsync(_heartbeatCts.Token);
+        _heartbeatTimer = new PeriodicTimer(HeartbeatInterval, _timeProvider);
+        _heartbeatTask = RunHeartbeatAsync();
     }
 
     public string RunId { get; }
@@ -221,18 +222,24 @@ internal sealed class AgentRunLog : IAgentRunLog
     public void WriteLaunch(ProcessLaunchInfo info)
     {
         ArgumentNullException.ThrowIfNull(info);
+        var wrapper = info.UsedWindowsCmdWrapper && info.Wrapper == "none"
+            ? "windows-cmd"
+            : info.Wrapper;
         var data = JsonSerializer.SerializeToElement(
             new LaunchPayload(
                 info.RequestedFileName,
                 info.ResolvedExecutable,
                 info.ProcessFileName,
                 info.ProcessArguments,
-                info.UsedWindowsCmdWrapper),
+                info.LogicalArguments,
+                info.UsedWindowsCmdWrapper,
+                info.RawArguments,
+                wrapper),
             AgentJson.Options);
-        var wrapper = info.UsedWindowsCmdWrapper ? "cmd.exe" : "none";
         var human = "launch resolved=" + info.ResolvedExecutable
             + " processFileName=" + info.ProcessFileName
-            + " wrapper=" + wrapper;
+            + " wrapper=" + wrapper
+            + (info.RawArguments is null ? "" : " rawArguments=" + info.RawArguments);
         WriteEnvelope("facade", "launch", data, human);
     }
 
@@ -370,7 +377,7 @@ internal sealed class AgentRunLog : IAgentRunLog
 
         try
         {
-            await _heartbeatCts.CancelAsync().ConfigureAwait(false);
+            _heartbeatTimer.Dispose();
         }
         catch (Exception ex)
         {
@@ -408,7 +415,6 @@ internal sealed class AgentRunLog : IAgentRunLog
             _disposed = true;
         }
 
-        _heartbeatCts.Dispose();
         ThrowIfBroken();
     }
 
@@ -545,19 +551,14 @@ internal sealed class AgentRunLog : IAgentRunLog
         return false;
     }
 
-    private async Task RunHeartbeatAsync(CancellationToken cancellationToken)
+    private async Task RunHeartbeatAsync()
     {
         try
         {
-            using var timer = new PeriodicTimer(HeartbeatInterval, _timeProvider);
-            while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+            while (await _heartbeatTimer.WaitForNextTickAsync().ConfigureAwait(false))
             {
                 WriteHeartbeat();
             }
-        }
-        catch (OperationCanceledException ex)
-        {
-            CliJson.TraceException(ex);
         }
         catch (Exception ex)
         {
@@ -701,7 +702,10 @@ internal sealed class AgentRunLog : IAgentRunLog
         string ResolvedExecutable,
         string ProcessFileName,
         IReadOnlyList<string> ProcessArguments,
-        bool UsedWindowsCmdWrapper);
+        IReadOnlyList<string> LogicalArguments,
+        bool UsedWindowsCmdWrapper,
+        string? RawArguments,
+        string Wrapper);
 
     private sealed record StartedPayload(
         string Agent,

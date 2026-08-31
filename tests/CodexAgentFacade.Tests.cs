@@ -96,6 +96,7 @@ public sealed class RecordingProcessRunner : IProcessRunner
             request.FileName,
             request.FileName,
             request.Arguments,
+            request.Arguments,
             UsedWindowsCmdWrapper: false));
 
         if (Gate is not null)
@@ -182,7 +183,9 @@ public class AgentFacadeTests
             new AgentRunRequest(AgentFacade.GitHubCopilotAgent, "hello", Path.GetTempPath(), null, null),
             onStdoutLine: null,
             CancellationToken.None);
-        Assert.Equal("copilot", runner.LastRequest!.FileName);
+        Assert.Equal(
+            OperatingSystem.IsWindows() ? "copilot.ps1" : "copilot",
+            runner.LastRequest!.FileName);
         Assert.Equal(AgentFacade.GitHubCopilotAgent, result.Agent);
         Assert.Equal("ok", result.OutputText);
         Assert.False(string.IsNullOrWhiteSpace(result.RunId));
@@ -562,6 +565,48 @@ public class GitHubCopilotDriverTests
         Assert.StartsWith("Use the /dotnet-file-based-apps skill.", prompt, StringComparison.Ordinal);
         Assert.Contains("Use the /review skill.", prompt, StringComparison.Ordinal);
         Assert.EndsWith("continue", prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SelectsPowerShellShimOnWindows()
+    {
+        Assert.Equal(
+            OperatingSystem.IsWindows() ? "copilot.ps1" : "copilot",
+            GitHubCopilotDriver.GetExecutableName());
+    }
+
+    [Fact]
+    public async Task RunPreservesMultilineSkillPromptInLogicalArguments()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(
+                0,
+                """{"type":"assistant.message","data":{"content":"ok"}}""",
+                ""),
+        };
+        await using var log = TestRunLogs.CreateLog();
+        await new GitHubCopilotDriver(runner).RunAsync(
+            new AgentRunRequest(
+                AgentFacade.GitHubCopilotAgent,
+                "issue #25 を調査してください。",
+                Path.GetTempPath(),
+                null,
+                ["github-copilot"]),
+            log,
+            onStdoutLine: null,
+            CancellationToken.None);
+
+        var prompt = runner.LastRequest!.Arguments[1];
+        Assert.Equal(
+            GitHubCopilotDriver.ApplyCopilotSkills(
+                "issue #25 を調査してください。",
+                ["github-copilot"]),
+            prompt);
+        Assert.Contains('\n', prompt);
+        Assert.Equal(
+            OperatingSystem.IsWindows() ? "copilot.ps1" : "copilot",
+            runner.LastRequest.FileName);
     }
 
     [Fact]
@@ -1220,6 +1265,8 @@ public class ProcessRunnerTests
         Assert.True(Path.IsPathRooted(launch!.ResolvedExecutable));
         Assert.Contains("dotnet", launch.ResolvedExecutable, StringComparison.OrdinalIgnoreCase);
         Assert.False(launch.UsedWindowsCmdWrapper);
+        Assert.Equal(["--version"], launch.LogicalArguments);
+        Assert.Null(launch.RawArguments);
     }
 
     [Fact]
@@ -1254,16 +1301,307 @@ public class ProcessRunnerTests
     }
 
     [Fact]
-    public void CmdCommandQuotesMetacharacters()
+    public void CmdCommandBuildUsesRawArgumentContract()
     {
-        var command = WindowsCmd.BuildCommand(
+        var launch = WindowsCmd.BuildCommandWithEnvironment(
             @"C:\tools\copilot.cmd",
             ["--prompt", "foo&whoami", "--output-format", "json"]);
+        Assert.Contains("\"--prompt\"", launch.Command, StringComparison.Ordinal);
+        Assert.Contains("\"foo&whoami\"", launch.Command, StringComparison.Ordinal);
+        Assert.Single(launch.EnvironmentVariables);
+        Assert.Equal("%", launch.EnvironmentVariables.Single().Value);
+        var quoteLaunch = WindowsCmd.BuildCommandWithEnvironment(
+            @"C:\tools\copilot.cmd",
+            ["a\"b", "%PATH%"]);
+        Assert.Contains("\"a\"\"b\"", quoteLaunch.Command, StringComparison.Ordinal);
+        Assert.Contains("%PATH%", quoteLaunch.Command, StringComparison.Ordinal);
+        Assert.Throws<ArgumentException>(() => WindowsCmd.BuildCommandWithEnvironment(
+            @"C:\tools\copilot.cmd",
+            ["nul\0value"]));
+        Assert.Throws<ArgumentException>(() => WindowsCmd.BuildCommandWithEnvironment(
+            @"C:\tools\copilot.cmd",
+            ["line\r\nbreak"]));
+    }
+
+    [Fact]
+    public async Task RunsCmdAndBatFixturesWithoutDelayedExpansion()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var directory = Directory.CreateTempSubdirectory("caf cmd fixture ").FullName;
+        var helper = Path.Combine(directory, "capture-arguments.cs");
+        await File.WriteAllTextAsync(
+            helper,
+            """
+            #:property TargetFramework=net10.0
+            using System.Text;
+            foreach (var argument in args)
+            {
+                Console.Error.WriteLine(Convert.ToBase64String(Encoding.UTF8.GetBytes(argument)));
+            }
+            Console.WriteLine("{\"type\":\"assistant\",\"text\":\"cmd-ok\"}");
+            """,
+            new UTF8Encoding(false));
+
+        var marker = Path.Combine(directory, "injection-marker.txt");
+        var logicalArguments = new List<string>
+        {
+            "--plain",
+            "with spaces",
+            "%PATH%",
+            "a\"b",
+            "a\\\"b",
+            @"trailing\",
+            "a&b",
+            "a|b",
+            "a^b",
+            "日本語と空白",
+            "!bang!",
+            "(parentheses)",
+            "<input> >output",
+            $"a&echo injected>{marker}",
+            $"a\"&echo injected>{marker}",
+        };
+
+        var cases = new (string FileName, string Body, IReadOnlyList<string> Arguments)[]
+        {
+            (
+                "default.cmd",
+                $"""
+                @echo off
+                dotnet run --file "{helper}" -- %*
+                exit /b %ERRORLEVEL%
+                """,
+                logicalArguments),
+            (
+                "disabled.cmd",
+                $"""
+                @echo off
+                setlocal DisableDelayedExpansion
+                dotnet run --file "{helper}" -- %*
+                exit /b %ERRORLEVEL%
+                """,
+                logicalArguments),
+            (
+                "direct-first.cmd",
+                $"""
+                @echo off
+                dotnet run --file "{helper}" -- %1
+                exit /b %ERRORLEVEL%
+                """,
+                [logicalArguments[3]]),
+            (
+                "forward.bat",
+                $"""
+                @echo off
+                setlocal DisableDelayedExpansion
+                dotnet run --file "{helper}" -- %*
+                exit /b %ERRORLEVEL%
+                """,
+                logicalArguments),
+        };
+
+        foreach (var testCase in cases)
+        {
+            var script = Path.Combine(directory, testCase.FileName);
+            await File.WriteAllTextAsync(script, testCase.Body, new UTF8Encoding(false));
+            ProcessLaunchInfo? launch = null;
+            var result = await new ProcessRunner().RunAsync(
+                new ProcessRunRequest(
+                    script,
+                    testCase.Arguments,
+                    directory,
+                    OnLaunchResolved: info => launch = info),
+                CancellationToken.None);
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.Equal(
+                "{\"type\":\"assistant\",\"text\":\"cmd-ok\"}",
+                result.StandardOutput);
+            var actualLaunch = launch ?? throw new InvalidOperationException("Launch information was not captured.");
+            Assert.Equal(testCase.Arguments, actualLaunch.LogicalArguments);
+            Assert.Equal(["/d", "/v:off", "/s", "/c"], actualLaunch.ProcessArguments);
+            Assert.True(actualLaunch.UsedWindowsCmdWrapper);
+            Assert.Equal(Path.GetExtension(script), Path.GetExtension(actualLaunch.ResolvedExecutable), ignoreCase: true);
+
+            var actualArguments = result.StandardError
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => Encoding.UTF8.GetString(Convert.FromBase64String(line)))
+                .ToArray();
+            Assert.Equal(testCase.Arguments, actualArguments);
+            Assert.False(File.Exists(marker));
+        }
+
+        var multilinePrompt = GitHubCopilotDriver.ApplyCopilotSkills(
+            "issue #25 を調査してください。",
+            ["github-copilot"]);
+        Assert.Contains('\n', multilinePrompt);
+        var defaultScript = Path.Combine(directory, "default.cmd");
+        await Assert.ThrowsAsync<ArgumentException>(() => new ProcessRunner().RunAsync(
+            new ProcessRunRequest(defaultScript, ["--prompt", multilinePrompt], directory),
+            CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() => new ProcessRunner().RunAsync(
+            new ProcessRunRequest(defaultScript, ["line1\r\nline2"], directory),
+            CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task RunsPowerShellFixtureWithArgumentList()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var directory = Directory.CreateTempSubdirectory("caf ps fixture ").FullName;
+        var script = Path.Combine(directory, "fixture with spaces.ps1");
+        await File.WriteAllTextAsync(
+            script,
+            """
+            $ErrorActionPreference = 'Stop'
+            foreach ($argument in $args) {
+                [Console]::Error.WriteLine(
+                    [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($argument)))
+            }
+            [Console]::Out.WriteLine('{"type":"assistant","text":"ps-ok"}')
+            """,
+            new UTF8Encoding(false));
+
+        var marker = Path.Combine(directory, "injection-marker.txt");
+        var logicalArguments = new[]
+        {
+            "--prompt",
+            "%PATH%",
+            "a\"b",
+            "a!b",
+            "a&b",
+            "a|b",
+            "a^b",
+            "a<b",
+            "a>b",
+            "(parentheses)",
+            @"trailing\",
+            "日本語と空白",
+            "line1\nline2",
+            "line1\r\nline2",
+            $"a&echo injected>{marker}",
+        };
+
+        ProcessLaunchInfo? launch = null;
+        var result = await new ProcessRunner().RunAsync(
+            new ProcessRunRequest(
+                script,
+                logicalArguments,
+                directory,
+                OnLaunchResolved: info => launch = info),
+            CancellationToken.None);
+
+        Assert.Equal(0, result.ExitCode);
         Assert.Equal(
-            "\"C:\\tools\\copilot.cmd\" \"--prompt\" \"foo&whoami\" \"--output-format\" \"json\"",
-            command);
-        Assert.Equal("\"a\"\"b\"", WindowsCmd.QuoteArgument("a\"b"));
-        Assert.Equal("\"%%PATH%%\"", WindowsCmd.QuoteArgument("%PATH%"));
+            "{\"type\":\"assistant\",\"text\":\"ps-ok\"}",
+            result.StandardOutput);
+        var actualLaunch = launch ?? throw new InvalidOperationException("Launch information was not captured.");
+        Assert.Equal(script, actualLaunch.ResolvedExecutable);
+        Assert.Equal(
+            [
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-File",
+                script,
+                .. logicalArguments,
+            ],
+            actualLaunch.ProcessArguments);
+        Assert.Equal(logicalArguments, actualLaunch.LogicalArguments);
+        Assert.Equal("powershell", actualLaunch.Wrapper);
+        Assert.False(actualLaunch.UsedWindowsCmdWrapper);
+        Assert.Null(actualLaunch.RawArguments);
+        Assert.Equal("pwsh.exe", Path.GetFileName(actualLaunch.ProcessFileName));
+
+        var actualArguments = result.StandardError
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => Encoding.UTF8.GetString(Convert.FromBase64String(line)))
+            .ToArray();
+        Assert.Equal(logicalArguments, actualArguments);
+        Assert.False(File.Exists(marker));
+    }
+
+    [Fact]
+    public async Task RejectsNulCmdArgumentBeforeStartingProcess()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var directory = Directory.CreateTempSubdirectory("caf cmd nul ").FullName;
+        var script = Path.Combine(directory, "reject-nul.cmd");
+        await File.WriteAllTextAsync(script, "@echo off\r\nexit /b 0\r\n");
+        var runner = new ProcessRunner();
+        await Assert.ThrowsAsync<ArgumentException>(() => runner.RunAsync(
+            new ProcessRunRequest(script, ["nul\0value"], directory),
+            CancellationToken.None));
+    }
+
+    [Fact]
+    public void DecodesStrictUtf8AndInjectedOemEncoding()
+    {
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        var provider = new StubProcessEncodingProvider(Encoding.GetEncoding(
+            932,
+            EncoderFallback.ExceptionFallback,
+            DecoderFallback.ExceptionFallback));
+        Assert.Equal("日本語", StderrDecoder.Decode(
+            Encoding.UTF8.GetBytes("日本語"),
+            windowsCmdWrapper: true,
+            provider));
+        Assert.Equal("日本語", StderrDecoder.Decode(
+            provider.Encoding.GetBytes("日本語"),
+            windowsCmdWrapper: true,
+            provider));
+    }
+
+    [Fact]
+    public void RejectsBytesThatAreInvalidInBothEncodings()
+    {
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        var provider = new StubProcessEncodingProvider(Encoding.GetEncoding(
+            932,
+            EncoderFallback.ExceptionFallback,
+            DecoderFallback.ExceptionFallback));
+        Assert.Throws<DecoderFallbackException>(() => StderrDecoder.Decode(
+            [0x81],
+            windowsCmdWrapper: true,
+            provider));
+    }
+
+    [Fact]
+    public void RejectsInvalidUtf8ForNonWrapper()
+    {
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        var provider = new StubProcessEncodingProvider(Encoding.GetEncoding(
+            932,
+            EncoderFallback.ExceptionFallback,
+            DecoderFallback.ExceptionFallback));
+        Assert.Throws<DecoderFallbackException>(() => StderrDecoder.Decode(
+            [0xFF],
+            windowsCmdWrapper: false,
+            provider));
+    }
+
+    [Fact]
+    public void PropagatesOemDecodeFailure()
+    {
+        var expected = new InvalidOperationException("OEM decode failed.");
+        var provider = new ThrowingProcessEncodingProvider(expected);
+        var actual = Assert.Throws<InvalidOperationException>(() => StderrDecoder.Decode(
+            [0xFF],
+            windowsCmdWrapper: true,
+            provider));
+        Assert.Same(expected, actual);
     }
 
     private static bool ProcessHasExited(int processId)
@@ -1273,6 +1611,7 @@ public class ProcessRunnerTests
             var process = Process.GetProcessById(processId);
             return process.HasExited;
         }
+
         catch (ArgumentException)
         {
             return true;
@@ -1281,6 +1620,36 @@ public class ProcessRunnerTests
         {
             return true;
         }
+    }
+}
+
+internal sealed class StubProcessEncodingProvider : IProcessEncodingProvider
+{
+    public StubProcessEncodingProvider(Encoding encoding)
+    {
+        Encoding = encoding;
+    }
+
+    public Encoding Encoding { get; }
+
+    public Encoding GetWindowsOemEncoding()
+    {
+        return Encoding;
+    }
+}
+
+internal sealed class ThrowingProcessEncodingProvider : IProcessEncodingProvider
+{
+    private readonly Exception _exception;
+
+    public ThrowingProcessEncodingProvider(Exception exception)
+    {
+        _exception = exception;
+    }
+
+    public Encoding GetWindowsOemEncoding()
+    {
+        throw _exception;
     }
 }
 
@@ -1509,6 +1878,29 @@ public class AgentRunLogTests
     }
 
     [Fact]
+    public async Task LaunchEventRedactsLogicalAndRawArguments()
+    {
+        var token = "gho_" + new string('a', 36);
+        await using var log = TestRunLogs.CreateLog();
+        log.WriteLaunch(new ProcessLaunchInfo(
+            "fixture.cmd",
+            @"C:\tools\fixture.cmd",
+            "cmd.exe",
+            ["/d", "/s", "/c"],
+            [token],
+            UsedWindowsCmdWrapper: true,
+            RawArguments: "\"fixture.cmd\" \"" + token + "\""));
+
+        var events = TestRunLogs.ReadShared(log.EventsPath);
+        var text = TestRunLogs.ReadShared(log.TextLogPath);
+        Assert.Contains("\"logicalArguments\"", events, StringComparison.Ordinal);
+        Assert.DoesNotContain(token, events, StringComparison.Ordinal);
+        Assert.DoesNotContain(token, text, StringComparison.Ordinal);
+        Assert.Contains(SecretRedactor.Replacement, events, StringComparison.Ordinal);
+        Assert.Contains(SecretRedactor.Replacement, text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task HeartbeatRecordsElapsedProcessAliveAndLastOutput()
     {
         var time = new FakeTimeProvider(new DateTimeOffset(2026, 8, 25, 12, 0, 0, TimeSpan.Zero));
@@ -1662,7 +2054,7 @@ public class AgentRunLogTests
     }
 
     [Fact]
-    public async Task HeartbeatCancellationIsTraced()
+    public async Task HeartbeatDisposeDoesNotTraceNormalCompletion()
     {
         var capturing = new CapturingLoggerFactory();
         using (FacadeLog.UseLoggerFactory(capturing))
@@ -1672,8 +2064,24 @@ public class AgentRunLogTests
                 await Task.Delay(20);
             }
 
-            Assert.Contains("OperationCanceledException", capturing.Logger.Buffer.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("OperationCanceledException", capturing.Logger.Buffer.ToString(), StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public async Task HeartbeatProcessProbeFailureIsTraced()
+    {
+        var capturing = new CapturingLoggerFactory();
+        using (FacadeLog.UseLoggerFactory(capturing))
+        {
+            await using var log = (AgentRunLog)TestRunLogs.CreateLog();
+            log.AttachProcess(new ThrowingProcessLifetime());
+            log.WriteHeartbeat();
+            await log.DisposeAsync();
+        }
+
+        Assert.DoesNotContain("OperationCanceledException", capturing.Logger.Buffer.ToString(), StringComparison.Ordinal);
+        Assert.Contains("heartbeat process probe failed", capturing.Logger.Buffer.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1889,6 +2297,13 @@ public class AgentRunLogTests
     {
         await Task.Delay(50);
     }
+}
+
+internal sealed class ThrowingProcessLifetime : IProcessLifetime
+{
+    public int Id => throw new InvalidOperationException("heartbeat process probe failed");
+
+    public bool HasExited => throw new InvalidOperationException("heartbeat process probe failed");
 }
 
 public class AgentRunLogDirectoryTests

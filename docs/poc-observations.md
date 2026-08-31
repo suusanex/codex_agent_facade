@@ -36,7 +36,9 @@ copilot --prompt <prompt> --output-format json --allow-all [--resume <id>]
 grok --no-auto-update -p <prompt> --cwd <dir> --output-format streaming-json --always-approve [--resume <id>]
 ```
 
-Windows では `copilot` の拡張子なし npm shim は PE ではない。`.cmd` を優先する。
+Windows では拡張子なし `copilot` npm shim は PE ではない。通常の PATH 解決で
+公式 npm-generated `copilot.ps1` を選び、汎用 ProcessRunner の `pwsh.exe` host で
+`ArgumentList` 起動する。npm loader や package 内 native executable の解析は行わない。
 
 Grok は headless `streaming-json`（NDJSON）を使う。最終 `outputText` / `sessionId` は `text` chunk と `end` から復元する。tool_call / plan 等は run log へ流す。実機での長時間 tail は人手確認待ち。Copilot JSONL の session は `type=result` の `sessionId`。assistant 本文は `type=assistant.message` の `data.content`。
 
@@ -51,7 +53,7 @@ Facade 共通（2 Driver で実際に同じだったもの）:
 
 GitHub Copilot 固有:
 
-- `copilot.cmd`、`--prompt`、`--output-format json`、`--allow-all`、`--resume`
+- Windows は `copilot.ps1`、非 Windows は `copilot`。`--prompt`、`--output-format json`、`--allow-all`、`--resume`
 - JSONL。`result.sessionId`。`assistant.message.data.content`
 - Skill は `Use the /name skill.`（先頭 `/name` は CLI command）
 - `--output-format json` でも slash command 扱いになると TUI 行が混ざる
@@ -67,6 +69,107 @@ Grok Build 固有:
 意図的に共通化していないもの:
 
 - Skill 変換、session フラグ、JSON スキーマ、permission モデル、ACP
+
+## Windows `.cmd` 起動障害（2026-08-31）
+
+2026-08-31 の run `20260831T121158Z-218d3613` では、解決済みの
+`C:\Users\suusa\AppData\Roaming\npm\copilot.CMD` を `cmd.exe` へ渡す際、
+cmd 用に引用済みの文字列を `ProcessStartInfo.ArgumentList` の1要素へ入れていた。
+`.NET` の `ArgumentList` 再エスケープと `cmd.exe /s /c` の引用規則が衝突し、
+cmd が `copilot.CMD` を起動できず exit code 1 になった。Copilot 本体は起動していない。
+同じ構成で `ProcessStartInfo.Arguments=/d /s /c ""C:\...\copilot.CMD" "--version""`
+が成功することを確認した。
+
+修正では `.cmd` / `.bat` だけ `ArgumentList` を使わず、`/d /s /c` の後ろへ
+単一の raw command string を `ProcessStartInfo.Arguments` として設定する。
+引用符は cmd の raw command 用に二重化し、`%` はプロセス限定環境変数の置換結果を
+使って percent 展開を避ける。`&` / `|` / `^` / `<` / `>` / 括弧、空白、日本語、
+`!`、引用符を含む値は、対象バッチの `%1` / `%*` 転送で同値になることを実プロセス
+fixture で確認した。通常の `.exe` 経路は `ArgumentList` のまま維持する。launch event
+には wrapper switch と raw command、元の論理引数を別フィールドで記録し、既存の
+secret redaction を通す。
+
+cmd のバッチ引数 ABI では raw command や環境変数展開から CR/LF を `%1` / `%*` の
+1引数として安全に復元できない。実験では raw command 内の CR/LF がコマンド分割され、
+環境変数からの展開でも対象バッチへ届く前に分割されたため、NUL と CR/LF は構築時に
+明示的に拒否する。`/d /v:on /s /c` と `"!VAR!"` を使う即時遅延展開も実験したが、
+`a!b` は delayed expansion の走査で `ab` になり、LF/CRLF は対象バッチへ届く前に
+分割された。これは対象スクリプトを解析・変更せず、遅延展開にも依存しないための
+境界である。したがって `ApplyCopilotSkills("issue #25 を調査してください。", ["github-copilot"])`
+が生成する LF 複数行 prompt は、汎用 `.cmd` / `.bat` 経路ではなく、
+Windows の `copilot.ps1` → `pwsh.exe` の `ArgumentList` 経路へ渡す。`copilot.ps1` は
+PATH 上の公式 npm-generated shim を通常の script として選んでいるだけであり、npm
+loader や package 内 native executable の解析は行わない。実 Copilot smoke の結果は
+下記の実装後観測へ記録する。
+
+stderr は byte-based line reader で読み、strict UTF-8 を優先する。Windows wrapper で
+UTF-8 として不正な bytes は BCL の UTF-8 妥当性検査後に OS OEM encoding を strict に
+試し、両方で解釈できなければ例外として実行を失敗させる。stdout の UTF-8 JSONL 契約は
+変更しない。
+
+heartbeat は `PeriodicTimer` 自体を保持し、dispose 時に timer を破棄して pending wait を
+`false` で終了させる。正常終了では `OperationCanceledException` を記録せず、実際の
+background exception だけを `Exception.ToString()` 付きで trace し、run log failure
+として表面化する。
+
+実プロセス fixture では file-based C# helper を `.cmd` / `.bat` から起動し、遅延展開を
+有効化せず、既定設定、`DisableDelayedExpansion`、`%1`、`%*` の各経路で、`%PATH%`、
+引用符、各種メタ文字、日本語、空白を同値で受け取ることを確認した。`StderrDecoder` は
+BCL の妥当性検査で UTF-8 を先に判定し、正常なOEM行で例外を発生させず、OEM decode
+失敗は上位へ伝播する。
+
+### 実装後の配備と実 Copilot smoke（2026-08-31）
+
+親レビューで `approve-powershell-shim` の契約を確認し、未コミット build を配備して
+実 Copilot smoke を行った。ProductVersion は従来と同じ
+`1.0.0+d2633320a70114cb73199165636cee8da689e975` だったため、build の識別には DLL
+SHA256 を使う。
+
+配備:
+
+| 項目 | 実測値 |
+| --- | --- |
+| Scheduled Task | `\CodexAgentFacade` |
+| 旧 PID | `30052` |
+| 旧 DLL SHA256 | `EF235E5FC5FEC5DD38C77AC41F1D9D6E03D9809C181C12743FC7C8D04AFA489C` |
+| 新 PID | `59080` |
+| listener | `127.0.0.1:18765` |
+| 配備 DLL SHA256 | `4D0F03F9315570AF78B6C5E3F29EF1C2BD37F0E55FC85D1A9D66978E43A3FD95` |
+| rollback backup | `D:\Tools\Development\CodexAgentFacade.backup-20260831-224704` |
+
+Copilot:
+
+| 項目 | 実測値 |
+| --- | --- |
+| CLI version | `1.0.82` |
+| request ID | `copilot-mcp-smoke-759ff2fde50d47fc82d81524fc24234f` |
+| run/job ID | `20260831T134929Z-5e7ad586` |
+| session ID | `f71e9c0c-ebbe-4904-ba49-e1edee537e41` |
+| outputText | `CAF_SMOKE_OK` |
+| exit code | `0` |
+| workspace unchanged | `true` |
+| events | `C:\Users\suusa\.codex-agent-facade\runs\20260831T134929Z-5e7ad586.events.jsonl` |
+| text | `C:\Users\suusa\.codex-agent-facade\runs\20260831T134929Z-5e7ad586.log` |
+| launch | resolved `C:\Users\suusa\AppData\Roaming\npm\copilot.ps1`; process `C:\Program Files\PowerShell\7\pwsh.exe`; wrapper `powershell` |
+
+LF 付き Skill prompt は logical/process arguments に同値で記録され、PowerShell
+`ArgumentList` 経路で cmd batch ABI を通らずに届いた。配備後の `server.log` は
+ERROR `0`、`OperationCanceledException` `0`、replacement-character 文字化け `0` だった。
+
+この smoke workspace には指定した `github-copilot` skill 自体が存在せず、Copilot 内部
+tool event は `skill-not-found` になった。ただしこれは Skill 配備状態の観測であり、
+LF prompt transport、CLI job 完了、exit code 0、workspace 不変の成功判定は隠さず分離して
+記録する。成功 run の結果は成立とするが、Skill invoke 自体は未成立である。
+
+### Purpose review 最終状態
+
+purpose-review-runner の run `f6b3a2b7-9a7e-4124-8b6c-e373b701a203` は round 3 terminal
+`HUMAN_DECISION_REQUIRED` で終了した。残存 `PUR-001` は review 開始時の旧 purpose
+context にあった `copilot.CMD` 必須条件を reviewer が保持したことによるもので、
+product authority であるユーザーの ask_user と明示承認 `approve-powershell-shim` により
+判断は解決済みである。現設計は採用・配備・実 Copilot smoke 成功済みだが、runner status
+自体は `HUMAN_DECISION_REQUIRED` のまま記録する。skill仕様に従い round 4、新run、
+session再構築は行わない。
 
 ## Streamable HTTP（issue #7）
 
@@ -251,4 +354,3 @@ devin --respect-workspace-trust false [--permission-mode dangerous] [--resume <s
 5. 実 `cancel_agent_job` と `auto_approve=false`
 
 以前の blocked 記録（同日の導入前）: 公式 Windows 導入スクリプトが OS error 5 で失敗し、当時は PATH に `devin` が無かった。その後この環境へ CLI を導入し、上記の実 MCP スモークまで到達した。
-

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Unicode;
 
 /// <summary>
 /// 外部 CLI プロセス起動のテスト境界。実OS変更を伴う処理はここだけに閉じる。
@@ -24,7 +25,10 @@ public sealed record ProcessLaunchInfo(
     string ResolvedExecutable,
     string ProcessFileName,
     IReadOnlyList<string> ProcessArguments,
-    bool UsedWindowsCmdWrapper);
+    IReadOnlyList<string> LogicalArguments,
+    bool UsedWindowsCmdWrapper,
+    string? RawArguments = null,
+    string Wrapper = "none");
 
 public sealed record ProcessRunRequest(
     string FileName,
@@ -47,21 +51,31 @@ public interface IProcessJobGuard
 }
 
 /// <summary>
-/// UseShellExecute を使わず stdout/stderr を収集する。Windows の .cmd shim は cmd.exe /c で起動する。
+/// UseShellExecute を使わず stdout/stderr を収集する。Windows script は適切な host 経由で起動する。
 /// </summary>
 public sealed class ProcessRunner : IProcessRunner
 {
     private readonly IProcessJobGuard _jobGuard;
+    private readonly IProcessEncodingProvider _encodingProvider;
 
     public ProcessRunner()
-        : this(OperatingSystem.IsWindows() ? new WindowsKillOnCloseJobGuard() : NullProcessJobGuard.Instance)
+        : this(
+            OperatingSystem.IsWindows() ? new WindowsKillOnCloseJobGuard() : NullProcessJobGuard.Instance,
+            SystemProcessEncodingProvider.Instance)
     {
     }
 
     public ProcessRunner(IProcessJobGuard jobGuard)
+        : this(jobGuard, SystemProcessEncodingProvider.Instance)
+    {
+    }
+
+    internal ProcessRunner(IProcessJobGuard jobGuard, IProcessEncodingProvider encodingProvider)
     {
         ArgumentNullException.ThrowIfNull(jobGuard);
+        ArgumentNullException.ThrowIfNull(encodingProvider);
         _jobGuard = jobGuard;
+        _encodingProvider = encodingProvider;
     }
 
     public async Task<ProcessRunResult> RunAsync(ProcessRunRequest request, CancellationToken cancellationToken)
@@ -70,14 +84,30 @@ public sealed class ProcessRunner : IProcessRunner
         ArgumentException.ThrowIfNullOrWhiteSpace(request.WorkingDirectory);
         cancellationToken.ThrowIfCancellationRequested();
 
-        var resolved = ExecutableResolver.Resolve(request.FileName);
-        var startInfo = CreateStartInfo(resolved, request, out var usedWindowsCmdWrapper);
-        request.OnLaunchResolved?.Invoke(new ProcessLaunchInfo(
-            request.FileName,
-            resolved,
-            startInfo.FileName,
-            [.. startInfo.ArgumentList],
-            usedWindowsCmdWrapper));
+        string resolved;
+        ProcessStartInfo startInfo;
+        ProcessWrapperKind wrapperKind;
+        try
+        {
+            resolved = ExecutableResolver.Resolve(request.FileName);
+            startInfo = CreateStartInfo(resolved, request, out wrapperKind);
+            request.OnLaunchResolved?.Invoke(new ProcessLaunchInfo(
+                request.FileName,
+                resolved,
+                startInfo.FileName,
+                wrapperKind == ProcessWrapperKind.WindowsCmd
+                    ? ["/d", "/v:off", "/s", "/c"]
+                    : [.. startInfo.ArgumentList],
+                request.Arguments,
+                wrapperKind == ProcessWrapperKind.WindowsCmd,
+                wrapperKind == ProcessWrapperKind.WindowsCmd ? startInfo.Arguments : null,
+                GetWrapperName(wrapperKind)));
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            throw;
+        }
 
         using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
         var stdout = new StringBuilder();
@@ -128,8 +158,14 @@ public sealed class ProcessRunner : IProcessRunner
             }
         });
 
-        var stdoutTask = ReadLinesAsync(process.StandardOutput, stdout, request.StdoutLineCallback, cancellationToken);
-        var stderrTask = ReadLinesAsync(process.StandardError, stderr, request.StderrLineCallback, cancellationToken);
+        var stdoutTask = ReadTextLinesAsync(process.StandardOutput, stdout, request.StdoutLineCallback, cancellationToken);
+        var stderrTask = ReadLinesAsync(
+            process.StandardError.BaseStream,
+            stderr,
+            request.StderrLineCallback,
+            wrapperKind == ProcessWrapperKind.WindowsCmd,
+            _encodingProvider,
+            cancellationToken);
         var readersTask = Task.WhenAll(stdoutTask, stderrTask);
         var waitTask = process.WaitForExitAsync(cancellationToken);
 
@@ -159,7 +195,7 @@ public sealed class ProcessRunner : IProcessRunner
     private static ProcessStartInfo CreateStartInfo(
         string resolvedExecutable,
         ProcessRunRequest request,
-        out bool usedWindowsCmdWrapper)
+        out ProcessWrapperKind wrapperKind)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -171,22 +207,38 @@ public sealed class ProcessRunner : IProcessRunner
             RedirectStandardError = true,
             StandardInputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
             StandardOutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
-            StandardErrorEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
         };
 
         var isWindowsScript = OperatingSystem.IsWindows()
             && (resolvedExecutable.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase)
                 || resolvedExecutable.EndsWith(".bat", StringComparison.OrdinalIgnoreCase));
-        usedWindowsCmdWrapper = isWindowsScript;
 
         if (isWindowsScript)
         {
-            // ArgumentList を cmd にバラして渡すと & | 等がメタ文字になる。/s /c で1本の quoted command にする。
+            // cmd.exe の /c は1本の raw command string として渡し、ArgumentList の
+            // 再エスケープだけを避ける。値の引用は対象バッチの %1 / %* に依存する。
             startInfo.FileName = Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe";
-            startInfo.ArgumentList.Add("/d");
-            startInfo.ArgumentList.Add("/s");
-            startInfo.ArgumentList.Add("/c");
-            startInfo.ArgumentList.Add(WindowsCmd.BuildCommand(resolvedExecutable, request.Arguments));
+            var launch = WindowsCmd.BuildCommandWithEnvironment(resolvedExecutable, request.Arguments);
+            startInfo.Arguments = $"/d /v:off /s /c \"{launch.Command}\"";
+            foreach (var pair in launch.EnvironmentVariables)
+            {
+                startInfo.Environment[pair.Key] = pair.Value;
+            }
+            wrapperKind = ProcessWrapperKind.WindowsCmd;
+        }
+        else if (resolvedExecutable.EndsWith(".ps1", StringComparison.OrdinalIgnoreCase))
+        {
+            startInfo.FileName = ExecutableResolver.Resolve(OperatingSystem.IsWindows() ? "pwsh.exe" : "pwsh");
+            startInfo.ArgumentList.Add("-NoLogo");
+            startInfo.ArgumentList.Add("-NoProfile");
+            startInfo.ArgumentList.Add("-NonInteractive");
+            startInfo.ArgumentList.Add("-File");
+            startInfo.ArgumentList.Add(resolvedExecutable);
+            foreach (var argument in request.Arguments)
+            {
+                startInfo.ArgumentList.Add(argument);
+            }
+            wrapperKind = ProcessWrapperKind.PowerShell;
         }
         else
         {
@@ -195,6 +247,7 @@ public sealed class ProcessRunner : IProcessRunner
             {
                 startInfo.ArgumentList.Add(argument);
             }
+            wrapperKind = ProcessWrapperKind.None;
         }
 
         if (request.EnvironmentVariables is not null)
@@ -208,7 +261,73 @@ public sealed class ProcessRunner : IProcessRunner
         return startInfo;
     }
 
+    private static string GetWrapperName(ProcessWrapperKind wrapperKind)
+    {
+        return wrapperKind switch
+        {
+            ProcessWrapperKind.WindowsCmd => "windows-cmd",
+            ProcessWrapperKind.PowerShell => "powershell",
+            _ => "none",
+        };
+    }
+
     private static async Task ReadLinesAsync(
+        Stream stream,
+        StringBuilder sink,
+        Action<string>? onLine,
+        bool windowsCmdWrapper,
+        IProcessEncodingProvider encodingProvider,
+        CancellationToken cancellationToken)
+    {
+        var readBuffer = new byte[4096];
+        var lineBuffer = new List<byte>(256);
+        var pendingCarriageReturn = false;
+        while (true)
+        {
+            var read = await stream.ReadAsync(readBuffer.AsMemory(), cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+            {
+                break;
+            }
+
+            for (var index = 0; index < read; index++)
+            {
+                var value = readBuffer[index];
+                if (pendingCarriageReturn)
+                {
+                    AppendDecodedLine(lineBuffer, sink, onLine, windowsCmdWrapper, encodingProvider);
+                    lineBuffer.Clear();
+                    pendingCarriageReturn = false;
+                    if (value == (byte)'\n')
+                    {
+                        continue;
+                    }
+                }
+
+                if (value == (byte)'\r')
+                {
+                    pendingCarriageReturn = true;
+                }
+                else if (value == (byte)'\n')
+                {
+                    AppendDecodedLine(lineBuffer, sink, onLine, windowsCmdWrapper, encodingProvider);
+                    lineBuffer.Clear();
+                }
+                else
+                {
+                    lineBuffer.Add(value);
+                }
+            }
+
+        }
+
+        if (pendingCarriageReturn || lineBuffer.Count > 0)
+        {
+            AppendDecodedLine(lineBuffer, sink, onLine, windowsCmdWrapper, encodingProvider);
+        }
+    }
+
+    private static async Task ReadTextLinesAsync(
         StreamReader reader,
         StringBuilder sink,
         Action<string>? onLine,
@@ -230,6 +349,23 @@ public sealed class ProcessRunner : IProcessRunner
             sink.Append(line);
             onLine?.Invoke(line);
         }
+    }
+
+    private static void AppendDecodedLine(
+        List<byte> lineBuffer,
+        StringBuilder sink,
+        Action<string>? onLine,
+        bool windowsCmdWrapper,
+        IProcessEncodingProvider encodingProvider)
+    {
+        var line = StderrDecoder.Decode(lineBuffer.ToArray(), windowsCmdWrapper, encodingProvider);
+        if (sink.Length > 0)
+        {
+            sink.Append('\n');
+        }
+
+        sink.Append(line);
+        onLine?.Invoke(line);
     }
 
     private sealed class ProcessLifetime : IProcessLifetime
@@ -309,30 +445,154 @@ public sealed class ProcessRunner : IProcessRunner
     }
 }
 
+internal enum ProcessWrapperKind
+{
+    None,
+    WindowsCmd,
+    PowerShell,
+}
+
 /// <summary>
-/// cmd.exe に渡す1コマンドを引用符で囲み、メタ文字として解釈されないようにする。
+/// cmd.exe 用の raw command string を組み立て、literal percent は環境変数の置換結果で表現する。
 /// </summary>
 internal static class WindowsCmd
 {
-    public static string QuoteArgument(string value)
-    {
-        ArgumentNullException.ThrowIfNull(value);
-        var escaped = value
-            .Replace("\"", "\"\"", StringComparison.Ordinal)
-            .Replace("%", "%%", StringComparison.Ordinal);
-        return "\"" + escaped + "\"";
-    }
+    private const string EnvironmentVariablePrefix = "__CODEX_AGENT_FACADE_ARG_";
 
-    public static string BuildCommand(string executable, IReadOnlyList<string> arguments)
+    public static WindowsCmdLaunch BuildCommandWithEnvironment(
+        string executable,
+        IReadOnlyList<string> arguments)
     {
-        var builder = new StringBuilder(QuoteArgument(executable));
+        ArgumentNullException.ThrowIfNull(executable);
+        ArgumentNullException.ThrowIfNull(arguments);
+
+        var environmentVariables = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var prefix = EnvironmentVariablePrefix + Guid.NewGuid().ToString("N") + "_";
+        var percentVariable = prefix + "PERCENT";
+        environmentVariables[percentVariable] = "%";
+
+        var command = new StringBuilder(QuoteArgument(executable, percentVariable));
         foreach (var argument in arguments)
         {
-            builder.Append(' ');
-            builder.Append(QuoteArgument(argument));
+            command.Append(' ').Append(QuoteArgument(argument, percentVariable));
         }
 
+        return new WindowsCmdLaunch(command.ToString(), environmentVariables);
+    }
+
+    private static string QuoteArgument(string value, string percentVariable)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        ArgumentNullException.ThrowIfNull(percentVariable);
+        if (value.IndexOfAny(['\0', '\r', '\n']) >= 0)
+        {
+            // cmd.exe はバッチを呼び出す境界で CR/LF をコマンド区切りとして扱うため、
+            // 対象スクリプトを変更せずに %1 / %* の1引数へ復元する表現が存在しない。
+            throw new ArgumentException(
+                "Windows cmd arguments cannot contain NUL, CR, or LF.",
+                nameof(value));
+        }
+
+        // cmd.exe の percent 展開は変数の置換結果を再展開しないため、環境変数に
+        // literal '%' を置いてから raw command string へ展開する。
+        var builder = new StringBuilder(value.Length + 2);
+        builder.Append('"');
+        var trailingBackslashes = 0;
+        foreach (var character in value)
+        {
+            if (character == '\\')
+            {
+                trailingBackslashes++;
+                continue;
+            }
+
+            if (character == '"')
+            {
+                builder.Append('\\', trailingBackslashes * 2);
+                builder.Append("\"\"");
+            }
+            else if (character == '%')
+            {
+                builder.Append('\\', trailingBackslashes);
+                builder.Append('%').Append(percentVariable).Append('%');
+            }
+            else
+            {
+                builder.Append('\\', trailingBackslashes);
+                builder.Append(character);
+            }
+
+            trailingBackslashes = 0;
+        }
+
+        builder.Append('\\', trailingBackslashes * 2);
+        builder.Append('"');
         return builder.ToString();
+    }
+}
+
+internal sealed record WindowsCmdLaunch(
+    string Command,
+    IReadOnlyDictionary<string, string> EnvironmentVariables);
+
+internal interface IProcessEncodingProvider
+{
+    Encoding GetWindowsOemEncoding();
+}
+
+internal sealed class SystemProcessEncodingProvider : IProcessEncodingProvider
+{
+    public static SystemProcessEncodingProvider Instance { get; } = new();
+
+    public Encoding GetWindowsOemEncoding()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException("Windows OEM encoding is only available on Windows.");
+        }
+
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        var codePage = GetOEMCP();
+        if (codePage == 0)
+        {
+            throw new InvalidOperationException("Windows OEM code page could not be determined.");
+        }
+
+        return Encoding.GetEncoding(
+            checked((int)codePage),
+            EncoderFallback.ExceptionFallback,
+            DecoderFallback.ExceptionFallback);
+    }
+
+    // .NET の Encoding.Default は UTF-8 であり、WinExe や Task Scheduler では
+    // Console.OutputEncoding に依存できないため、Windows の OEM API で判定する。
+    [DllImport("kernel32.dll")]
+    private static extern uint GetOEMCP();
+}
+
+internal static class StderrDecoder
+{
+    private static readonly Encoding Utf8Strict = new UTF8Encoding(false, true);
+
+    public static string Decode(
+        byte[] bytes,
+        bool windowsCmdWrapper,
+        IProcessEncodingProvider encodingProvider)
+    {
+        ArgumentNullException.ThrowIfNull(bytes);
+        ArgumentNullException.ThrowIfNull(encodingProvider);
+
+        if (Utf8.IsValid(bytes))
+        {
+            return Utf8Strict.GetString(bytes);
+        }
+
+        if (!windowsCmdWrapper)
+        {
+            throw new DecoderFallbackException("stderr contains invalid UTF-8.");
+        }
+
+        return encodingProvider.GetWindowsOemEncoding().GetString(bytes);
     }
 }
 
