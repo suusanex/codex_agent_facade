@@ -109,10 +109,10 @@ Windowsの現環境では `copilot.CMD` が汎用 cmd hostとして起動され�
 通らずstdin handleでchildへ継承される。npm loader、package内native executable、
 shim内容の解析は行わない。実 Copilot smoke の新stdin経路結果は下記に記録する。
 
-stderr は byte-based line reader で読み、strict UTF-8 を優先する。Windows wrapper で
-UTF-8 として不正な bytes は BCL の UTF-8 妥当性検査後に OS OEM encoding を strict に
-試し、両方で解釈できなければ例外として実行を失敗させる。stdout の UTF-8 JSONL 契約は
-変更しない。
+stderr は byte-based line reader で読み、Windows の `.cmd` / `.bat` wrapper は OS の OEM
+encoding、wrapperなし（native executable と PowerShell host）は UTF-8 として、選択した
+encodingで厳密にデコードする。選択した encoding で解釈できなければ例外として実行を
+失敗させる。stdout の UTF-8 JSONL 契約は変更しない。
 
 heartbeat は `PeriodicTimer` 自体を保持し、dispose 時に timer を破棄して pending wait を
 `false` で終了させる。正常終了では `OperationCanceledException` を記録せず、実際の
@@ -122,8 +122,8 @@ background exception だけを `Exception.ToString()` 付きで trace し、run 
 実プロセス fixture では file-based C# helper を `.cmd` / `.bat` から起動し、遅延展開を
 有効化せず、既定設定、`DisableDelayedExpansion`、`%1`、`%*` の各経路で、`%PATH%`、
 引用符、各種メタ文字、日本語、空白を同値で受け取ることを確認した。`StderrDecoder` は
-BCL の妥当性検査で UTF-8 を先に判定し、正常なOEM行で例外を発生させず、OEM decode
-失敗は上位へ伝播する。
+WindowsCmd wrapperではOEM、wrapperなしではUTF-8を選択して厳密にデコードし、選択した
+encodingのdecode失敗は上位へ伝播する。
 
 ### 前回の配備と実 Copilot smoke（旧 copilot.ps1 / argv 経路、2026-08-31）
 
