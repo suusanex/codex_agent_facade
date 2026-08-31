@@ -28,7 +28,9 @@ public sealed record ProcessLaunchInfo(
     IReadOnlyList<string> LogicalArguments,
     bool UsedWindowsCmdWrapper,
     string? RawArguments = null,
-    string Wrapper = "none");
+    string Wrapper = "none",
+    bool HasStandardInput = false,
+    long? StandardInputByteCount = null);
 
 public sealed record ProcessRunRequest(
     string FileName,
@@ -38,7 +40,8 @@ public sealed record ProcessRunRequest(
     Action<string>? StdoutLineCallback = null,
     Action<string>? StderrLineCallback = null,
     Action<IProcessLifetime>? OnProcessStarted = null,
-    Action<ProcessLaunchInfo>? OnLaunchResolved = null);
+    Action<ProcessLaunchInfo>? OnLaunchResolved = null,
+    string? StandardInputText = null);
 
 public sealed record ProcessRunResult(int ExitCode, string StandardOutput, string StandardError);
 
@@ -101,7 +104,12 @@ public sealed class ProcessRunner : IProcessRunner
                 request.Arguments,
                 wrapperKind == ProcessWrapperKind.WindowsCmd,
                 wrapperKind == ProcessWrapperKind.WindowsCmd ? startInfo.Arguments : null,
-                GetWrapperName(wrapperKind)));
+                GetWrapperName(wrapperKind),
+                request.StandardInputText is not null,
+                request.StandardInputText is null
+                    ? null
+                    : new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)
+                        .GetByteCount(request.StandardInputText)));
         }
         catch (Exception ex)
         {
@@ -126,7 +134,6 @@ public sealed class ProcessRunner : IProcessRunner
             throw;
         }
 
-        process.StandardInput.Close();
         IDisposable? killOnClose = null;
         try
         {
@@ -166,20 +173,32 @@ public sealed class ProcessRunner : IProcessRunner
             wrapperKind == ProcessWrapperKind.WindowsCmd,
             _encodingProvider,
             cancellationToken);
-        var readersTask = Task.WhenAll(stdoutTask, stderrTask);
+        var stdinTask = WriteStandardInputAsync(process, request.StandardInputText, cancellationToken);
+        var ioTasks = new[] { stdoutTask, stderrTask, stdinTask };
         var waitTask = process.WaitForExitAsync(cancellationToken);
 
         try
         {
-            // callback 失敗で pipe を読まなくなると WaitForExit が無限待ちになる。先に reader 故障を見て kill する。
-            var finished = await Task.WhenAny(waitTask, readersTask).ConfigureAwait(false);
-            if (finished == readersTask && readersTask.IsFaulted)
+            // 任意のI/O taskが失敗した時点でkillし、残りのpipeが閉じるのを待つ。
+            var pendingIoTasks = new HashSet<Task>(ioTasks);
+            while (pendingIoTasks.Count > 0)
             {
-                TryKill(process);
+                var finished = await Task.WhenAny([waitTask, .. pendingIoTasks]).ConfigureAwait(false);
+                if (finished == waitTask)
+                {
+                    break;
+                }
+
+                pendingIoTasks.Remove(finished);
+                if (finished.IsFaulted || finished.IsCanceled)
+                {
+                    TryKill(process);
+                    break;
+                }
             }
 
             await waitTask.ConfigureAwait(false);
-            await readersTask.ConfigureAwait(false);
+            await Task.WhenAll(ioTasks).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -269,6 +288,29 @@ public sealed class ProcessRunner : IProcessRunner
             ProcessWrapperKind.PowerShell => "powershell",
             _ => "none",
         };
+    }
+
+    private static async Task WriteStandardInputAsync(
+        Process process,
+        string? text,
+        CancellationToken cancellationToken)
+    {
+        if (text is null)
+        {
+            process.StandardInput.Close();
+            return;
+        }
+
+        try
+        {
+            // TextWriterのWriteAsyncは本文を変換・改行追加せず、指定されたUTF-8文字列だけを送る。
+            await process.StandardInput.WriteAsync(text.AsMemory(), cancellationToken).ConfigureAwait(false);
+            await process.StandardInput.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            process.StandardInput.Close();
+        }
     }
 
     private static async Task ReadLinesAsync(

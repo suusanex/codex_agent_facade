@@ -234,7 +234,9 @@ internal sealed class AgentRunLog : IAgentRunLog
                 info.LogicalArguments,
                 info.UsedWindowsCmdWrapper,
                 info.RawArguments,
-                wrapper),
+                wrapper,
+                info.HasStandardInput,
+                info.StandardInputByteCount),
             AgentJson.Options);
         var human = "launch resolved=" + info.ResolvedExecutable
             + " processFileName=" + info.ProcessFileName
@@ -705,7 +707,9 @@ internal sealed class AgentRunLog : IAgentRunLog
         IReadOnlyList<string> LogicalArguments,
         bool UsedWindowsCmdWrapper,
         string? RawArguments,
-        string Wrapper);
+        string Wrapper,
+        bool HasStandardInput,
+        long? StandardInputByteCount);
 
     private sealed record StartedPayload(
         string Agent,

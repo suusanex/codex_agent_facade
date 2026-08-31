@@ -183,9 +183,7 @@ public class AgentFacadeTests
             new AgentRunRequest(AgentFacade.GitHubCopilotAgent, "hello", Path.GetTempPath(), null, null),
             onStdoutLine: null,
             CancellationToken.None);
-        Assert.Equal(
-            OperatingSystem.IsWindows() ? "copilot.ps1" : "copilot",
-            runner.LastRequest!.FileName);
+        Assert.Equal("copilot", runner.LastRequest!.FileName);
         Assert.Equal(AgentFacade.GitHubCopilotAgent, result.Agent);
         Assert.Equal("ok", result.OutputText);
         Assert.False(string.IsNullOrWhiteSpace(result.RunId));
@@ -536,8 +534,9 @@ public class GitHubCopilotDriverTests
         var args = GitHubCopilotDriver.BuildArguments(
             new AgentRunRequest(AgentFacade.GitHubCopilotAgent, "fix the bug", @"C:\repo", null, null));
         Assert.Equal(
-            ["--prompt", "fix the bug", "--output-format", "json", "--allow-all"],
+            ["--output-format", "json", "--allow-all"],
             args);
+        Assert.DoesNotContain("--prompt", args);
     }
 
     [Fact]
@@ -545,7 +544,8 @@ public class GitHubCopilotDriverTests
     {
         var args = GitHubCopilotDriver.BuildArguments(
             new AgentRunRequest(AgentFacade.GitHubCopilotAgent, "ask", @"C:\repo", null, null, AutoApprove: false));
-        Assert.Equal(["--prompt", "ask", "--output-format", "json"], args);
+        Assert.Equal(["--output-format", "json"], args);
+        Assert.DoesNotContain("--prompt", args);
         Assert.DoesNotContain("--allow-all", args);
     }
 
@@ -559,24 +559,16 @@ public class GitHubCopilotDriverTests
                 @"C:\repo",
                 "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                 ["$dotnet-file-based-apps", "review"]));
+        Assert.Equal(
+            ["--output-format", "json", "--allow-all", "--resume", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
+            args);
         Assert.Contains("--resume", args);
         Assert.Contains("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", args);
-        var prompt = args[args.IndexOf("--prompt") + 1];
-        Assert.StartsWith("Use the /dotnet-file-based-apps skill.", prompt, StringComparison.Ordinal);
-        Assert.Contains("Use the /review skill.", prompt, StringComparison.Ordinal);
-        Assert.EndsWith("continue", prompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("--prompt", args);
     }
 
     [Fact]
-    public void SelectsPowerShellShimOnWindows()
-    {
-        Assert.Equal(
-            OperatingSystem.IsWindows() ? "copilot.ps1" : "copilot",
-            GitHubCopilotDriver.GetExecutableName());
-    }
-
-    [Fact]
-    public async Task RunPreservesMultilineSkillPromptInLogicalArguments()
+    public async Task RunSendsMultilineSkillPromptThroughStandardInput()
     {
         var runner = new RecordingProcessRunner
         {
@@ -597,16 +589,17 @@ public class GitHubCopilotDriverTests
             onStdoutLine: null,
             CancellationToken.None);
 
-        var prompt = runner.LastRequest!.Arguments[1];
+        var prompt = runner.LastRequest!.StandardInputText;
+        Assert.NotNull(prompt);
         Assert.Equal(
             GitHubCopilotDriver.ApplyCopilotSkills(
                 "issue #25 を調査してください。",
                 ["github-copilot"]),
-            prompt);
-        Assert.Contains('\n', prompt);
-        Assert.Equal(
-            OperatingSystem.IsWindows() ? "copilot.ps1" : "copilot",
-            runner.LastRequest.FileName);
+                prompt!);
+        Assert.Contains('\n', prompt!);
+        Assert.Equal("copilot", runner.LastRequest.FileName);
+        Assert.DoesNotContain("--prompt", runner.LastRequest.Arguments);
+        Assert.Equal(prompt, runner.LastRequest.StandardInputText);
     }
 
     [Fact]
@@ -1289,9 +1282,42 @@ public class ProcessRunnerTests
                 "dotnet",
                 ["--info"],
                 Directory.GetCurrentDirectory(),
+                StandardInputText: new string('x', 128 * 1024),
                 StdoutLineCallback: _ => throw new InvalidOperationException("log volume full")),
             CancellationToken.None));
         Assert.Equal("log volume full", ex.Message);
+    }
+
+    [Fact]
+    public async Task StdoutCallbackFailureKillsLongRunningProcess()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var directory = Directory.CreateTempSubdirectory("caf callback fixture ").FullName;
+        var script = Path.Combine(directory, "long-running.ps1");
+        await File.WriteAllTextAsync(
+            script,
+            """
+            while ($true) {
+                Write-Output 'tick'
+                Start-Sleep -Seconds 1
+            }
+            """,
+            new UTF8Encoding(false));
+
+        var runTask = new ProcessRunner().RunAsync(
+            new ProcessRunRequest(
+                script,
+                [],
+                directory,
+                StdoutLineCallback: _ => throw new InvalidOperationException("long-running callback failure")),
+            CancellationToken.None);
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => runTask.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal("long-running callback failure", ex.Message);
     }
 
     [Fact]
@@ -1530,6 +1556,136 @@ public class ProcessRunnerTests
     }
 
     [Fact]
+    public async Task WritesExactStandardInputToPowerShellAndCmdFixtures()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var directory = Directory.CreateTempSubdirectory("caf stdin fixture ").FullName;
+        var psScript = Path.Combine(directory, "capture-stdin.ps1");
+        await File.WriteAllTextAsync(
+            psScript,
+            """
+            [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
+            $bytes = [Text.Encoding]::UTF8.GetBytes([Console]::In.ReadToEnd())
+            [Console]::Error.WriteLine('B64:' + [Convert]::ToBase64String($bytes))
+            [Console]::Out.WriteLine('stdin-ok')
+            """,
+            new UTF8Encoding(false));
+        var helper = Path.Combine(directory, "capture-stdin.cs");
+        await File.WriteAllTextAsync(
+            helper,
+            """
+            #:property TargetFramework=net10.0
+            using System.Text;
+            var bytes = Encoding.UTF8.GetBytes(Console.In.ReadToEnd());
+            Console.Error.WriteLine("B64:" + Convert.ToBase64String(bytes));
+            Console.WriteLine("stdin-ok");
+            """,
+            new UTF8Encoding(false));
+        var cmdScript = Path.Combine(directory, "forward-stdin.cmd");
+        await File.WriteAllTextAsync(
+            cmdScript,
+            $"""
+            @echo off
+            dotnet run --file "{helper}" --
+            exit /b %ERRORLEVEL%
+            """,
+            new UTF8Encoding(false));
+
+        var input = "Use the /github-copilot skill.\nissue #25 を調査してください。\r\n"
+            + "%PATH% a\"b a!b a&b a|b a^b <input> (parentheses) 日本語 "
+            + @"trailing\"
+            + "\0終端"
+            + new string('x', 128 * 1024);
+
+        ProcessLaunchInfo? powerShellLaunch = null;
+        var powerShellResult = await new ProcessRunner().RunAsync(
+            new ProcessRunRequest(
+                psScript,
+                [],
+                directory,
+                OnLaunchResolved: info => powerShellLaunch = info,
+                    StandardInputText: input),
+                CancellationToken.None);
+        Assert.Equal(0, powerShellResult.ExitCode);
+        Assert.Equal("stdin-ok", powerShellResult.StandardOutput);
+        Assert.Equal(input, DecodeSingleBase64Line(powerShellResult.StandardError));
+        var actualPowerShellLaunch = powerShellLaunch ?? throw new InvalidOperationException("PowerShell launch was not captured.");
+        Assert.True(actualPowerShellLaunch.HasStandardInput);
+        Assert.Equal((long)Encoding.UTF8.GetByteCount(input), actualPowerShellLaunch.StandardInputByteCount);
+        Assert.Equal("powershell", actualPowerShellLaunch.Wrapper);
+        Assert.Null(actualPowerShellLaunch.RawArguments);
+
+        ProcessLaunchInfo? cmdLaunch = null;
+        var cmdResult = await new ProcessRunner().RunAsync(
+            new ProcessRunRequest(
+                cmdScript,
+                [],
+                directory,
+                OnLaunchResolved: info => cmdLaunch = info,
+                StandardInputText: input),
+            CancellationToken.None);
+        Assert.Equal(0, cmdResult.ExitCode);
+        Assert.Equal("stdin-ok", cmdResult.StandardOutput);
+        Assert.Equal(input, DecodeSingleBase64Line(cmdResult.StandardError));
+        var actualCmdLaunch = cmdLaunch ?? throw new InvalidOperationException("cmd launch was not captured.");
+        Assert.True(actualCmdLaunch.HasStandardInput);
+        Assert.Equal((long)Encoding.UTF8.GetByteCount(input), actualCmdLaunch.StandardInputByteCount);
+        Assert.Equal("windows-cmd", actualCmdLaunch.Wrapper);
+        Assert.Equal(["/d", "/v:off", "/s", "/c"], actualCmdLaunch.ProcessArguments);
+        Assert.Empty(actualCmdLaunch.LogicalArguments);
+        Assert.NotNull(actualCmdLaunch.RawArguments);
+        Assert.DoesNotContain(input, actualCmdLaunch.RawArguments!, StringComparison.Ordinal);
+
+        ProcessLaunchInfo? emptyLaunch = null;
+        var emptyResult = await new ProcessRunner().RunAsync(
+            new ProcessRunRequest(
+                psScript,
+                [],
+                directory,
+                OnLaunchResolved: info => emptyLaunch = info),
+            CancellationToken.None);
+        Assert.Equal(0, emptyResult.ExitCode);
+        Assert.Equal(string.Empty, DecodeSingleBase64Line(emptyResult.StandardError));
+        var actualEmptyLaunch = emptyLaunch ?? throw new InvalidOperationException("empty stdin launch was not captured.");
+        Assert.False(actualEmptyLaunch.HasStandardInput);
+        Assert.Null(actualEmptyLaunch.StandardInputByteCount);
+    }
+
+    [Fact]
+    public async Task CancellationKillsProcessWhileStandardInputIsConfigured()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var directory = Directory.CreateTempSubdirectory("caf stdin cancel ").FullName;
+        var script = Path.Combine(directory, "wait.ps1");
+        await File.WriteAllTextAsync(
+            script,
+            """
+            Start-Sleep -Seconds 30
+            """,
+            new UTF8Encoding(false));
+
+        using var cts = new CancellationTokenSource();
+        var runTask = new ProcessRunner().RunAsync(
+            new ProcessRunRequest(
+                script,
+                [],
+                directory,
+                StandardInputText: new string('x', 128 * 1024)),
+            cts.Token);
+        await Task.Delay(100);
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => runTask.WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
     public async Task RejectsNulCmdArgumentBeforeStartingProcess()
     {
         if (!OperatingSystem.IsWindows())
@@ -1602,6 +1758,14 @@ public class ProcessRunnerTests
             windowsCmdWrapper: true,
             provider));
         Assert.Same(expected, actual);
+    }
+
+    private static string DecodeSingleBase64Line(string standardError)
+    {
+        var lines = standardError.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        Assert.Single(lines);
+        Assert.StartsWith("B64:", lines[0], StringComparison.Ordinal);
+        return Encoding.UTF8.GetString(Convert.FromBase64String(lines[0]["B64:".Length..]));
     }
 
     private static bool ProcessHasExited(int processId)
@@ -1889,7 +2053,9 @@ public class AgentRunLogTests
             ["/d", "/s", "/c"],
             [token],
             UsedWindowsCmdWrapper: true,
-            RawArguments: "\"fixture.cmd\" \"" + token + "\""));
+            RawArguments: "\"fixture.cmd\" \"" + token + "\"",
+            HasStandardInput: true,
+            StandardInputByteCount: 42));
 
         var events = TestRunLogs.ReadShared(log.EventsPath);
         var text = TestRunLogs.ReadShared(log.TextLogPath);
@@ -1898,6 +2064,8 @@ public class AgentRunLogTests
         Assert.DoesNotContain(token, text, StringComparison.Ordinal);
         Assert.Contains(SecretRedactor.Replacement, events, StringComparison.Ordinal);
         Assert.Contains(SecretRedactor.Replacement, text, StringComparison.Ordinal);
+        Assert.Contains("\"hasStandardInput\":true", events, StringComparison.Ordinal);
+        Assert.Contains("\"standardInputByteCount\":42", events, StringComparison.Ordinal);
     }
 
     [Fact]
