@@ -52,6 +52,17 @@ server / host 自身の診断ログは run log とは別ファイルへ書く。
 
 起動・listen・停止・bind 失敗・token 不備・MCP / ASP.NET Core の警告・エラー・Facade 内部の重要な例外を残す。コンソールや `System.Diagnostics.Trace` には依存しない。
 
+MCP tool の呼び出しも `server.log` に記録する。`start_agent` / `get_agent_job` / `cancel_agent_job` について、入口・正常終了・失敗の各イベントに tool 名、`invocationId`、`requestId` または `jobId`、status、`pollAfterMs`、`durationMs` などを記録する。job の terminal transition は `JOB` イベントとして同じ `jobId` を記録するため、次のように MCP call と完了時刻を時系列で追跡できる。
+
+```text
+MCP tool=start_agent phase=completed ... jobId=... status=running pollAfterMs=2000 durationMs=...
+MCP tool=get_agent_job phase=completed ... jobId=... status=running terminal=false pollAfterMs=2000 durationMs=...
+MCP tool=get_agent_job phase=completed ... jobId=... status=completed terminal=true pollAfterMs=2000 durationMs=...
+JOB phase=completed jobId=... status=completed exitCode=0
+```
+
+prompt、agent の回答本文、result本文、credential、token、その他の大きなtool payloadは `server.log` に記録しない。長時間jobの調査では、同じ `jobId` の `get_agent_job` の回数・時刻・最後のstatusと、`JOB` terminalイベントの時刻を比較する。
+
 ## Windows 常駐（Task Scheduler）
 
 Facade は Windows Service にしない。GitHub Copilot CLI / Grok Build CLI のユーザー認証を使うため、対象ユーザーのログオンセッション内で `CodexAgentFacade.exe` を直接起動する。PowerShell や `Start-Process` の wrapper は不要。

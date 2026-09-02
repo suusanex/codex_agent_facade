@@ -2904,6 +2904,76 @@ public class McpHttpHostTests
         Assert.Equal(AgentJobStatus.Cancelled, snapshot.Status);
     }
 
+    [Fact]
+    public async Task ServerLogCorrelatesMcpPollingWithCompletedJob()
+    {
+        await using var session = await McpHttpTestHost.StartAsync();
+        session.Runner.Result = GrokResult("safe-result", "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee");
+        session.Runner.Gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        await using var client = await session.CreateClientAsync();
+        var started = await CallStartAgentAsync(client, "req-observe", AgentFacade.GrokBuildAgent, "observe");
+        Assert.Equal(AgentJobStatus.Running, started.Status);
+
+        var running = await CallGetAgentJobAsync(client, started.JobId);
+        Assert.Equal(AgentJobStatus.Running, running.Status);
+
+        session.Runner.Gate.SetResult(true);
+        var completed = await WaitForMcpJobAsync(client, started.JobId);
+        Assert.Equal(AgentJobStatus.Completed, completed.Status);
+
+        var logFactory = session.App.Services.GetRequiredService<NLog.LogFactory>();
+        logFactory.Flush();
+        var contents = TestRunLogs.ReadShared(FacadeLogging.GetLogFilePath(session.ServerLogDirectory));
+        Assert.Contains("MCP tool=start_agent phase=started", contents, StringComparison.Ordinal);
+        Assert.Contains("MCP tool=start_agent phase=completed", contents, StringComparison.Ordinal);
+        Assert.Contains("MCP tool=get_agent_job phase=completed", contents, StringComparison.Ordinal);
+        Assert.Contains("status=running", contents, StringComparison.Ordinal);
+        Assert.Contains("status=completed", contents, StringComparison.Ordinal);
+        Assert.Contains("terminal=false", contents, StringComparison.Ordinal);
+        Assert.Contains("terminal=true", contents, StringComparison.Ordinal);
+        Assert.Contains("pollAfterMs=2000", contents, StringComparison.Ordinal);
+        Assert.Contains("durationMs=", contents, StringComparison.Ordinal);
+        Assert.Contains("JOB phase=completed jobId=" + started.JobId + " status=completed exitCode=0", contents, StringComparison.Ordinal);
+        Assert.Contains("jobId=" + started.JobId, contents, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ServerLogRecordsToolErrorsWithoutPromptOrResultContent()
+    {
+        await using var session = await McpHttpTestHost.StartAsync();
+        const string secret = "xai-observability-secret-123";
+        session.Runner.Result = GrokResult("safe-result", "ffffffff-ffff-ffff-ffff-ffffffffffff");
+
+        await using var client = await session.CreateClientAsync();
+        var unknown = await client.CallToolAsync(
+            "get_agent_job",
+            new Dictionary<string, object?> { ["job_id"] = "missing-observability-job" });
+        Assert.True(unknown.IsError);
+
+        var invalid = await client.CallToolAsync(
+            "start_agent",
+            new Dictionary<string, object?>
+            {
+                ["request_id"] = "req-observe-error",
+                ["agent"] = AgentFacade.GrokBuildAgent,
+                ["prompt"] = secret,
+                ["working_directory"] = "",
+            });
+        Assert.True(invalid.IsError);
+
+        var logFactory = session.App.Services.GetRequiredService<NLog.LogFactory>();
+        logFactory.Flush();
+        var contents = TestRunLogs.ReadShared(FacadeLogging.GetLogFilePath(session.ServerLogDirectory));
+        Assert.Contains("MCP tool=get_agent_job phase=failed", contents, StringComparison.Ordinal);
+        Assert.Contains("errorType=KeyNotFoundException", contents, StringComparison.Ordinal);
+        Assert.Contains("MCP tool=start_agent phase=failed", contents, StringComparison.Ordinal);
+        Assert.Contains("errorType=ArgumentException", contents, StringComparison.Ordinal);
+        Assert.Contains("durationMs=", contents, StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, contents, StringComparison.Ordinal);
+        Assert.DoesNotContain("safe-result", contents, StringComparison.Ordinal);
+    }
+
     private static ProcessRunResult GrokResult(string text, string sessionId)
     {
         var stdout = "{\"type\":\"text\",\"data\":" + JsonSerializer.Serialize(text)

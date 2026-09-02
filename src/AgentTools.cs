@@ -1,5 +1,7 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol;
 using ModelContextProtocol.Server;
 
@@ -26,6 +28,9 @@ public sealed class AgentTools
         [Description("Codex-format skill names. Each driver converts them to that agent's native invocation.")] string[]? skills = null,
         [Description("When true (default), pass the CLI native non-interactive auto-approve flag. Set false to observe question/permission blocking on this same MCP path.")] bool auto_approve = true)
     {
+        var invocationId = Guid.NewGuid().ToString("N");
+        var startedAt = Stopwatch.GetTimestamp();
+        LogStarted("start_agent", invocationId, request_id, null);
         try
         {
             var snapshot = _jobs.Start(
@@ -37,10 +42,12 @@ public sealed class AgentTools
                     SessionId: session_id,
                     Skills: skills,
                     AutoApprove: auto_approve));
+            LogCompleted("start_agent", invocationId, startedAt, snapshot, includeRequestId: true);
             return JsonSerializer.Serialize(snapshot, AgentJson.Options);
         }
         catch (Exception ex)
         {
+            LogFailed("start_agent", invocationId, startedAt, ex, request_id, null);
             CliJson.TraceException(ex);
             throw Wrap("start_agent failed. See the server log for details.", ex);
         }
@@ -50,13 +57,18 @@ public sealed class AgentTools
     public string GetAgentJob(
         [Description("Job id returned by start_agent.")] string job_id)
     {
+        var invocationId = Guid.NewGuid().ToString("N");
+        var startedAt = Stopwatch.GetTimestamp();
+        LogStarted("get_agent_job", invocationId, null, job_id);
         try
         {
             var snapshot = _jobs.Get(job_id);
+            LogCompleted("get_agent_job", invocationId, startedAt, snapshot, includeRequestId: false);
             return JsonSerializer.Serialize(snapshot, AgentJson.Options);
         }
         catch (Exception ex)
         {
+            LogFailed("get_agent_job", invocationId, startedAt, ex, null, job_id);
             CliJson.TraceException(ex);
             throw Wrap("get_agent_job failed. See the server log for details.", ex);
         }
@@ -66,16 +78,46 @@ public sealed class AgentTools
     public string CancelAgentJob(
         [Description("Job id returned by start_agent.")] string job_id)
     {
+        var invocationId = Guid.NewGuid().ToString("N");
+        var startedAt = Stopwatch.GetTimestamp();
+        LogStarted("cancel_agent_job", invocationId, null, job_id);
         try
         {
             var snapshot = _jobs.Cancel(job_id);
+            LogCompleted("cancel_agent_job", invocationId, startedAt, snapshot, includeRequestId: false);
             return JsonSerializer.Serialize(snapshot, AgentJson.Options);
         }
         catch (Exception ex)
         {
+            LogFailed("cancel_agent_job", invocationId, startedAt, ex, null, job_id);
             CliJson.TraceException(ex);
             throw Wrap("cancel_agent_job failed. See the server log for details.", ex);
         }
+    }
+
+    private static void LogStarted(string tool, string invocationId, string? requestId, string? jobId)
+    {
+        FacadeLog.CreateLogger(FacadeLogging.LoggerCategory).LogInformation(
+            "MCP tool={Tool} phase=started invocationId={InvocationId} requestId={RequestId} jobId={JobId}",
+            tool, invocationId, requestId ?? "", jobId ?? "");
+    }
+
+    private static void LogCompleted(string tool, string invocationId, long startedAt, AgentJobSnapshot snapshot, bool includeRequestId)
+    {
+        var durationMs = (long)Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
+        var terminal = snapshot.Status is AgentJobStatus.Completed or AgentJobStatus.Failed or AgentJobStatus.Cancelled;
+        FacadeLog.CreateLogger(FacadeLogging.LoggerCategory).LogInformation(
+            "MCP tool={Tool} phase=completed invocationId={InvocationId} requestId={RequestId} jobId={JobId} status={Status} terminal={Terminal} pollAfterMs={PollAfterMs} durationMs={DurationMs}",
+            tool, invocationId, includeRequestId ? snapshot.RequestId : "", snapshot.JobId,
+            snapshot.Status, terminal ? "true" : "false", snapshot.PollAfterMs, durationMs);
+    }
+
+    private static void LogFailed(string tool, string invocationId, long startedAt, Exception exception, string? requestId, string? jobId)
+    {
+        var durationMs = (long)Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
+        FacadeLog.CreateLogger(FacadeLogging.LoggerCategory).LogInformation(
+            "MCP tool={Tool} phase=failed invocationId={InvocationId} requestId={RequestId} jobId={JobId} errorType={ErrorType} durationMs={DurationMs}",
+            tool, invocationId, requestId ?? "", jobId ?? "", exception.GetType().Name, durationMs);
     }
 
     private static McpException Wrap(string message, Exception exception)
