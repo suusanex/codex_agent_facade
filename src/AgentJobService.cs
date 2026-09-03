@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 
 /// <summary>
 /// agent job の登録・照会・取消。実行中 worker は process 内。request_id / terminal result は disk に残し、
@@ -15,6 +16,8 @@ public sealed class AgentJobService
     private readonly AgentFacade _facade;
     private readonly TimeProvider _timeProvider;
     private readonly string _storeDirectory;
+    private readonly ILogger _logger;
+    private readonly ConcurrentDictionary<string, byte> _terminalLogs = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, AgentJob> _byRequestId = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, AgentJob> _byJobId = new(StringComparer.Ordinal);
 
@@ -30,6 +33,7 @@ public sealed class AgentJobService
         _facade = facade;
         _storeDirectory = Path.GetFullPath(jobStoreDirectory);
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _logger = FacadeLog.CreateLogger(FacadeLogging.LoggerCategory);
         Directory.CreateDirectory(_storeDirectory);
     }
 
@@ -127,8 +131,12 @@ public sealed class AgentJobService
         var id = jobId.Trim();
         if (_byJobId.TryGetValue(id, out var live))
         {
-            live.RequestCancel();
             var snapshot = live.CreateSnapshot(DefaultPollAfterMs);
+            if (live.RequestCancel())
+            {
+                snapshot = live.CreateSnapshot(DefaultPollAfterMs);
+                LogTerminal(snapshot, AgentJobStatus.Cancelled, exitCode: null, errorType: null);
+            }
             Persist(ToRecord(snapshot, ComputeRequestFingerprint(live.Request)));
             Evict(live);
             return snapshot;
@@ -153,21 +161,58 @@ public sealed class AgentJobService
                     job.CancellationToken,
                     job.JobId)
                 .ConfigureAwait(false);
-            job.Complete(result);
+            if (job.Complete(result))
+            {
+                LogTerminal(job.CreateSnapshot(DefaultPollAfterMs), AgentJobStatus.Completed, result.ExitCode, errorType: null);
+            }
         }
         catch (OperationCanceledException ex)
         {
             CliJson.TraceException(ex);
-            job.MarkCancelled();
+            if (job.MarkCancelled())
+            {
+                LogTerminal(job.CreateSnapshot(DefaultPollAfterMs), AgentJobStatus.Cancelled, exitCode: null, errorType: ex.GetType().Name);
+            }
         }
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
-            job.Fail("agent job failed. See the server log for details.");
+            if (job.Fail("agent job failed. See the server log for details."))
+            {
+                LogTerminal(job.CreateSnapshot(DefaultPollAfterMs), AgentJobStatus.Failed, exitCode: null, errorType: ex.GetType().Name);
+            }
         }
 
         Persist(ToRecord(job.CreateSnapshot(DefaultPollAfterMs), fingerprint));
         Evict(job);
+    }
+
+    private void LogTerminal(AgentJobSnapshot snapshot, string expectedStatus, int? exitCode, string? errorType)
+    {
+        if (!string.Equals(snapshot.Status, expectedStatus, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (!_terminalLogs.TryAdd(snapshot.JobId, 0))
+        {
+            return;
+        }
+
+        var message = "JOB phase=" + snapshot.Status
+            + " jobId=" + snapshot.JobId
+            + " status=" + snapshot.Status;
+        if (exitCode is not null)
+        {
+            message += " exitCode=" + exitCode.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        if (!string.IsNullOrWhiteSpace(errorType) && snapshot.Status == AgentJobStatus.Failed)
+        {
+            message += " errorType=" + errorType;
+        }
+
+        _logger.LogInformation(message);
     }
 
     private void Unregister(AgentJob job)
@@ -200,6 +245,7 @@ public sealed class AgentJobService
             Error = InterruptedError,
             Result = null,
         };
+        LogTerminal(ToSnapshot(failed), AgentJobStatus.Failed, exitCode: null, errorType: "InterruptedError");
         Persist(failed);
         return failed;
     }

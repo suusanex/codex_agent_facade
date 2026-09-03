@@ -63,7 +63,7 @@ public sealed class AgentJob
         }
     }
 
-    public void RequestCancel()
+    public bool RequestCancel()
     {
         try
         {
@@ -74,24 +74,24 @@ public sealed class AgentJob
             CliJson.TraceException(ex);
         }
 
-        TryFinish(AgentJobStatus.Cancelled, result: null, error: "cancelled");
+        return TryFinish(AgentJobStatus.Cancelled, result: null, error: "cancelled");
     }
 
-    public void Complete(AgentRunResult result)
+    public bool Complete(AgentRunResult result)
     {
         ArgumentNullException.ThrowIfNull(result);
-        TryFinish(AgentJobStatus.Completed, result, error: null);
+        return TryFinish(AgentJobStatus.Completed, result, error: null);
     }
 
-    public void Fail(string error)
+    public bool Fail(string error)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(error);
-        TryFinish(AgentJobStatus.Failed, result: null, error);
+        return TryFinish(AgentJobStatus.Failed, result: null, error);
     }
 
-    public void MarkCancelled()
+    public bool MarkCancelled()
     {
-        TryFinish(AgentJobStatus.Cancelled, result: null, error: "cancelled");
+        return TryFinish(AgentJobStatus.Cancelled, result: null, error: "cancelled");
     }
 
     public AgentJobSnapshot CreateSnapshot(int pollAfterMs)
@@ -120,18 +120,19 @@ public sealed class AgentJob
         }
     }
 
-    private void TryFinish(string status, AgentRunResult? result, string? error)
+    private bool TryFinish(string status, AgentRunResult? result, string? error)
     {
         lock (_gate)
         {
             if (IsTerminalStatus(_status))
             {
-                return;
+                return false;
             }
 
             _status = status;
             _result = result;
             _error = error;
+            return true;
         }
     }
 
