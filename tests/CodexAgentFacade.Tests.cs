@@ -2927,15 +2927,17 @@ public class McpHttpHostTests
         var contents = TestRunLogs.ReadShared(FacadeLogging.GetLogFilePath(session.ServerLogDirectory));
         Assert.Contains("MCP tool=start_agent phase=started", contents, StringComparison.Ordinal);
         Assert.Contains("MCP tool=start_agent phase=completed", contents, StringComparison.Ordinal);
+        Assert.Contains("agent=grok-build", contents, StringComparison.Ordinal);
         Assert.Contains("MCP tool=get_agent_job phase=completed", contents, StringComparison.Ordinal);
         Assert.Contains("status=running", contents, StringComparison.Ordinal);
         Assert.Contains("status=completed", contents, StringComparison.Ordinal);
         Assert.Contains("terminal=false", contents, StringComparison.Ordinal);
         Assert.Contains("terminal=true", contents, StringComparison.Ordinal);
-        Assert.Contains("pollAfterMs=2000", contents, StringComparison.Ordinal);
+        Assert.Contains("pollAfterMs=" + AgentJobService.DefaultPollAfterMs, contents, StringComparison.Ordinal);
         Assert.Contains("durationMs=", contents, StringComparison.Ordinal);
         Assert.Contains("JOB phase=completed jobId=" + started.JobId + " status=completed exitCode=0", contents, StringComparison.Ordinal);
         Assert.Contains("jobId=" + started.JobId, contents, StringComparison.Ordinal);
+        Assert.DoesNotContain("safe-result", contents, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -30,7 +30,7 @@ public sealed class AgentTools
     {
         var invocationId = Guid.NewGuid().ToString("N");
         var startedAt = Stopwatch.GetTimestamp();
-        LogStarted("start_agent", invocationId, request_id, null);
+        LogStarted("start_agent", invocationId, request_id, null, agent);
         try
         {
             var snapshot = _jobs.Start(
@@ -42,7 +42,7 @@ public sealed class AgentTools
                     SessionId: session_id,
                     Skills: skills,
                     AutoApprove: auto_approve));
-            LogCompleted("start_agent", invocationId, startedAt, snapshot, includeRequestId: true);
+            LogCompleted("start_agent", invocationId, startedAt, snapshot, includeRequestId: true, agent: agent);
             return JsonSerializer.Serialize(snapshot, AgentJson.Options);
         }
         catch (Exception ex)
@@ -59,11 +59,11 @@ public sealed class AgentTools
     {
         var invocationId = Guid.NewGuid().ToString("N");
         var startedAt = Stopwatch.GetTimestamp();
-        LogStarted("get_agent_job", invocationId, null, job_id);
+        LogStarted("get_agent_job", invocationId, null, job_id, null);
         try
         {
             var snapshot = _jobs.Get(job_id);
-            LogCompleted("get_agent_job", invocationId, startedAt, snapshot, includeRequestId: false);
+            LogCompleted("get_agent_job", invocationId, startedAt, snapshot, includeRequestId: false, agent: null);
             return JsonSerializer.Serialize(snapshot, AgentJson.Options);
         }
         catch (Exception ex)
@@ -80,11 +80,11 @@ public sealed class AgentTools
     {
         var invocationId = Guid.NewGuid().ToString("N");
         var startedAt = Stopwatch.GetTimestamp();
-        LogStarted("cancel_agent_job", invocationId, null, job_id);
+        LogStarted("cancel_agent_job", invocationId, null, job_id, null);
         try
         {
             var snapshot = _jobs.Cancel(job_id);
-            LogCompleted("cancel_agent_job", invocationId, startedAt, snapshot, includeRequestId: false);
+            LogCompleted("cancel_agent_job", invocationId, startedAt, snapshot, includeRequestId: false, agent: null);
             return JsonSerializer.Serialize(snapshot, AgentJson.Options);
         }
         catch (Exception ex)
@@ -95,29 +95,50 @@ public sealed class AgentTools
         }
     }
 
-    private static void LogStarted(string tool, string invocationId, string? requestId, string? jobId)
+    private static void LogStarted(string tool, string invocationId, string? requestId, string? jobId, string? agent)
     {
         FacadeLog.CreateLogger(FacadeLogging.LoggerCategory).LogInformation(
-            "MCP tool={Tool} phase=started invocationId={InvocationId} requestId={RequestId} jobId={JobId}",
-            tool, invocationId, requestId ?? "", jobId ?? "");
+            "MCP tool={Tool} phase=started invocationId={InvocationId} requestId={RequestId} jobId={JobId} agent={Agent}",
+            SafeLogValue(tool), SafeLogValue(invocationId), SafeLogValue(requestId), SafeLogValue(jobId), SafeLogValue(agent));
     }
 
-    private static void LogCompleted(string tool, string invocationId, long startedAt, AgentJobSnapshot snapshot, bool includeRequestId)
+    private static void LogCompleted(string tool, string invocationId, long startedAt, AgentJobSnapshot snapshot, bool includeRequestId, string? agent)
     {
         var durationMs = (long)Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
         var terminal = snapshot.Status is AgentJobStatus.Completed or AgentJobStatus.Failed or AgentJobStatus.Cancelled;
         FacadeLog.CreateLogger(FacadeLogging.LoggerCategory).LogInformation(
-            "MCP tool={Tool} phase=completed invocationId={InvocationId} requestId={RequestId} jobId={JobId} status={Status} terminal={Terminal} pollAfterMs={PollAfterMs} durationMs={DurationMs}",
-            tool, invocationId, includeRequestId ? snapshot.RequestId : "", snapshot.JobId,
-            snapshot.Status, terminal ? "true" : "false", snapshot.PollAfterMs, durationMs);
+            "MCP tool={Tool} phase=completed invocationId={InvocationId} requestId={RequestId} jobId={JobId} agent={Agent} status={Status} terminal={Terminal} pollAfterMs={PollAfterMs} durationMs={DurationMs}",
+            SafeLogValue(tool), SafeLogValue(invocationId), SafeLogValue(includeRequestId ? snapshot.RequestId : null), SafeLogValue(snapshot.JobId),
+            SafeLogValue(agent), snapshot.Status, terminal ? "true" : "false", snapshot.PollAfterMs, durationMs);
     }
 
     private static void LogFailed(string tool, string invocationId, long startedAt, Exception exception, string? requestId, string? jobId)
     {
         var durationMs = (long)Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
-        FacadeLog.CreateLogger(FacadeLogging.LoggerCategory).LogInformation(
+        FacadeLog.CreateLogger(FacadeLogging.LoggerCategory).LogWarning(
             "MCP tool={Tool} phase=failed invocationId={InvocationId} requestId={RequestId} jobId={JobId} errorType={ErrorType} durationMs={DurationMs}",
-            tool, invocationId, requestId ?? "", jobId ?? "", exception.GetType().Name, durationMs);
+            SafeLogValue(tool), SafeLogValue(invocationId), SafeLogValue(requestId), SafeLogValue(jobId), exception.GetType().Name, durationMs);
+    }
+
+    private static string SafeLogValue(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return "";
+        }
+
+        var builder = new System.Text.StringBuilder(Math.Min(value.Length, 128));
+        foreach (var character in value)
+        {
+            if (builder.Length >= 128)
+            {
+                break;
+            }
+
+            builder.Append(char.IsControl(character) ? '?' : character);
+        }
+
+        return builder.ToString();
     }
 
     private static McpException Wrap(string message, Exception exception)

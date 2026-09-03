@@ -131,9 +131,12 @@ public sealed class AgentJobService
         var id = jobId.Trim();
         if (_byJobId.TryGetValue(id, out var live))
         {
-            live.RequestCancel();
             var snapshot = live.CreateSnapshot(DefaultPollAfterMs);
-            LogTerminal(snapshot, AgentJobStatus.Cancelled, exitCode: null, errorType: null);
+            if (live.RequestCancel())
+            {
+                snapshot = live.CreateSnapshot(DefaultPollAfterMs);
+                LogTerminal(snapshot, AgentJobStatus.Cancelled, exitCode: null, errorType: null);
+            }
             Persist(ToRecord(snapshot, ComputeRequestFingerprint(live.Request)));
             Evict(live);
             return snapshot;
@@ -158,20 +161,26 @@ public sealed class AgentJobService
                     job.CancellationToken,
                     job.JobId)
                 .ConfigureAwait(false);
-            job.Complete(result);
-            LogTerminal(job.CreateSnapshot(DefaultPollAfterMs), AgentJobStatus.Completed, result.ExitCode, errorType: null);
+            if (job.Complete(result))
+            {
+                LogTerminal(job.CreateSnapshot(DefaultPollAfterMs), AgentJobStatus.Completed, result.ExitCode, errorType: null);
+            }
         }
         catch (OperationCanceledException ex)
         {
             CliJson.TraceException(ex);
-            job.MarkCancelled();
-            LogTerminal(job.CreateSnapshot(DefaultPollAfterMs), AgentJobStatus.Cancelled, exitCode: null, errorType: ex.GetType().Name);
+            if (job.MarkCancelled())
+            {
+                LogTerminal(job.CreateSnapshot(DefaultPollAfterMs), AgentJobStatus.Cancelled, exitCode: null, errorType: ex.GetType().Name);
+            }
         }
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
-            job.Fail("agent job failed. See the server log for details.");
-            LogTerminal(job.CreateSnapshot(DefaultPollAfterMs), AgentJobStatus.Failed, exitCode: null, errorType: ex.GetType().Name);
+            if (job.Fail("agent job failed. See the server log for details."))
+            {
+                LogTerminal(job.CreateSnapshot(DefaultPollAfterMs), AgentJobStatus.Failed, exitCode: null, errorType: ex.GetType().Name);
+            }
         }
 
         Persist(ToRecord(job.CreateSnapshot(DefaultPollAfterMs), fingerprint));
@@ -236,6 +245,7 @@ public sealed class AgentJobService
             Error = InterruptedError,
             Result = null,
         };
+        LogTerminal(ToSnapshot(failed), AgentJobStatus.Failed, exitCode: null, errorType: "InterruptedError");
         Persist(failed);
         return failed;
     }
