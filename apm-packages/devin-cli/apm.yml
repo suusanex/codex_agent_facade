@@ -1,6 +1,6 @@
 name: devin-cli
 version: 0.1.0
-description: Forward Codex thread work to Devin CLI through the Codex Agent Facade MCP tool
+description: Relay-only Skill. Codex does not execute the user task; it forwards the user payload to Devin CLI through the Codex Agent Facade and relays the result.
 type: hybrid
 targets:
   - codex
