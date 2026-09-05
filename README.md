@@ -222,7 +222,7 @@ apm install "C:\path\to\codex_agent_facade\apm-packages\grok-build" --target cod
 apm install "C:\path\to\codex_agent_facade\apm-packages\devin-cli" --target codex,agent-skills
 ```
 
-展開先は `.agents/skills/github-copilot/`、`.agents/skills/grok-build/`、`.agents/skills/devin-cli/`。Codex 上では `$github-copilot` / `$grok-build` / `$devin-cli` で本文を外部 agent へ渡す。Skill 無しで `start_agent` / `get_agent_job` を直接呼んでもよい。
+展開先は `.agents/skills/github-copilot/`、`.agents/skills/grok-build/`、`.agents/skills/devin-cli/`。Codex 上では `$github-copilot` / `$grok-build` / `$devin-cli` で本文を外部 agent へ渡す。これらの Skill を指定した turn で Codex 自身は対象作業を実行せず、外部 agent に委譲して結果を中継する。Skill 無しで `start_agent` / `get_agent_job` を直接呼んでもよい。
 
 更新・削除:
 

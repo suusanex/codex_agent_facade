@@ -25,6 +25,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using Ardalis.SingleFileTestRunner;
@@ -1212,6 +1213,294 @@ public class SkillConversionTests
         Assert.Throws<ArgumentException>(() => GrokBuildDriver.ToSlashInvocation("$"));
         Assert.Throws<ArgumentException>(() => DevinCliDriver.ToSlashInvocation("$"));
     }
+}
+
+/// <summary>
+/// Facade 委譲 Skill が relay-only 契約を失っていないことを検証する。
+/// 全文一致ではなく、Codex が対象作業を行わないこと、Skill 後本文が外部 agent 用 payload であること、
+/// 既存の start_agent 契約が残っていることを確認する。apm-packages 配下の新規同種 Skill も対象にする。
+/// </summary>
+public class FacadeDelegationSkillContractTests
+{
+    private static readonly string[] KnownFacadeDelegationSkillNames =
+    [
+        "github-copilot",
+        "grok-build",
+        "devin-cli",
+    ];
+
+    private static readonly (string Name, string SessionLabel)[] KnownAgentSessionLabels =
+    [
+        ("github-copilot", "Copilot session"),
+        ("grok-build", "Grok session"),
+        ("devin-cli", "Devin session"),
+    ];
+
+    private static readonly string[] RequiredRelayContractPhrases =
+    [
+        "Codex 自身は対象作業を実行しない",
+        "薄い UI shell / relay",
+        "planner / executor / reviewer / orchestrator",
+        "外部 agent に渡す作業 payload",
+        "Codex 自身への作業実行指示として扱わない",
+        "`prompt` としてそのまま外部 agent に渡す",
+        "補足、要約、再構成、再計画、分割をしない",
+        "`request_id`",
+        "`start_agent`",
+        "`get_agent_job`",
+        "`working_directory`",
+        "`session_id`",
+        "`skills`",
+        "`result.outputText`",
+        "`result.sessionId`",
+        "repository / source code の調査",
+        "Issue / PR 等の内容取得・分析",
+        "memory の検索",
+        "web 検索",
+        "shell command の実行",
+        "独自のプラン作成",
+        "実装・ファイル編集",
+        "テスト・検証",
+        "レビュー",
+        "外部 agent と並行した独自調査",
+        "外部 agent の結果を材料にした独自の再計画・補完",
+        "外部 agent を走らせながら Codex 側でも同じ Issue とコードを調査する動きは不正である",
+        "独自回答を追加しない",
+        "この Skill の役割は relay である",
+        "ユーザーへの主たる応答である",
+    ];
+
+    private static readonly string[] RequiredHeadings =
+    [
+        "## ユーザー本文の意味",
+        "## Codex が行ってよい処理",
+        "## Codex が行ってはならない処理",
+        "## 外部 agent 結果の中継",
+    ];
+
+    [Fact]
+    public void DiscoversKnownFacadeDelegationSkillsWithoutHardcodingOnlyThoseFiles()
+    {
+        var skills = LoadFacadeDelegationSkills();
+        var names = skills.Select(skill => skill.Name).ToHashSet(StringComparer.Ordinal);
+        foreach (var expected in KnownFacadeDelegationSkillNames)
+        {
+            Assert.True(names.Contains(expected), "Missing Facade delegation Skill: " + expected);
+        }
+    }
+
+    [Fact]
+    public void FacadeDelegationSkillsShareRelayOnlyContract()
+    {
+        var skills = LoadFacadeDelegationSkills();
+        Assert.NotEmpty(skills);
+        foreach (var skill in skills)
+        {
+            foreach (var heading in RequiredHeadings)
+            {
+                Assert.True(
+                    skill.Text.Contains(heading, StringComparison.Ordinal),
+                    skill.Name + " is missing heading: " + heading);
+            }
+
+            foreach (var phrase in RequiredRelayContractPhrases)
+            {
+                Assert.True(
+                    skill.Text.Contains(phrase, StringComparison.Ordinal),
+                    skill.Name + " is missing relay-only contract phrase: " + phrase);
+            }
+
+            Assert.StartsWith(
+                "Codex 自身は対象作業を実行しない。",
+                skill.Description,
+                StringComparison.Ordinal);
+            Assert.Contains("委譲", skill.Description, StringComparison.Ordinal);
+            Assert.Contains("中継", skill.Description, StringComparison.Ordinal);
+            Assert.Contains("薄い UI shell / relay", skill.Description, StringComparison.Ordinal);
+            Assert.Contains("- `agent`: `" + skill.Name + "`", skill.Text, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void FacadeDelegationSkillsKeepAgentSpecificIdentity()
+    {
+        var skills = LoadFacadeDelegationSkills().ToDictionary(skill => skill.Name, StringComparer.Ordinal);
+        foreach (var (name, sessionLabel) in KnownAgentSessionLabels)
+        {
+            Assert.True(skills.ContainsKey(name), "Missing Skill for agent: " + name);
+            var text = skills[name].Text;
+            Assert.Contains("- `agent`: `" + name + "`", text, StringComparison.Ordinal);
+            Assert.Contains(sessionLabel, text, StringComparison.Ordinal);
+            foreach (var other in KnownFacadeDelegationSkillNames.Where(candidate => candidate != name))
+            {
+                Assert.DoesNotContain("- `agent`: `" + other + "`", text, StringComparison.Ordinal);
+            }
+        }
+    }
+
+    [Fact]
+    public void RelayContractTreatsIssuePlanningPromptAsExternalPayloadNotCodexWork()
+    {
+        // `$grok-build` のあとに Issue URL とプラン作成依頼を書いても、
+        // Codex は Facade tool だけを呼び、Issue / code 調査と plan は外部 agent の作業である。
+        foreach (var skill in LoadFacadeDelegationSkills())
+        {
+            Assert.Contains("外部 agent に渡す作業 payload", skill.Text, StringComparison.Ordinal);
+            Assert.Contains("Codex 自身への作業実行指示として扱わない", skill.Text, StringComparison.Ordinal);
+            Assert.Contains(
+                "外部 agent を走らせながら Codex 側でも同じ Issue とコードを調査する動きは不正である",
+                skill.Text,
+                StringComparison.Ordinal);
+            Assert.Contains("独自のプラン作成", skill.Text, StringComparison.Ordinal);
+            Assert.Contains("外部 agent の結果そのものがユーザーへの主たる応答である", skill.Text, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void NonDelegationSkillsDoNotReceiveRelayOnlyConstraint()
+    {
+        foreach (var path in EnumerateSkillFiles(LocateRepoRoot()))
+        {
+            var text = File.ReadAllText(path);
+            if (IsFacadeDelegationSkill(text))
+            {
+                continue;
+            }
+
+            Assert.DoesNotContain("Codex 自身は対象作業を実行しない", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("薄い UI shell / relay", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("外部 agent に渡す作業 payload", text, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void PackageReadmesDescribeRelayOnlyRole()
+    {
+        var repoRoot = LocateRepoRoot();
+        foreach (var skill in LoadFacadeDelegationSkills())
+        {
+            var readme = Path.Combine(repoRoot, "apm-packages", skill.Name, "README.md");
+            Assert.True(File.Exists(readme), "Missing package README for " + skill.Name);
+            var text = File.ReadAllText(readme);
+            Assert.Contains("Codex 自身は対象作業を実行せず", text, StringComparison.Ordinal);
+            Assert.Contains("中継する", text, StringComparison.Ordinal);
+            Assert.Contains("作業 payload", text, StringComparison.Ordinal);
+            Assert.Contains("Codex 自身への作業実行指示ではない", text, StringComparison.Ordinal);
+        }
+    }
+
+    private static List<FacadeDelegationSkillFile> LoadFacadeDelegationSkills()
+    {
+        var skills = new List<FacadeDelegationSkillFile>();
+        foreach (var path in EnumerateSkillFiles(LocateRepoRoot()))
+        {
+            var text = File.ReadAllText(path);
+            if (!IsFacadeDelegationSkill(text))
+            {
+                continue;
+            }
+
+            skills.Add(ParseSkill(path, text));
+        }
+
+        return skills;
+    }
+
+    private static bool IsFacadeDelegationSkill(string text)
+    {
+        return text.Contains("codex_agent_facade", StringComparison.Ordinal)
+            && text.Contains("start_agent", StringComparison.Ordinal)
+            && text.Contains("get_agent_job", StringComparison.Ordinal);
+    }
+
+    private static FacadeDelegationSkillFile ParseSkill(string path, string text)
+    {
+        var frontmatterEnd = text.IndexOf("\n---", StringComparison.Ordinal);
+        Assert.True(frontmatterEnd >= 0, "Skill is missing YAML frontmatter: " + path);
+        var frontmatter = text[..frontmatterEnd];
+        var name = ReadFrontmatterValue(frontmatter, "name");
+        var description = ReadFrontmatterValue(frontmatter, "description");
+        Assert.False(string.IsNullOrWhiteSpace(name), "Skill name is missing: " + path);
+        Assert.False(string.IsNullOrWhiteSpace(description), "Skill description is missing: " + path);
+        return new FacadeDelegationSkillFile(path, name, description, text);
+    }
+
+    private static string ReadFrontmatterValue(string frontmatter, string key)
+    {
+        var prefix = key + ":";
+        using var reader = new StringReader(frontmatter);
+        while (reader.ReadLine() is { } line)
+        {
+            if (line.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                return line[prefix.Length..].Trim();
+            }
+        }
+
+        return "";
+    }
+
+    private static IEnumerable<string> EnumerateSkillFiles(string repoRoot)
+    {
+        var packagesRoot = Path.Combine(repoRoot, "apm-packages");
+        if (Directory.Exists(packagesRoot))
+        {
+            foreach (var packageDir in Directory.EnumerateDirectories(packagesRoot))
+            {
+                var nestedSkills = Path.Combine(packageDir, ".apm", "skills");
+                if (!Directory.Exists(nestedSkills))
+                {
+                    continue;
+                }
+
+                foreach (var file in Directory.EnumerateFiles(nestedSkills, "SKILL.md", SearchOption.AllDirectories))
+                {
+                    yield return file;
+                }
+            }
+        }
+
+        var localSkills = Path.Combine(repoRoot, ".agents", "skills");
+        if (!Directory.Exists(localSkills))
+        {
+            yield break;
+        }
+
+        foreach (var file in Directory.EnumerateFiles(localSkills, "SKILL.md", SearchOption.AllDirectories))
+        {
+            yield return file;
+        }
+    }
+
+    private static string LocateRepoRoot([CallerFilePath] string? callerFile = null)
+    {
+        var seeds = new List<string> { Directory.GetCurrentDirectory() };
+        if (!string.IsNullOrEmpty(callerFile))
+        {
+            var testsDir = Path.GetDirectoryName(callerFile);
+            if (!string.IsNullOrEmpty(testsDir))
+            {
+                seeds.Add(Path.GetFullPath(Path.Combine(testsDir, "..")));
+            }
+        }
+
+        foreach (var seed in seeds)
+        {
+            for (var dir = new DirectoryInfo(seed); dir is not null; dir = dir.Parent)
+            {
+                if (Directory.Exists(Path.Combine(dir.FullName, "apm-packages"))
+                    && File.Exists(Path.Combine(dir.FullName, "README.md")))
+                {
+                    return dir.FullName;
+                }
+            }
+        }
+
+        throw new InvalidOperationException(
+            "Could not locate the repository root from " + Directory.GetCurrentDirectory() + ".");
+    }
+
+    private sealed record FacadeDelegationSkillFile(string Path, string Name, string Description, string Text);
 }
 
 public class ProcessRunnerTests

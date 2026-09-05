@@ -1,6 +1,6 @@
 # GitHub Copilot Skill
 
-`$github-copilot` は、Codex thread の本文を Codex Agent Facade の MCP tool `start_agent` / `get_agent_job` 経由で GitHub Copilot CLI へ渡す Skill です。
+`$github-copilot` は、Codex 自身は対象作業を実行せず、Skill より後のユーザー本文を Codex Agent Facade 経由で GitHub Copilot CLI へ委譲し、その結果を中継する Skill です。Codex は GitHub Copilot と協力して作業するのではなく、薄い UI shell / relay として Facade の結果を返します。
 
 MCP server 本体はこの package に含まれません。Facade の publish 成果物と `~/.codex/config.toml` は OS user 単位で別に設定します。必須項目（`url`、`bearer_token_env_var`、`enabled = true`、`direct_only_tool_namespaces` など）はリポジトリ root の README「Codex への接続」を参照してください。
 
@@ -24,7 +24,7 @@ apm install "C:\path\to\codex_agent_facade\apm-packages\github-copilot" --target
 
 ## Use
 
-Codex 上で対象リポジトリを開いた状態で、Skill を指定して作業本文を書く。`working_directory` は今開いているリポジトリのパスにする。
+Codex 上で対象リポジトリを開いた状態で、Skill を指定して作業本文を書く。Skill より後の本文は GitHub Copilot へ渡す作業 payload であり、Codex 自身への作業実行指示ではない。`working_directory` は今開いているリポジトリのパスにする。
 
 ```text
 $github-copilot このリポジトリの README に使い方を追記して。
