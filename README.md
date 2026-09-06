@@ -8,6 +8,7 @@ Codex / Facade は planner や orchestrator にならない。ユーザーの pr
 
 - .NET 11 SDK（Preview 可）。`#:include` で複数ファイルをコンパイルする
 - PATH 上の `copilot`（GitHub Copilot CLI）、`grok`（Grok Build CLI）、`devin`（Devin CLI）、および / または `cursor-agent`（Cursor CLI）
+- Windows で Cursor CLI を使う場合は PowerShell 7（`pwsh.exe`）を PATH 上に配置する。Facade の `.ps1` 起動経路は PowerShell 7 を使用する
 - 実作業には各 CLI へのログインが必要
 
 このリポジトリは File-based apps を使う。`.csproj` は無い。
@@ -291,6 +292,10 @@ dotnet run --file src/DevinMcpSmoke.cs
 Windows:
 
 ```powershell
+# PowerShell 7 が未導入の場合
+winget install --id Microsoft.PowerShell --source winget
+pwsh --version
+
 irm 'https://cursor.com/install?win32=true' | iex
 cursor-agent --version
 cursor-agent login
@@ -305,7 +310,7 @@ cursor-agent --version
 cursor-agent login
 ```
 
-認証は `cursor-agent login`（ブラウザ）または環境変数 `CURSOR_API_KEY`。Facade は API key を引数へ渡さない。
+認証は `cursor-agent login`（ブラウザ）または環境変数 `CURSOR_API_KEY`。Facade は API key を引数へ渡さない。Windows では Cursor CLI の `.ps1` launcher を実行するため、PowerShell 7 の `pwsh.exe` が必要になる。
 
 この環境では Grok Build が `agent` を PATH に置く。Cursor の installer も `agent` を作るが、Facade は衝突を避けるため `cursor-agent` だけを起動する。
 

@@ -208,7 +208,7 @@ internal sealed class CursorStreamAccumulator
         if (_sawProtocolViolation)
         {
             throw new InvalidOperationException(
-                "Cursor CLI stdout contained a non-JSON line.",
+                "Cursor CLI stdout contained a line that was not a JSON object event.",
                 _lastJsonError);
         }
 
@@ -239,32 +239,21 @@ internal sealed class CursorStreamAccumulator
         }
 
         var assistantText = CursorCliOutputParser.ReadAssistantText(root);
-        if (CursorCliOutputParser.IsStreamingDelta(root))
+        _runLog.WriteAgentEvent(type, root, humanSummary: null);
+        if (string.IsNullOrWhiteSpace(assistantText))
         {
-            _runLog.WriteAgentEvent(type, root, humanSummary: null);
-            if (string.IsNullOrWhiteSpace(assistantText))
-            {
-                return;
-            }
-
-            _runLog.AppendHumanFragment("assistant", assistantText);
-            if (_assistantTexts.Count == 0)
-            {
-                _assistantTexts.Add(assistantText);
-            }
-            else
-            {
-                _assistantTexts[^1] += assistantText;
-            }
-
             return;
         }
 
-        _runLog.WriteAgentEvent(type, root, CursorCliHumanSummary.Format(type, root, assistantText));
-        if (!string.IsNullOrWhiteSpace(assistantText))
+        _runLog.AppendHumanFragment("assistant", assistantText);
+        if (CursorCliOutputParser.IsStreamingDelta(root)
+            && _assistantTexts.Count > 0)
         {
-            _assistantTexts.Add(assistantText);
+            _assistantTexts[^1] += assistantText;
+            return;
         }
+
+        _assistantTexts.Add(assistantText);
     }
 
     private void HandleResult(JsonElement root, string type)
@@ -275,7 +264,7 @@ internal sealed class CursorStreamAccumulator
             _resultText = resultText;
         }
 
-        _runLog.WriteAgentEvent(type, root, CursorCliHumanSummary.Format(type, root, resultText));
+        _runLog.WriteAgentEvent(type, root, CursorCliHumanSummary.Format(type, root, assistantText: null));
     }
 }
 

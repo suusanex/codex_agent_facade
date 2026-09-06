@@ -1372,6 +1372,40 @@ public class CursorCliDriverTests
     }
 
     [Fact]
+    public async Task CoalescesRegularAssistantEventsInHumanLogWithoutDuplicatingResult()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(
+                0,
+                """
+                {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll "}]}}
+                {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"read the README"}]}}
+                {"type":"result","subtype":"success","result":"I'll read the README","session_id":"dddddddd-dddd-dddd-dddd-dddddddddddd"}
+                """,
+                ""),
+        };
+        await using var log = TestRunLogs.CreateLog();
+
+        var result = await new CursorCliDriver(runner).RunAsync(
+            new AgentRunRequest(AgentFacade.CursorAgent, "go", Path.GetTempPath(), null, null),
+            log,
+            onStdoutLine: null,
+            CancellationToken.None);
+
+        await log.DisposeAsync();
+        var text = TestRunLogs.ReadShared(result.TextLogPath);
+        var assistantLines = text.Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Where(line => line.Contains(" assistant:", StringComparison.Ordinal))
+            .ToList();
+        Assert.Single(assistantLines);
+        Assert.Contains("assistant: I'll read the README", assistantLines[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("result: I'll read the README", text, StringComparison.Ordinal);
+        Assert.Equal("I'll read the README", result.OutputText);
+    }
+
+    [Fact]
     public async Task IgnoresUnknownEventsAndDuplicateAssistantFlush()
     {
         var runner = new RecordingProcessRunner
@@ -1426,7 +1460,7 @@ public class CursorCliDriverTests
                 ""),
         };
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => RunAsync(runner));
-        Assert.Contains("non-JSON line", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("not a JSON object event", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1443,7 +1477,7 @@ public class CursorCliDriverTests
                 ""),
         };
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => RunAsync(runner));
-        Assert.Contains("non-JSON line", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("not a JSON object event", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
