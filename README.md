@@ -1,13 +1,13 @@
 # codex_agent_facade
 
-Codex App を薄い UI shell として、GitHub Copilot、Grok Build、Devin CLI へ作業を中継する feasibility PoC。
+Codex App を薄い UI shell として、GitHub Copilot、Grok Build、Devin CLI、Cursor CLI へ作業を中継する feasibility PoC。
 
 Codex / Facade は planner や orchestrator にならない。ユーザーの prompt を構造化 MCP 入力として受け、選択した agent の CLI へ変換して実行し、応答を同じ Codex thread へ返す。
 
 ## 必要環境
 
 - .NET 11 SDK（Preview 可）。`#:include` で複数ファイルをコンパイルする
-- PATH 上の `copilot`（GitHub Copilot CLI）、`grok`（Grok Build CLI）、および / または `devin`（Devin CLI）
+- PATH 上の `copilot`（GitHub Copilot CLI）、`grok`（Grok Build CLI）、`devin`（Devin CLI）、および / または `cursor-agent`（Cursor CLI）
 - 実作業には各 CLI へのログインが必要
 
 このリポジトリは File-based apps を使う。`.csproj` は無い。
@@ -124,7 +124,7 @@ enabled = true
 | フィールド | 必須 | 内容 |
 | --- | --- | --- |
 | `request_id` | はい | 呼び出し側が生成する冪等キー。同じ値の再呼び出しは既存 job を返す |
-| `agent` | はい | `github-copilot`、`grok-build`、または `devin-cli` |
+| `agent` | はい | `github-copilot`、`grok-build`、`devin-cli`、または `cursor` |
 | `prompt` | はい | 対象 agent へ渡す本文。Facade は再構成しない |
 | `working_directory` | はい | 対象 workspace / worktree |
 | `session_id` | いいえ | 同一外部 session の継続。省略時は新規 |
@@ -253,13 +253,19 @@ Devin CLI（プロセス cwd = `working_directory`）:
 devin --respect-workspace-trust false [--permission-mode dangerous] [--resume <session_id>] --print -- <prompt>
 ```
 
-`--allow-all` / `--always-approve` / `--permission-mode dangerous` は `auto_approve=true` のときだけ付ける。Copilot は全OSで PATH 上の `copilot` を選び、`--prompt` は使わず、Skill付き完全promptをUTF-8 stdinへ渡す。GitHub公式の [programmatic usage](https://docs.github.com/en/copilot/how-tos/copilot-cli/automate-copilot-cli/run-cli-programmatically) に従う。Windowsの`copilot.CMD`は汎用cmd経路でstdin handleをchildへ継承し、PATH上で`copilot.exe`が先に解決される環境では通常のnative経路を使う。npm shim内容やnpm loaderの解析は行わない。`devin` は PATH 上の実行ファイルを使う。
+Cursor CLI（プロセス cwd = `working_directory`。実行ファイル名は Unix では `cursor-agent`、Windows では `cursor-agent.ps1`）:
 
-Skill 変換は共通化しない。Copilot は `Use the /name skill.`、Grok と Devin は `/name` 行。詳細は `docs/poc-observations.md`。
+```text
+cursor-agent --print --output-format stream-json --trust --workspace <working_directory> [--force] [--resume <session_id>] <prompt>
+```
+
+`--allow-all` / `--always-approve` / `--permission-mode dangerous` / `--force` は `auto_approve=true` のときだけ付ける。Copilot は全OSで PATH 上の `copilot` を選び、`--prompt` は使わず、Skill付き完全promptをUTF-8 stdinへ渡す。GitHub公式の [programmatic usage](https://docs.github.com/en/copilot/how-tos/copilot-cli/automate-copilot-cli/run-cli-programmatically) に従う。Windowsの`copilot.CMD`は汎用cmd経路でstdin handleをchildへ継承し、PATH上で`copilot.exe`が先に解決される環境では通常のnative経路を使う。npm shim内容やnpm loaderの解析は行わない。`devin` は PATH 上の実行ファイルを使う。Cursor は PATH 上の `cursor-agent` を使う。同梱の `agent` は Grok Build の `agent` と衝突するため使わない。Windows では公式の `cursor-agent.ps1` を `pwsh -File` で起動する。`cursor-agent.cmd` は cmd が CR/LF を引数へ渡せないため使わない。
+
+Skill 変換は共通化しない。Copilot は `Use the /name skill.`、Grok と Devin は `/name` 行。Cursor は Codex / `.codex/skills` を native discovery するため、`skills` 配列を prompt へ変換しない。prompt 本文で `/skill-name` と書けば headless でも invoke できる。詳細は `docs/poc-observations.md`。
 
 ## テスト
 
-CI / 通常テストは実 `copilot` / `grok` / `devin` を呼ばない（`dotnet --version` の収集確認だけ実プロセスを使う）。
+CI / 通常テストは実 `copilot` / `grok` / `devin` / `cursor-agent` を呼ばない（`dotnet --version` の収集確認だけ実プロセスを使う）。
 Windows の `.cmd` / `.bat` は `ProcessStartInfo.Arguments` の raw command string として `cmd.exe /d /v:off /s /c` で起動する。`.NET` の `ArgumentList` は使わず、引用符は二重化し、`%` はプロセス限定環境変数の置換結果で保護してから cmd に渡す。`&`、`|`、`^`、空白、日本語、`!`、括弧、`<`、`>`、引用符を含む値は実プロセス fixture で検証している。NUL と CR/LF は cmd のバッチ引数 ABI で忠実かつ安全に表現できないため、`.cmd` / `.bat` 経路では実行前エラーになる。Copilotの複数行promptは公式stdin経路で渡し、`--prompt`と併用しない。stdin指定時はUTF-8 BOMなしで本文をそのままwrite/flush/closeし、launch logには本文を記録せず、指定有無とbyte countだけを記録する。通常の`.ps1`は汎用`pwsh.exe -NoLogo -NoProfile -NonInteractive -File <script>`の`ArgumentList`、通常の`.exe`は従来どおり`ArgumentList`を使う。stdout は UTF-8 JSONL のまま、Windows の `.cmd` / `.bat` wrapper の stderr は OS の OEM encoding、wrapperなし（native executable と PowerShell host）は UTF-8として厳密にデコードする。選択した encoding で解釈できなければ実行を失敗させる。
 
 ```powershell
@@ -280,6 +286,48 @@ dotnet run --file src/DevinMcpSmoke.cs
 
 `DevinMcpSmoke.cs` は Facade を別プロセスで起動し、`ModelContextProtocol.Client` から `start_agent` / `get_agent_job` を呼ぶ。Free plan の quota を消費するため、人手で明示実行する。
 
+### Cursor CLI の事前セットアップ
+
+Windows:
+
+```powershell
+irm 'https://cursor.com/install?win32=true' | iex
+cursor-agent --version
+cursor-agent login
+cursor-agent status
+```
+
+macOS / Linux:
+
+```bash
+curl https://cursor.com/install -fsS | bash
+cursor-agent --version
+cursor-agent login
+```
+
+認証は `cursor-agent login`（ブラウザ）または環境変数 `CURSOR_API_KEY`。Facade は API key を引数へ渡さない。
+
+この環境では Grok Build が `agent` を PATH に置く。Cursor の installer も `agent` を作るが、Facade は衝突を避けるため `cursor-agent` だけを起動する。
+
+Cursor 固有の対応:
+
+| Facade | Cursor CLI |
+| --- | --- |
+| 非対話 | `--print` |
+| streaming | `--output-format stream-json`（`--stream-partial-output` は付けない） |
+| working directory | `--workspace` と process cwd |
+| `session_id` 継続 | `--resume <session_id>`。最新 session を取る `--continue` は使わない |
+| 新規 `sessionId` | stream-json の明示フィールド `session_id` だけを返す。`request_id` や任意 UUID は使わない |
+| `auto_approve=true` | `--force`（コマンド / ファイル変更の承認を省略。denied なものは通さない） |
+| `auto_approve=false` | `--force` を付けない。workspace 信頼ダイアログだけ `--trust` で避ける |
+| Skills | 変換しない。Cursor は `.codex/skills` 等を native discovery する。明示 invoke は prompt の `/skill-name` |
+
+`--force` は Copilot の `--allow-all` や Grok の `--always-approve` と完全同義ではない。Cursor の permission model では「明示 deny 以外を通す」フラグであり、MCP server 承認（`--approve-mcps`）や sandbox は別スイッチである。Facade はそれらを勝手に付けない。
+
+`--trust` は `auto_approve` とは独立で、headless 実行が未信頼 workspace の確認で止まらないように常に付ける。Devin の `--respect-workspace-trust false` と同じ役割。
+
+print モードでは公式ドキュメント上 `thinking` event は出ない。出た場合は run log の thought として残し、`outputText` には混ぜない。最終応答は `type=result` の `result` を優先する。このフィールドは assistant 本文の連結であり、tool 前の中間 assistant 文も含む。`request_id` は session ID ではない。
+
 ## 観測
 
 PoC の成果物は実装に加え、成立 / 不可の記録である。`docs/poc-observations.md` を更新する。
@@ -288,7 +336,7 @@ PoC の成果物は実装に加え、成立 / 不可の記録である。`docs/p
 
 - `CODEX_AGENT_FACADE_TOKEN` をユーザー環境に設定し、Facade プロセスを事前起動する（Windows では Task Scheduler から `CodexAgentFacade.exe` を直接起動してよい）
 - 常駐 exe を直接起動したときコンソールウィンドウが出ないことの確認（WinExe。自動テストでは検証しない）
-- GitHub Copilot CLI と Grok Build CLI、Devin CLI へのログイン
+- GitHub Copilot CLI と Grok Build CLI、Devin CLI、Cursor CLI へのログイン
 - Codex への MCP 登録（`url`、`bearer_token_env_var`、`enabled = true`、`direct_only_tool_namespaces`）
 - Facade 再起動後に自動 reconnect しない場合の、同一 thread 上での MCP refresh / reconnect
 - Desktop Codex App の composer / 完了通知 / 別 thread 並行（HTTP 移行後の start/get 実機確認は `docs/poc-observations.md`）

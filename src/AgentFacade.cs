@@ -44,21 +44,25 @@ public sealed class AgentFacade
     public const string GitHubCopilotAgent = "github-copilot";
     public const string GrokBuildAgent = "grok-build";
     public const string DevinCliAgent = "devin-cli";
+    public const string CursorAgent = "cursor";
 
     private readonly GitHubCopilotDriver _gitHubCopilot;
     private readonly GrokBuildDriver _grokBuild;
     private readonly DevinCliDriver _devinCli;
+    private readonly CursorCliDriver _cursorCli;
     private readonly IAgentRunLogFactory _runLogFactory;
 
     public AgentFacade(
         GitHubCopilotDriver gitHubCopilot,
         GrokBuildDriver grokBuild,
         DevinCliDriver devinCli,
+        CursorCliDriver cursorCli,
         IAgentRunLogFactory runLogFactory)
     {
         _gitHubCopilot = gitHubCopilot;
         _grokBuild = grokBuild;
         _devinCli = devinCli;
+        _cursorCli = cursorCli;
         _runLogFactory = runLogFactory;
     }
 
@@ -82,7 +86,9 @@ public sealed class AgentFacade
                     .ConfigureAwait(false),
                 DevinCliAgent => await _devinCli.RunAsync(request, log, onStdoutLine, cancellationToken)
                     .ConfigureAwait(false),
-                _ => throw new ArgumentException($"Unknown agent '{request.Agent}'. Supported agents: {GitHubCopilotAgent}, {GrokBuildAgent}, {DevinCliAgent}."),
+                CursorAgent => await _cursorCli.RunAsync(request, log, onStdoutLine, cancellationToken)
+                    .ConfigureAwait(false),
+                _ => throw new ArgumentException($"Unknown agent '{request.Agent}'. Supported agents: {GitHubCopilotAgent}, {GrokBuildAgent}, {DevinCliAgent}, {CursorAgent}."),
             };
 
             var withLogs = result with
