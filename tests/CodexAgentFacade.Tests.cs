@@ -17,6 +17,7 @@
 #:include ../src/GitHubCopilotDriver.cs
 #:include ../src/GrokBuildDriver.cs
 #:include ../src/DevinCliDriver.cs
+#:include ../src/CursorCliDriver.cs
 #:include ../src/AgentTools.cs
 #:include ../src/AgentJob.cs
 #:include ../src/AgentJobService.cs
@@ -153,6 +154,7 @@ public class AgentFacadeTests
             CancellationToken.None));
         Assert.Contains("Unknown agent", ex.Message, StringComparison.Ordinal);
         Assert.Contains(AgentFacade.DevinCliAgent, ex.Message, StringComparison.Ordinal);
+        Assert.Contains(AgentFacade.CursorAgent, ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -230,6 +232,31 @@ public class AgentFacadeTests
         Assert.True(File.Exists(result.TextLogPath));
     }
 
+    [Fact]
+    public async Task RoutesCursor()
+    {
+        var facade = CreateFacade(out var runner);
+        runner.Result = new ProcessRunResult(
+            0,
+            """
+            {"type":"system","subtype":"init","session_id":"c6b62c6f-7ead-4fd6-9922-e952131177ff"}
+            {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"pong"}]}}
+            {"type":"result","subtype":"success","is_error":false,"result":"pong","session_id":"c6b62c6f-7ead-4fd6-9922-e952131177ff"}
+            """,
+            "");
+        var result = await facade.RunAsync(
+            new AgentRunRequest(AgentFacade.CursorAgent, "hello", Path.GetTempPath(), null, null),
+            onStdoutLine: null,
+            CancellationToken.None);
+        Assert.Equal(CursorCliDriver.FileName, runner.LastRequest!.FileName);
+        Assert.Equal(AgentFacade.CursorAgent, result.Agent);
+        Assert.Equal("pong", result.OutputText);
+        Assert.Equal("c6b62c6f-7ead-4fd6-9922-e952131177ff", result.SessionId);
+        Assert.False(string.IsNullOrWhiteSpace(result.RunId));
+        Assert.True(File.Exists(result.EventsLogPath));
+        Assert.True(File.Exists(result.TextLogPath));
+    }
+
     private static AgentFacade CreateFacade(out RecordingProcessRunner runner)
     {
         return CreateFacade(out runner, out _);
@@ -243,6 +270,7 @@ public class AgentFacadeTests
             new GitHubCopilotDriver(runner),
             new GrokBuildDriver(runner),
             new DevinCliDriver(runner),
+            new CursorCliDriver(runner),
             factory);
     }
 }
@@ -1167,6 +1195,393 @@ public class DevinCliDriverTests
             log,
             onStdoutLine: null,
             CancellationToken.None);
+    }
+}
+
+public class CursorCliDriverTests
+{
+    [Fact]
+    public void BuildArgumentsIncludeNonInteractiveFlags()
+    {
+        var args = CursorCliDriver.BuildArguments(
+            new AgentRunRequest(AgentFacade.CursorAgent, "Reply with exactly: pong", @"C:\repo", null, null));
+        Assert.Equal(
+            [
+                "--print",
+                "--output-format",
+                "stream-json",
+                "--trust",
+                "--workspace",
+                @"C:\repo",
+                "--force",
+                "Reply with exactly: pong",
+            ],
+            args);
+        Assert.DoesNotContain("--continue", args);
+        Assert.DoesNotContain("--yolo", args);
+        Assert.DoesNotContain("--stream-partial-output", args);
+    }
+
+    [Fact]
+    public void BuildArgumentsOmitsForceWhenAutoApproveFalse()
+    {
+        var args = CursorCliDriver.BuildArguments(
+            new AgentRunRequest(AgentFacade.CursorAgent, "ask", @"C:\repo", null, null, AutoApprove: false));
+        Assert.Equal(
+            [
+                "--print",
+                "--output-format",
+                "stream-json",
+                "--trust",
+                "--workspace",
+                @"C:\repo",
+                "ask",
+            ],
+            args);
+        Assert.DoesNotContain("--force", args);
+        Assert.DoesNotContain("--yolo", args);
+        Assert.Contains("--trust", args);
+    }
+
+    [Fact]
+    public void BuildArgumentsResumeSessionAndWorkingDirectory()
+    {
+        var args = CursorCliDriver.BuildArguments(
+            new AgentRunRequest(
+                AgentFacade.CursorAgent,
+                "continue",
+                @"D:\ws",
+                "c6b62c6f-7ead-4fd6-9922-e952131177ff",
+                ["$dotnet-file-based-apps"]));
+        Assert.Contains("--resume", args);
+        Assert.Contains("c6b62c6f-7ead-4fd6-9922-e952131177ff", args);
+        Assert.Contains("--workspace", args);
+        Assert.Contains(@"D:\ws", args);
+        Assert.Equal("continue", args[^1]);
+        Assert.DoesNotContain("/dotnet-file-based-apps", args);
+        Assert.DoesNotContain("--continue", args);
+    }
+
+    [Fact]
+    public void FileNameAvoidsWindowsCmdWrapper()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Equal("cursor-agent.ps1", CursorCliDriver.FileName);
+        }
+        else
+        {
+            Assert.Equal("cursor-agent", CursorCliDriver.FileName);
+        }
+    }
+
+    [Fact]
+    public async Task RunPassesMultilinePromptAsSingleArgument()
+    {
+        var prompt = "Reply with exactly: pong\nSecond line.";
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(
+                0,
+                """{"type":"result","subtype":"success","result":"pong","session_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}""",
+                ""),
+        };
+        await using var log = TestRunLogs.CreateLog();
+        await new CursorCliDriver(runner).RunAsync(
+            new AgentRunRequest(AgentFacade.CursorAgent, prompt, Path.GetTempPath(), null, null),
+            log,
+            onStdoutLine: null,
+            CancellationToken.None);
+        Assert.Equal(CursorCliDriver.FileName, runner.LastRequest!.FileName);
+        Assert.Equal(prompt, runner.LastRequest.Arguments[^1]);
+        Assert.Contains('\n', runner.LastRequest.Arguments[^1]);
+        Assert.Null(runner.LastRequest.StandardInputText);
+    }
+
+    [Fact]
+    public void SkillsDoNotRewritePrompt()
+    {
+        var args = CursorCliDriver.BuildArguments(
+            new AgentRunRequest(
+                AgentFacade.CursorAgent,
+                "body",
+                @"C:\repo",
+                null,
+                ["review", "$dotnet-file-based-apps"]));
+        Assert.Equal("body", args[^1]);
+        Assert.DoesNotContain("/review", args);
+        Assert.DoesNotContain("Use the /review skill.", args);
+    }
+
+    [Fact]
+    public async Task ParsesOfficialStreamJsonResultAndSessionId()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(0, OfficialStreamJsonFixture(), ""),
+        };
+        var result = await RunAsync(runner);
+        Assert.Equal("I'll read the README.md fileBased on the README, I'll create a summaryDone! I've created the summary in summary.txt", result.OutputText);
+        Assert.Equal("c6b62c6f-7ead-4fd6-9922-e952131177ff", result.SessionId);
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal(CursorCliDriver.FileName, runner.LastRequest!.FileName);
+        Assert.Equal(Path.GetTempPath(), runner.LastRequest.WorkingDirectory);
+    }
+
+    [Fact]
+    public async Task PrefersResultEventOverThinkingAndToolProgress()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(
+                0,
+                """
+                {"type":"system","subtype":"init","session_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}
+                {"type":"thinking","text":"I should inspect the repo"}
+                {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll look at the files"}]}}
+                {"type":"tool_call","subtype":"started","call_id":"toolu_1","tool_call":{"readToolCall":{"args":{"path":"README.md"}}},"session_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}
+                {"type":"tool_call","subtype":"completed","call_id":"toolu_1","tool_call":{"readToolCall":{"args":{"path":"README.md"},"result":{"success":{"content":"# Project"}}}}}
+                {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"pong"}]}}
+                {"type":"result","subtype":"success","is_error":false,"result":"pong","session_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}
+                """,
+                ""),
+        };
+        var result = await RunAsync(runner);
+        Assert.Equal("pong", result.OutputText);
+        Assert.Equal("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", result.SessionId);
+        Assert.DoesNotContain("I should inspect the repo", result.OutputText, StringComparison.Ordinal);
+        Assert.DoesNotContain("I'll look at the files", result.OutputText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FallsBackToAssistantTextWhenResultEventIsMissing()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(
+                0,
+                """
+                {"type":"system","subtype":"init","session_id":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"}
+                {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}
+                {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"world"}]}}
+                """,
+                ""),
+        };
+        var result = await RunAsync(runner);
+        Assert.Equal("hello\nworld", result.OutputText);
+        Assert.Equal("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", result.SessionId);
+    }
+
+    [Fact]
+    public async Task CoalescesRegularAssistantEventsInHumanLogWithoutDuplicatingResult()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(
+                0,
+                """
+                {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll "}]}}
+                {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"read the README"}]}}
+                {"type":"result","subtype":"success","result":"I'll read the README","session_id":"dddddddd-dddd-dddd-dddd-dddddddddddd"}
+                """,
+                ""),
+        };
+        await using var log = TestRunLogs.CreateLog();
+
+        var result = await new CursorCliDriver(runner).RunAsync(
+            new AgentRunRequest(AgentFacade.CursorAgent, "go", Path.GetTempPath(), null, null),
+            log,
+            onStdoutLine: null,
+            CancellationToken.None);
+
+        await log.DisposeAsync();
+        var text = TestRunLogs.ReadShared(result.TextLogPath);
+        var assistantLines = text.Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Where(line => line.Contains(" assistant:", StringComparison.Ordinal))
+            .ToList();
+        Assert.Single(assistantLines);
+        Assert.Contains("assistant: I'll read the README", assistantLines[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("result: I'll read the README", text, StringComparison.Ordinal);
+        Assert.Equal("I'll read the README", result.OutputText);
+    }
+
+    [Fact]
+    public async Task IgnoresUnknownEventsAndDuplicateAssistantFlush()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(
+                0,
+                """
+                {"type":"system","subtype":"init","session_id":"cccccccc-cccc-cccc-cccc-cccccccccccc"}
+                {"type":"future_event","payload":{"ignored":true}}
+                {"type":"assistant","timestamp_ms":1,"message":{"role":"assistant","content":[{"type":"text","text":"po"}]}}
+                {"type":"assistant","timestamp_ms":2,"model_call_id":"call_1","message":{"role":"assistant","content":[{"type":"text","text":"po"}]}}
+                {"type":"assistant","timestamp_ms":3,"message":{"role":"assistant","content":[{"type":"text","text":"ng"}]}}
+                {"type":"result","subtype":"success","result":"pong","session_id":"cccccccc-cccc-cccc-cccc-cccccccccccc"}
+                """,
+                ""),
+        };
+        var result = await RunAsync(runner);
+        Assert.Equal("pong", result.OutputText);
+        Assert.Equal("cccccccc-cccc-cccc-cccc-cccccccccccc", result.SessionId);
+    }
+
+    [Fact]
+    public async Task DoesNotTreatRequestIdOrArbitraryUuidAsSessionId()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(
+                0,
+                """
+                {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"see 99999999-9999-9999-9999-999999999999"}]}}
+                {"type":"result","subtype":"success","result":"see 99999999-9999-9999-9999-999999999999","request_id":"10e11780-df2f-45dc-a1ff-4540af32e9c0"}
+                """,
+                ""),
+        };
+        var result = await RunAsync(runner);
+        Assert.Equal(string.Empty, result.SessionId);
+        Assert.Equal("see 99999999-9999-9999-9999-999999999999", result.OutputText);
+    }
+
+    [Fact]
+    public async Task MixedNonJsonLineFailsEvenWhenResultExists()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(
+                0,
+                """
+                warning: not json
+                {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"pong"}]}}
+                {"type":"result","subtype":"success","result":"pong","session_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}
+                """,
+                ""),
+        };
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => RunAsync(runner));
+        Assert.Contains("not a JSON object event", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MixedNonObjectJsonFailsEvenWhenResultExists()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(
+                0,
+                """
+                [1,2]
+                {"type":"result","subtype":"success","result":"pong","session_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}
+                """,
+                ""),
+        };
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => RunAsync(runner));
+        Assert.Contains("not a JSON object event", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MalformedJsonThrowsWhenNoJsonObjectExists()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(0, "not-json\n{oops", ""),
+        };
+        await Assert.ThrowsAsync<InvalidOperationException>(() => RunAsync(runner));
+    }
+
+    [Fact]
+    public async Task EmptyStdoutThrows()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(0, "  ", ""),
+        };
+        await Assert.ThrowsAsync<InvalidOperationException>(() => RunAsync(runner));
+    }
+
+    [Fact]
+    public async Task ThrowsWhenAssistantTextIsMissing()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(
+                0,
+                """{"type":"system","subtype":"init","session_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}""",
+                ""),
+        };
+        await Assert.ThrowsAsync<InvalidOperationException>(() => RunAsync(runner));
+    }
+
+    [Fact]
+    public async Task NonZeroExitThrows()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(1, "", "Authentication required"),
+        };
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => RunAsync(runner));
+        Assert.Contains("exited with code 1", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("Authentication required", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task StreamsEventsToRunLog()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(
+                0,
+                """
+                {"type":"system","subtype":"init","session_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","model":"Composer"}
+                {"type":"thinking","text":"plan"}
+                {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"pong"}]}}
+                {"type":"result","subtype":"success","result":"pong","session_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}
+                """,
+                "warn"),
+        };
+        await using var log = TestRunLogs.CreateLog();
+        var result = await new CursorCliDriver(runner).RunAsync(
+            new AgentRunRequest(AgentFacade.CursorAgent, "go", Path.GetTempPath(), null, null),
+            log,
+            onStdoutLine: null,
+            CancellationToken.None);
+        var events = TestRunLogs.ReadShared(result.EventsLogPath);
+        var text = TestRunLogs.ReadShared(result.TextLogPath);
+        Assert.Contains("\"type\":\"system\"", events, StringComparison.Ordinal);
+        Assert.Contains("\"type\":\"assistant\"", events, StringComparison.Ordinal);
+        Assert.Contains("assistant: pong", text, StringComparison.Ordinal);
+        Assert.Contains("thought: plan", text, StringComparison.Ordinal);
+        Assert.Contains("stderr", text, StringComparison.Ordinal);
+        Assert.Contains("warn", text, StringComparison.Ordinal);
+        Assert.Equal("pong", result.OutputText);
+    }
+
+    private static async Task<AgentRunResult> RunAsync(RecordingProcessRunner runner)
+    {
+        await using var log = TestRunLogs.CreateLog();
+        return await new CursorCliDriver(runner).RunAsync(
+            new AgentRunRequest(AgentFacade.CursorAgent, "go", Path.GetTempPath(), null, null),
+            log,
+            onStdoutLine: null,
+            CancellationToken.None);
+    }
+
+    private static string OfficialStreamJsonFixture()
+    {
+        return """
+            {"type":"system","subtype":"init","apiKeySource":"login","cwd":"/Users/user/project","session_id":"c6b62c6f-7ead-4fd6-9922-e952131177ff","model":"Claude 4 Sonnet","permissionMode":"default"}
+            {"type":"user","message":{"role":"user","content":[{"type":"text","text":"Read README.md and create a summary"}]},"session_id":"c6b62c6f-7ead-4fd6-9922-e952131177ff"}
+            {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll read the README.md file"}]},"session_id":"c6b62c6f-7ead-4fd6-9922-e952131177ff"}
+            {"type":"tool_call","subtype":"started","call_id":"toolu_vrtx_01NnjaR886UcE8whekg2MGJd","tool_call":{"readToolCall":{"args":{"path":"README.md"}}},"session_id":"c6b62c6f-7ead-4fd6-9922-e952131177ff"}
+            {"type":"tool_call","subtype":"completed","call_id":"toolu_vrtx_01NnjaR886UcE8whekg2MGJd","tool_call":{"readToolCall":{"args":{"path":"README.md"},"result":{"success":{"content":"# Project\n\nThis is a sample project...","isEmpty":false,"exceededLimit":false,"totalLines":54,"totalChars":1254}}}},"session_id":"c6b62c6f-7ead-4fd6-9922-e952131177ff"}
+            {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Based on the README, I'll create a summary"}]},"session_id":"c6b62c6f-7ead-4fd6-9922-e952131177ff"}
+            {"type":"tool_call","subtype":"started","call_id":"toolu_vrtx_01Q3VHVnWFSKygaRPT7WDxrv","tool_call":{"writeToolCall":{"args":{"path":"summary.txt","fileText":"# README Summary\n\nThis project contains...","toolCallId":"toolu_vrtx_01Q3VHVnWFSKygaRPT7WDxrv"}}},"session_id":"c6b62c6f-7ead-4fd6-9922-e952131177ff"}
+            {"type":"tool_call","subtype":"completed","call_id":"toolu_vrtx_01Q3VHVnWFSKygaRPT7WDxrv","tool_call":{"writeToolCall":{"args":{"path":"summary.txt","fileText":"# README Summary\n\nThis project contains...","toolCallId":"toolu_vrtx_01Q3VHVnWFSKygaRPT7WDxrv"},"result":{"success":{"path":"/Users/user/project/summary.txt","linesCreated":19,"fileSize":942}}}},"session_id":"c6b62c6f-7ead-4fd6-9922-e952131177ff"}
+            {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done! I've created the summary in summary.txt"}]},"session_id":"c6b62c6f-7ead-4fd6-9922-e952131177ff"}
+            {"type":"result","subtype":"success","duration_ms":5234,"duration_api_ms":5234,"is_error":false,"result":"I'll read the README.md fileBased on the README, I'll create a summaryDone! I've created the summary in summary.txt","session_id":"c6b62c6f-7ead-4fd6-9922-e952131177ff","request_id":"10e11780-df2f-45dc-a1ff-4540af32e9c0"}
+            """;
     }
 }
 
@@ -2965,6 +3380,7 @@ public class SecretRedactorTests
     }
 }
 
+[Collection("http-host")]
 public class McpHttpHostTests
 {
     private static readonly object EnvironmentLock = new();
@@ -3334,8 +3750,8 @@ public class McpHttpHostTests
 
     private static AgentJobSnapshot ReadSnapshot(CallToolResult call)
     {
-        Assert.True(call.IsError != true);
         var text = string.Concat(call.Content.OfType<TextContentBlock>().Select(block => block.Text));
+        Assert.True(call.IsError != true, text);
         var result = JsonSerializer.Deserialize<AgentJobSnapshot>(text, AgentJson.Options);
         Assert.NotNull(result);
         return result;
@@ -3491,6 +3907,7 @@ internal sealed class CapturingLoggerFactory : ILoggerFactory
     }
 }
 
+[Collection("http-host")]
 public class ServerLogTests
 {
     [Fact]

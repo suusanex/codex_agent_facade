@@ -436,3 +436,62 @@ devin --respect-workspace-trust false [--permission-mode dangerous] [--resume <s
 5. 実 `cancel_agent_job` と `auto_approve=false`
 
 以前の blocked 記録（同日の導入前）: 公式 Windows 導入スクリプトが OS error 5 で失敗し、当時は PATH に `devin` が無かった。その後この環境へ CLI を導入し、上記の実 MCP スモークまで到達した。
+
+## Cursor CLI
+
+既存 MCP job 経路へ第四 Driver として `cursor` を追加する。Cursor SDK Bridge / ACP は使わず、headless `cursor-agent --print --output-format stream-json` から始める。
+
+### 実機 CLI 確認（2026-09-04）
+
+観測日: 2026-09-04  
+環境: Windows。PATH 上の `agent` は Grok Build（`C:\Users\suusa\.grok\bin\agent.exe`）。`cursor-agent` はユーザー PATH に未導入。公式 Windows zip `https://downloads.cursor.com/lab/2026.09.02-c22c1a3/windows/x64/agent-cli-package.zip` を一時展開して help / version を確認した。
+
+- 検出バージョン: `2026.09.02-c22c1a3`
+- 実行ファイル: 展開物の `cursor-agent.cmd` → `cursor-agent.ps1` → bundled `node.exe` `index.js`
+- `cursor-agent --help` の非対話は `-p, --print`
+- `--output-format` は `text | json | stream-json`（`--print` 必須）
+- working directory は `--workspace <path-or-name>`（省略時は process cwd）
+- resume は `--resume [chatId]`。`--continue` は最新 session なので Facade では使わない
+- auto approve に最も近い公式フラグは `--force`（alias `--yolo`）。denied なコマンドは通さない
+- `--trust` は workspace 信頼プロンプト回避。headless では未信頼 workspace が `--trust` または `--force` 無しで失敗する
+- `--approve-mcps` / `--sandbox` / `--auto-review` は別スイッチ。Facade は付けない
+- `cursor-agent status` は `Not logged in`。`CURSOR_API_KEY` も未設定
+- 未認証の `--print --output-format stream-json` は stderr `Error: Authentication required. Please run 'agent login' first, or set CURSOR_API_KEY environment variable.`、exit 1、stdout なし
+
+stream-json の公式 event（ドキュメントおよび help と一致）:
+
+- `system` / `subtype=init`（`session_id` を含む）
+- `user`
+- `assistant`（`message.content[].text`。`--stream-partial-output` 時は delta / duplicate flush）
+- `tool_call` / `subtype=started|completed`
+- `result` / `subtype=success`（`result` が最終本文、`session_id` が session、`request_id` は別フィールド）
+- print モードでは `thinking` は抑制される。未知 type の JSON object は無視して継続する。空行以外の非 JSON / 非 object 行が混ざると protocol violation として失敗する
+
+session ID:
+
+- 正式フィールドは `session_id`（`sessionId` も読む）
+- `request_id` と任意 UUID は採用しない
+- `--resume` の引数名は help 上 `chatId` だが、stream が expose する継続 ID は `session_id`
+
+Skills:
+
+- Cursor 公式は `.codex/skills` / `~/.codex/skills` を含む複数 root を native discovery する
+- headless でも prompt の `/skill-name` で明示 invoke できる
+- Driver は Grok の `/name` 前置をコピーしない。`AgentRunRequest.Skills` は prompt へ変換しない
+
+実機 smoke（単純応答 / working directory / resume / MCP）:
+
+- この環境では Cursor CLI が PATH 未導入かつ未ログインのため **skip**
+- 再現条件: `cursor-agent` を PATH へ入れ、`cursor-agent login` または `CURSOR_API_KEY` を設定したあと `dotnet run --file src/PocSmoke.cs`
+
+机上の CLI 変換:
+
+```text
+cursor-agent --print --output-format stream-json --trust --workspace <dir> [--force] [--resume <session_id>] <prompt>
+```
+
+- 実行ファイル名は Unix では `cursor-agent`、Windows では公式 launcher の `cursor-agent.ps1`。`agent` は Grok と衝突する。`cursor-agent.cmd` は ProcessRunner の cmd 経路が CR/LF を拒否するため使わない。複数行 prompt は argv の1要素として `pwsh -File` へ渡す
+- `--trust` は常に付ける。`--force` は `auto_approve=true` のときだけ
+- `outputText` は `type=result` の `result` を優先する。無いときだけ assistant 本文へ落とす
+- キャンセルは既存 `ProcessRunner` / Job Object。Driver 内に新しい process lifecycle は無い
+
