@@ -1642,6 +1642,7 @@ public class FacadeDelegationSkillContractTests
         "github-copilot",
         "grok-build",
         "devin-cli",
+        "cursor",
     ];
 
     private static readonly (string Name, string SessionLabel)[] KnownAgentSessionLabels =
@@ -1649,6 +1650,7 @@ public class FacadeDelegationSkillContractTests
         ("github-copilot", "Copilot session"),
         ("grok-build", "Grok session"),
         ("devin-cli", "Devin session"),
+        ("cursor", "Cursor session"),
     ];
 
     private static readonly string[] RequiredRelayContractPhrases =

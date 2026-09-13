@@ -1,0 +1,11 @@
+name: cursor
+version: 0.1.0
+description: Relay-only Skill. Codex does not execute the user task; it forwards the user payload to Cursor CLI through the Codex Agent Facade and relays the result.
+type: hybrid
+targets:
+  - codex
+  - agent-skills
+includes: auto
+
+dependencies:
+  apm: []

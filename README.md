@@ -213,6 +213,7 @@ Skill は **編集する work repository** の root で APM から入れる。�
 apm install suusanex/codex_agent_facade/apm-packages/github-copilot --target codex,agent-skills
 apm install suusanex/codex_agent_facade/apm-packages/grok-build --target codex,agent-skills
 apm install suusanex/codex_agent_facade/apm-packages/devin-cli --target codex,agent-skills
+apm install suusanex/codex_agent_facade/apm-packages/cursor --target codex,agent-skills
 ```
 
 ローカル checkout から入れる場合:
@@ -221,9 +222,10 @@ apm install suusanex/codex_agent_facade/apm-packages/devin-cli --target codex,ag
 apm install "C:\path\to\codex_agent_facade\apm-packages\github-copilot" --target codex,agent-skills
 apm install "C:\path\to\codex_agent_facade\apm-packages\grok-build" --target codex,agent-skills
 apm install "C:\path\to\codex_agent_facade\apm-packages\devin-cli" --target codex,agent-skills
+apm install "C:\path\to\codex_agent_facade\apm-packages\cursor" --target codex,agent-skills
 ```
 
-展開先は `.agents/skills/github-copilot/`、`.agents/skills/grok-build/`、`.agents/skills/devin-cli/`。Codex 上では `$github-copilot` / `$grok-build` / `$devin-cli` で本文を外部 agent へ渡す。これらの Skill を指定した turn で Codex 自身は対象作業を実行せず、外部 agent に委譲して結果を中継する。Skill 無しで `start_agent` / `get_agent_job` を直接呼んでもよい。
+展開先は `.agents/skills/github-copilot/`、`.agents/skills/grok-build/`、`.agents/skills/devin-cli/`、`.agents/skills/cursor/`。Codex 上では `$github-copilot` / `$grok-build` / `$devin-cli` / `$cursor` で本文を外部 agent へ渡す。これらの Skill を指定した turn で Codex 自身は対象作業を実行せず、外部 agent に委譲して結果を中継する。Skill 無しで `start_agent` / `get_agent_job` を直接呼んでもよい。
 
 更新・削除:
 
@@ -232,6 +234,7 @@ apm update
 apm uninstall github-copilot
 apm uninstall grok-build
 apm uninstall devin-cli
+apm uninstall cursor
 ```
 
 ## CLI 変換
