@@ -114,6 +114,16 @@ enabled = true
 
 `url` は `localhost` ではなく `127.0.0.1` を使う。Codex App では設定を保存したあと Restart する。
 
+## 発行と差し替え
+
+`tools/publish-facade.local.example.json` を `tools/publish-facade.local.json` にコピーし、発行先のフルパスを設定する。この設定ファイルは `.gitignore` 対象である。Facadeタスクを停止し、publish成果物全体を日時付きバックアップへ退避して差し替え、同じタスクを起動する。
+
+```powershell
+dotnet run --file tools/publish-facade.cs
+```
+
+設定ファイルを別の場所に置く場合は、1個目の引数にパスを指定する。Facadeの複数インスタンスがある場合、スクリプトは停止せず終了する。
+
 ## MCP tool
 
 公開 tool は `start_agent` / `get_agent_job` / `cancel_agent_job`。blocking な `run_agent` は無い。

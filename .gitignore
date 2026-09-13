@@ -19,6 +19,7 @@ mono_crash.*
 
 # File-based apps publish output
 artifacts/
+tools/publish-facade.local.json
 
 # Build results
 [Dd]ebug/
