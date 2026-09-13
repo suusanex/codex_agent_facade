@@ -18,6 +18,7 @@
 #:include DevinCliDriver.cs
 #:include CursorCliDriver.cs
 #:include AgentTools.cs
+#:include McpPublicContract.cs
 #:include AgentJob.cs
 #:include AgentJobService.cs
 #:include McpHttpHost.cs

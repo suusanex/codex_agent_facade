@@ -127,8 +127,7 @@ public static class McpHttpHost
                     Name = "codex-agent-facade",
                     Version = "0.1.0",
                 };
-                mcp.ServerInstructions =
-                    "Thin messenger from Codex to GitHub Copilot, Grok Build, Devin CLI, or Cursor CLI. For each user task generate one request_id and keep it. Call start_agent with request_id, agent, prompt, and working_directory. If the start result is lost, retry start_agent with the same request_id; do not mint a new id. Poll get_agent_job with the returned jobId until completed, failed, or cancelled. Do not replan or split the task. Pass the user prompt through. Reuse session_id from a completed result to continue the same external agent session.";
+                mcp.ServerInstructions = McpPublicContract.ServerInstructions;
             })
             .WithHttpTransport(http =>
             {

@@ -1,8 +1,8 @@
 # codex_agent_facade
 
-Codex App を薄い UI shell として、GitHub Copilot、Grok Build、Devin CLI、Cursor CLI へ作業を中継する feasibility PoC。
+Codex App から GitHub Copilot、Grok Build、Devin CLI、Cursor CLI へ作業を中継する feasibility PoC。
 
-Codex / Facade は planner や orchestrator にならない。ユーザーの prompt を構造化 MCP 入力として受け、選択した agent の CLI へ変換して実行し、応答を同じ Codex thread へ返す。
+Facade 自身は planner や orchestrator にならない薄い execution transport である。呼び出し側（Codex の親エージェントなど）は作業の計画・分割・委譲方針を決め、自己完結した worker prompt を `start_agent` に渡せる。元の user prompt 全体を転送する必要はない。Facade はその worker prompt を再計画・分割・再解釈・書き換えせず、選択した agent の CLI へ変換して実行し、完了結果を返す。
 
 ## 必要環境
 
@@ -118,15 +118,15 @@ enabled = true
 
 公開 tool は `start_agent` / `get_agent_job` / `cancel_agent_job`。blocking な `run_agent` は無い。
 
-作業ごとに呼び出し側が `request_id` を一度生成して保持する。`start_agent` の結果を取り損ねたら、**同じ `request_id`** で再試行する。新しい id で打ち直すと別 job になる。
+distinct な agent job / distinct な `start_agent` ごとに、呼び出し側が新しい `request_id` を生成して保持する。同じ `start_agent` の結果を取り損ねた再試行だけ、**同じ `request_id`** を再利用する。別の worker 作業には新しい id を使う。新しい id で打ち直すと別 job になる。
 
 ### `start_agent`
 
 | フィールド | 必須 | 内容 |
 | --- | --- | --- |
-| `request_id` | はい | 呼び出し側が生成する冪等キー。同じ値の再呼び出しは既存 job を返す |
+| `request_id` | はい | この distinct な agent job 用の冪等キー。呼び出し側が job ごとに新しく生成する。同じ値の再呼び出しは既存 job を返す |
 | `agent` | はい | `github-copilot`、`grok-build`、`devin-cli`、または `cursor` |
-| `prompt` | はい | 対象 agent へ渡す本文。Facade は再構成しない |
+| `prompt` | はい | 呼び出し側が構成した自己完結の worker prompt。元の user prompt 全体である必要はない。Facade は再解釈・書き換えせず selected agent へ転送する |
 | `working_directory` | はい | 対象 workspace / worktree |
 | `session_id` | いいえ | 同一外部 session の継続。省略時は新規 |
 | `skills` | いいえ | Codex 形式の Skill 名。Driver ごとに native 形式へ変換する |
@@ -225,7 +225,7 @@ apm install "C:\path\to\codex_agent_facade\apm-packages\devin-cli" --target code
 apm install "C:\path\to\codex_agent_facade\apm-packages\cursor" --target codex,agent-skills
 ```
 
-展開先は `.agents/skills/github-copilot/`、`.agents/skills/grok-build/`、`.agents/skills/devin-cli/`、`.agents/skills/cursor/`。Codex 上では `$github-copilot` / `$grok-build` / `$devin-cli` / `$cursor` で本文を外部 agent へ渡す。これらの Skill を指定した turn で Codex 自身は対象作業を実行せず、外部 agent に委譲して結果を中継する。Skill 無しで `start_agent` / `get_agent_job` を直接呼んでもよい。
+展開先は `.agents/skills/github-copilot/`、`.agents/skills/grok-build/`、`.agents/skills/devin-cli/`、`.agents/skills/cursor/`。Codex 上では `$github-copilot` / `$grok-build` / `$devin-cli` / `$cursor` で本文を外部 agent へ渡す。これらの Skill を指定した turn では、その Skill の契約どおり Codex 自身は対象作業を実行せず、Skill より後のユーザー本文を worker prompt として外部 agent へ委譲し、結果を中継する。Skill 無しで `start_agent` / `get_agent_job` を直接呼ぶ場合、呼び出し側は元の user prompt 全体を転送する必要はなく、限定した worker 専用 prompt を構成して渡してよい。
 
 更新・削除:
 

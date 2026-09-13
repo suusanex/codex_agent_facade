@@ -19,6 +19,7 @@
 #:include ../src/DevinCliDriver.cs
 #:include ../src/CursorCliDriver.cs
 #:include ../src/AgentTools.cs
+#:include ../src/McpPublicContract.cs
 #:include ../src/AgentJob.cs
 #:include ../src/AgentJobService.cs
 #:include ../src/McpHttpHost.cs
@@ -3411,6 +3412,238 @@ public class SecretRedactorTests
         Assert.DoesNotContain("literal-secret", redacted, StringComparison.Ordinal);
         Assert.Contains("\"apiKey\":\"" + SecretRedactor.Replacement + "\"", redacted, StringComparison.Ordinal);
         Assert.Contains("src/main.rs", redacted, StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
+/// MCP 公開契約が「丸投げ必須」へ後退していないことを検証する。
+/// 全文一致ではなく、caller の plan / split / worker prompt 構成を禁止しないこと、
+/// Facade は supplied worker prompt を変更しないこと、request_id が distinct job 単位であることを見る。
+/// </summary>
+[Collection("http-host")]
+public class McpPublicContractTests
+{
+    [Fact]
+    public void SourceContractAllowsCallerConstructedWorkerJobs()
+    {
+        AssertWorkerDelegationContract(McpPublicContract.ServerInstructions);
+        AssertWorkerDelegationContract(McpPublicContract.StartAgentDescription);
+        AssertWorkerPromptContract(McpPublicContract.PromptDescription);
+        AssertRequestIdContract(McpPublicContract.RequestIdDescription);
+        AssertDoesNotContainLegacyPassthroughPhrases(
+            McpPublicContract.ServerInstructions
+            + "\n" + McpPublicContract.StartAgentDescription
+            + "\n" + McpPublicContract.PromptDescription
+            + "\n" + McpPublicContract.RequestIdDescription);
+    }
+
+    [Fact]
+    public void ReadmeAllowsParentAgentWorkerDelegation()
+    {
+        var readme = File.ReadAllText(Path.Combine(LocateRepoRoot(), "README.md"));
+        Assert.Contains("呼び出し側", readme, StringComparison.Ordinal);
+        Assert.Contains("計画・分割", readme, StringComparison.Ordinal);
+        Assert.Contains("worker prompt", readme, StringComparison.Ordinal);
+        Assert.Contains("元の user prompt 全体を転送する必要はない", readme, StringComparison.Ordinal);
+        Assert.Contains("distinct な agent job", readme, StringComparison.Ordinal);
+        Assert.Contains("同じ `start_agent` の結果を取り損ねた再試行だけ", readme, StringComparison.Ordinal);
+        Assert.Contains("Facade 自身は planner や orchestrator にならない", readme, StringComparison.Ordinal);
+        Assert.DoesNotContain("Codex / Facade は planner や orchestrator にならない", readme, StringComparison.Ordinal);
+        Assert.DoesNotContain("作業ごとに呼び出し側が `request_id` を一度生成", readme, StringComparison.Ordinal);
+        Assert.DoesNotContain("ユーザーの prompt を構造化 MCP 入力として受け", readme, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PublishedMcpSchemaMatchesWorkerDelegationContract()
+    {
+        await using var session = await McpHttpTestHost.StartAsync();
+        await using var client = await session.CreateClientAsync();
+
+        Assert.Equal(McpPublicContract.ServerInstructions, client.ServerInstructions);
+
+        var tools = await client.ListToolsAsync();
+        var start = Assert.Single(tools, tool => tool.Name == "start_agent");
+        Assert.Equal(McpPublicContract.StartAgentDescription, start.Description);
+        Assert.Equal(McpPublicContract.RequestIdDescription, ReadInputPropertyDescription(start, "request_id"));
+        Assert.Equal(McpPublicContract.PromptDescription, ReadInputPropertyDescription(start, "prompt"));
+
+        AssertWorkerDelegationContract(client.ServerInstructions + "\n" + start.Description);
+        AssertWorkerPromptContract(ReadInputPropertyDescription(start, "prompt"));
+        AssertRequestIdContract(ReadInputPropertyDescription(start, "request_id"));
+        AssertDoesNotContainLegacyPassthroughPhrases(
+            client.ServerInstructions
+            + "\n" + start.Description
+            + "\n" + ReadInputPropertyDescription(start, "request_id")
+            + "\n" + ReadInputPropertyDescription(start, "prompt"));
+    }
+
+    [Fact]
+    public async Task StartAgentForwardsCallerWorkerPromptUnchangedAndAllowsDistinctRequestIds()
+    {
+        await using var session = await McpHttpTestHost.StartAsync();
+        session.Runner.Result = new ProcessRunResult(
+            0,
+            "{\"type\":\"text\",\"data\":\"ok\"}\n{\"type\":\"end\",\"sessionId\":\"11111111-1111-1111-1111-111111111111\"}",
+            "");
+
+        await using var client = await session.CreateClientAsync();
+        const string firstPrompt = "Implement only the parser tests. Do not change production code.";
+        const string secondPrompt = "Fix the failing parser assertion. Leave other files unchanged.";
+
+        var first = await CallStartAgentAsync(client, "req-worker-a", AgentFacade.GrokBuildAgent, firstPrompt);
+        await WaitForMcpJobAsync(client, first.JobId);
+        Assert.Equal(firstPrompt, ReadGrokPrompt(session.Runner.LastRequest!));
+
+        var second = await CallStartAgentAsync(client, "req-worker-b", AgentFacade.GrokBuildAgent, secondPrompt);
+        await WaitForMcpJobAsync(client, second.JobId);
+        Assert.NotEqual(first.JobId, second.JobId);
+        Assert.Equal(secondPrompt, ReadGrokPrompt(session.Runner.LastRequest!));
+        Assert.Equal(2, session.Runner.CallCount);
+
+        var retry = await CallStartAgentAsync(client, "req-worker-a", AgentFacade.GrokBuildAgent, firstPrompt);
+        Assert.Equal(first.JobId, retry.JobId);
+        Assert.Equal(2, session.Runner.CallCount);
+    }
+
+    private static void AssertWorkerDelegationContract(string text)
+    {
+        Assert.False(string.IsNullOrWhiteSpace(text));
+        Assert.Contains("caller", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("worker prompt", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("does not plan", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Do not replan or split the task", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Pass the user prompt through", text, StringComparison.Ordinal);
+    }
+
+    private static void AssertWorkerPromptContract(string text)
+    {
+        Assert.Contains("worker prompt constructed by the caller", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("forwarded unchanged", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("need not be the original user prompt", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("User prompt forwarded to the selected agent", text, StringComparison.Ordinal);
+    }
+
+    private static void AssertRequestIdContract(string text)
+    {
+        Assert.Contains("distinct", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("lost", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("For each user task generate one request_id", text, StringComparison.Ordinal);
+    }
+
+    private static void AssertDoesNotContainLegacyPassthroughPhrases(string text)
+    {
+        string[] forbidden =
+        [
+            "Do not replan or split the task",
+            "Pass the user prompt through",
+            "For each user task generate one request_id",
+            "User prompt forwarded to the selected agent",
+            "This facade does not plan or split the task",
+        ];
+        foreach (var phrase in forbidden)
+        {
+            Assert.DoesNotContain(phrase, text, StringComparison.Ordinal);
+        }
+    }
+
+    private static string ReadInputPropertyDescription(McpClientTool tool, string propertyName)
+    {
+        if (!tool.JsonSchema.TryGetProperty("properties", out var properties)
+            || !properties.TryGetProperty(propertyName, out var property)
+            || !property.TryGetProperty("description", out var description))
+        {
+            throw new InvalidOperationException(
+                "start_agent input schema is missing description for " + propertyName + ".");
+        }
+
+        var value = description.GetString();
+        Assert.False(string.IsNullOrWhiteSpace(value), propertyName + " description is empty.");
+        return value;
+    }
+
+    private static string LocateRepoRoot([CallerFilePath] string? callerFile = null)
+    {
+        var seeds = new List<string> { Directory.GetCurrentDirectory() };
+        if (!string.IsNullOrEmpty(callerFile))
+        {
+            var testsDir = Path.GetDirectoryName(callerFile);
+            if (!string.IsNullOrEmpty(testsDir))
+            {
+                seeds.Add(Path.GetFullPath(Path.Combine(testsDir, "..")));
+            }
+        }
+
+        foreach (var seed in seeds)
+        {
+            for (var dir = new DirectoryInfo(seed); dir is not null; dir = dir.Parent)
+            {
+                if (File.Exists(Path.Combine(dir.FullName, "README.md"))
+                    && Directory.Exists(Path.Combine(dir.FullName, "src")))
+                {
+                    return dir.FullName;
+                }
+            }
+        }
+
+        throw new InvalidOperationException("Could not locate repository root.");
+    }
+
+    private static string ReadGrokPrompt(ProcessRunRequest request)
+    {
+        for (var i = 0; i < request.Arguments.Count - 1; i++)
+        {
+            if (request.Arguments[i] == "-p")
+            {
+                return request.Arguments[i + 1];
+            }
+        }
+
+        Assert.Fail("Grok launch is missing -p prompt.");
+        return "";
+    }
+
+    private static async Task<AgentJobSnapshot> CallStartAgentAsync(
+        McpClient client,
+        string requestId,
+        string agent,
+        string prompt)
+    {
+        var call = await client.CallToolAsync(
+            "start_agent",
+            new Dictionary<string, object?>
+            {
+                ["request_id"] = requestId,
+                ["agent"] = agent,
+                ["prompt"] = prompt,
+                ["working_directory"] = Path.GetTempPath(),
+            });
+        var text = string.Concat(call.Content.OfType<TextContentBlock>().Select(block => block.Text));
+        Assert.True(call.IsError != true, text);
+        var result = JsonSerializer.Deserialize<AgentJobSnapshot>(text, AgentJson.Options);
+        Assert.NotNull(result);
+        return result;
+    }
+
+    private static async Task<AgentJobSnapshot> WaitForMcpJobAsync(McpClient client, string jobId)
+    {
+        for (var i = 0; i < 100; i++)
+        {
+            var call = await client.CallToolAsync(
+                "get_agent_job",
+                new Dictionary<string, object?> { ["job_id"] = jobId });
+            var text = string.Concat(call.Content.OfType<TextContentBlock>().Select(block => block.Text));
+            Assert.True(call.IsError != true, text);
+            var snapshot = JsonSerializer.Deserialize<AgentJobSnapshot>(text, AgentJson.Options);
+            Assert.NotNull(snapshot);
+            if (snapshot.Status != AgentJobStatus.Running)
+            {
+                return snapshot;
+            }
+
+            await Task.Delay(20);
+        }
+
+        throw new TimeoutException("job did not finish: " + jobId);
     }
 }
 

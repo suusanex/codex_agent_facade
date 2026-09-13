@@ -6,7 +6,7 @@ using ModelContextProtocol;
 using ModelContextProtocol.Server;
 
 /// <summary>
-/// Codex から見える MCP tools。agent 固有処理は持たない。
+/// Codex から見える MCP tools。caller が構成した worker prompt を job として受け、agent 固有処理は持たない。
 /// </summary>
 [McpServerToolType]
 public sealed class AgentTools
@@ -18,11 +18,11 @@ public sealed class AgentTools
         _jobs = jobs;
     }
 
-    [McpServerTool(Name = "start_agent"), Description("Start a coding agent job (github-copilot, grok-build, devin-cli, or cursor) and return a jobId immediately. Pass a caller-generated request_id and reuse it if this result is lost. Poll get_agent_job. This facade does not plan or split the task.")]
+    [McpServerTool(Name = "start_agent"), Description(McpPublicContract.StartAgentDescription)]
     public string StartAgent(
-        [Description("Caller-generated idempotency key. Reuse the exact same value to recover a lost start_agent result without starting a second agent.")] string request_id,
+        [Description(McpPublicContract.RequestIdDescription)] string request_id,
         [Description("Target agent. github-copilot, grok-build, devin-cli, or cursor.")] string agent,
-        [Description("User prompt forwarded to the selected agent without reinterpretation.")] string prompt,
+        [Description(McpPublicContract.PromptDescription)] string prompt,
         [Description("Working directory or worktree for the agent process.")] string working_directory,
         [Description("Existing external agent session id. Omit to start a new session.")] string? session_id = null,
         [Description("Codex-format skill names. Each driver converts them to that agent's native invocation.")] string[]? skills = null,
