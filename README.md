@@ -2,7 +2,7 @@
 
 Codex App から GitHub Copilot、Grok Build、Devin CLI、Cursor CLI へ作業を中継する feasibility PoC。
 
-Facade 自身は planner や orchestrator にならない薄い execution transport である。呼び出し側（Codex の親エージェントなど）は作業の計画・分割・委譲方針を決め、自己完結した worker prompt を `start_agent` に渡せる。元の user prompt 全体を転送する必要はない。Facade はその worker prompt を再計画・分割・再解釈・書き換えせず、選択した agent の CLI へ変換して実行し、完了結果を返す。
+Facade 自身は planner や orchestrator にならない薄い execution transport である。呼び出し側（Codex の親エージェントなど）は作業の計画・分割・委譲方針を決め、自己完結した worker prompt を `start_agent` に渡せる。元の user prompt 全体を転送する必要はない。Facade はその worker task を計画・分割・意味的に書き換えない。caller が明示した `skills` などの structured option は、対応 Driver が agent 固有の呼び出し表現へ変換する場合がある。選択した agent の CLI へ変換して実行し、完了結果を返す。
 
 ## 必要環境
 
@@ -126,10 +126,10 @@ distinct な agent job / distinct な `start_agent` ごとに、呼び出し側�
 | --- | --- | --- |
 | `request_id` | はい | この distinct な agent job 用の冪等キー。呼び出し側が job ごとに新しく生成する。同じ値の再呼び出しは既存 job を返す |
 | `agent` | はい | `github-copilot`、`grok-build`、`devin-cli`、または `cursor` |
-| `prompt` | はい | 呼び出し側が構成した自己完結の worker prompt。元の user prompt 全体である必要はない。Facade は再解釈・書き換えせず selected agent へ転送する |
+| `prompt` | はい | 呼び出し側が構成した自己完結の worker prompt。元の user prompt 全体である必要はない。Facade はこの task payload を再解釈しない。完全一致の転送は保証せず、`skills` 指定時は対応 Driver が agent 固有の skill 指示を付加する場合がある |
 | `working_directory` | はい | 対象 workspace / worktree |
 | `session_id` | いいえ | 同一外部 session の継続。省略時は新規 |
-| `skills` | いいえ | Codex 形式の Skill 名。Driver ごとに native 形式へ変換する |
+| `skills` | いいえ | Codex 形式の Skill 名（任意）。GitHub Copilot、Grok Build、Devin CLI は agent 固有の prompt 指示へ変換する。Cursor は現在このフィールドを変換しない。Cursor で Skill を明示 invoke する場合は worker prompt 本文へ含める |
 | `auto_approve` | いいえ | 既定 true。各 CLI の non-interactive 承認フラグを付ける。質問待ちの観測では false |
 
 戻り JSON:

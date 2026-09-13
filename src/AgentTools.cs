@@ -25,7 +25,7 @@ public sealed class AgentTools
         [Description(McpPublicContract.PromptDescription)] string prompt,
         [Description("Working directory or worktree for the agent process.")] string working_directory,
         [Description("Existing external agent session id. Omit to start a new session.")] string? session_id = null,
-        [Description("Codex-format skill names. Each driver converts them to that agent's native invocation.")] string[]? skills = null,
+        [Description(McpPublicContract.SkillsDescription)] string[]? skills = null,
         [Description("When true (default), pass the CLI native non-interactive auto-approve flag. Set false to observe question/permission blocking on this same MCP path.")] bool auto_approve = true)
     {
         var invocationId = Guid.NewGuid().ToString("N");
