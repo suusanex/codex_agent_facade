@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
 /// <summary>
-/// Codex から受け取る構造化入力。prompt 本文は再構成しない。
+/// Codex から受け取る構造化入力。caller が渡した worker prompt 本文は再構成しない。
 /// </summary>
 public sealed record AgentRunRequest(
     string Agent,
