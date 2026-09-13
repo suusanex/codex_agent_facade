@@ -1806,6 +1806,38 @@ public class FacadeDelegationSkillContractTests
         }
     }
 
+    [Fact]
+    public void CursorSkillDocumentsThatSkillsAreNotConvertedToNativeInvoke()
+    {
+        var skills = LoadFacadeDelegationSkills().ToDictionary(skill => skill.Name, StringComparer.Ordinal);
+        Assert.True(skills.ContainsKey("cursor"), "Missing Skill for agent: cursor");
+        var text = skills["cursor"].Text;
+        Assert.Contains(
+            "Cursor Driver は現在この値を明示 invoke へ変換しない",
+            text,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ユーザー本文側に Cursor native 形式の `/skill-name` を含める",
+            text,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "ユーザーが通し指定した Skill 名だけ。Codex 形式のまま渡す",
+            text,
+            StringComparison.Ordinal);
+
+        foreach (var other in KnownFacadeDelegationSkillNames.Where(name => name != "cursor"))
+        {
+            Assert.Contains(
+                "ユーザーが通し指定した Skill 名だけ。Codex 形式のまま渡す",
+                skills[other].Text,
+                StringComparison.Ordinal);
+        }
+
+        var readme = File.ReadAllText(Path.Combine(LocateRepoRoot(), "apm-packages", "cursor", "README.md"));
+        Assert.Contains("明示 invoke へ変換しない", readme, StringComparison.Ordinal);
+        Assert.Contains("/skill-name", readme, StringComparison.Ordinal);
+    }
+
     private static List<FacadeDelegationSkillFile> LoadFacadeDelegationSkills()
     {
         var skills = new List<FacadeDelegationSkillFile>();
