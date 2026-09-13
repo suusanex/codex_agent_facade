@@ -3,7 +3,8 @@ using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
 /// <summary>
-/// Codex から受け取る構造化入力。caller が渡した worker prompt 本文は再構成しない。
+/// Codex から受け取る構造化入力。caller が渡した worker task payload は再解釈しない。
+/// skills 等の structured option は、対応 Driver が agent 固有形式へ変換する場合がある。
 /// </summary>
 public sealed record AgentRunRequest(
     string Agent,

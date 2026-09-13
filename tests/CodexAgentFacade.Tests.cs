@@ -3418,7 +3418,8 @@ public class SecretRedactorTests
 /// <summary>
 /// MCP 公開契約が「丸投げ必須」へ後退していないことを検証する。
 /// 全文一致ではなく、caller の plan / split / worker prompt 構成を禁止しないこと、
-/// Facade は supplied worker prompt を変更しないこと、request_id が distinct job 単位であることを見る。
+/// Facade は worker task を意味的に書き換えないこと、skills は Driver が変換する場合があること、
+/// request_id が distinct job 単位であることを見る。
 /// </summary>
 [Collection("http-host")]
 public class McpPublicContractTests
@@ -3430,11 +3431,13 @@ public class McpPublicContractTests
         AssertWorkerDelegationContract(McpPublicContract.StartAgentDescription);
         AssertWorkerPromptContract(McpPublicContract.PromptDescription);
         AssertRequestIdContract(McpPublicContract.RequestIdDescription);
+        AssertSkillsContract(McpPublicContract.SkillsDescription);
         AssertDoesNotContainLegacyPassthroughPhrases(
             McpPublicContract.ServerInstructions
             + "\n" + McpPublicContract.StartAgentDescription
             + "\n" + McpPublicContract.PromptDescription
-            + "\n" + McpPublicContract.RequestIdDescription);
+            + "\n" + McpPublicContract.RequestIdDescription
+            + "\n" + McpPublicContract.SkillsDescription);
     }
 
     [Fact]
@@ -3448,9 +3451,14 @@ public class McpPublicContractTests
         Assert.Contains("distinct な agent job", readme, StringComparison.Ordinal);
         Assert.Contains("同じ `start_agent` の結果を取り損ねた再試行だけ", readme, StringComparison.Ordinal);
         Assert.Contains("Facade 自身は planner や orchestrator にならない", readme, StringComparison.Ordinal);
+        Assert.Contains("task payload を再解釈しない", readme, StringComparison.Ordinal);
+        Assert.Contains("Cursor は現在このフィールドを変換しない", readme, StringComparison.Ordinal);
+        Assert.Contains("GitHub Copilot、Grok Build、Devin CLI は agent 固有の prompt 指示へ変換する", readme, StringComparison.Ordinal);
         Assert.DoesNotContain("Codex / Facade は planner や orchestrator にならない", readme, StringComparison.Ordinal);
         Assert.DoesNotContain("作業ごとに呼び出し側が `request_id` を一度生成", readme, StringComparison.Ordinal);
         Assert.DoesNotContain("ユーザーの prompt を構造化 MCP 入力として受け", readme, StringComparison.Ordinal);
+        Assert.DoesNotContain("Driver ごとに native 形式へ変換する", readme, StringComparison.Ordinal);
+        Assert.DoesNotContain("再解釈・書き換えせず selected agent へ転送する", readme, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -3466,15 +3474,18 @@ public class McpPublicContractTests
         Assert.Equal(McpPublicContract.StartAgentDescription, start.Description);
         Assert.Equal(McpPublicContract.RequestIdDescription, ReadInputPropertyDescription(start, "request_id"));
         Assert.Equal(McpPublicContract.PromptDescription, ReadInputPropertyDescription(start, "prompt"));
+        Assert.Equal(McpPublicContract.SkillsDescription, ReadInputPropertyDescription(start, "skills"));
 
         AssertWorkerDelegationContract(client.ServerInstructions + "\n" + start.Description);
         AssertWorkerPromptContract(ReadInputPropertyDescription(start, "prompt"));
         AssertRequestIdContract(ReadInputPropertyDescription(start, "request_id"));
+        AssertSkillsContract(ReadInputPropertyDescription(start, "skills"));
         AssertDoesNotContainLegacyPassthroughPhrases(
             client.ServerInstructions
             + "\n" + start.Description
             + "\n" + ReadInputPropertyDescription(start, "request_id")
-            + "\n" + ReadInputPropertyDescription(start, "prompt"));
+            + "\n" + ReadInputPropertyDescription(start, "prompt")
+            + "\n" + ReadInputPropertyDescription(start, "skills"));
     }
 
     [Fact]
@@ -3505,6 +3516,39 @@ public class McpPublicContractTests
         Assert.Equal(2, session.Runner.CallCount);
     }
 
+    [Fact]
+    public async Task StartAgentTranslatesSkillsOnlyForDriversThatSupportIt()
+    {
+        await using var session = await McpHttpTestHost.StartAsync();
+        await using var client = await session.CreateClientAsync();
+        const string task = "Implement only the parser tests. Do not change production code.";
+        string[] skills = ["review"];
+
+        session.Runner.Result = CopilotStdout();
+        await StartAndWaitAsync(client, "req-skill-copilot", AgentFacade.GitHubCopilotAgent, task, skills);
+        Assert.Equal("Use the /review skill.\n" + task, session.Runner.LastRequest!.StandardInputText);
+        Assert.Contains(task, session.Runner.LastRequest.StandardInputText, StringComparison.Ordinal);
+
+        session.Runner.Result = GrokStdout();
+        await StartAndWaitAsync(client, "req-skill-grok", AgentFacade.GrokBuildAgent, task, skills);
+        var grokPrompt = ReadGrokPrompt(session.Runner.LastRequest!);
+        Assert.Equal("/review\n" + task, grokPrompt);
+        Assert.EndsWith(task, grokPrompt, StringComparison.Ordinal);
+
+        session.Runner.Result = DevinStdout();
+        await StartAndWaitAsync(client, "req-skill-devin", AgentFacade.DevinCliAgent, task, skills);
+        var devinPrompt = session.Runner.LastRequest!.Arguments[^1];
+        Assert.Equal("/review\n" + task, devinPrompt);
+        Assert.EndsWith(task, devinPrompt, StringComparison.Ordinal);
+
+        session.Runner.Result = CursorStdout();
+        await StartAndWaitAsync(client, "req-skill-cursor", AgentFacade.CursorAgent, task, skills);
+        Assert.Equal(task, session.Runner.LastRequest!.Arguments[^1]);
+        Assert.DoesNotContain("/review", session.Runner.LastRequest.Arguments, StringComparer.Ordinal);
+        Assert.DoesNotContain("Use the /review skill.", session.Runner.LastRequest.Arguments, StringComparer.Ordinal);
+        Assert.Equal(4, session.Runner.CallCount);
+    }
+
     private static void AssertWorkerDelegationContract(string text)
     {
         Assert.False(string.IsNullOrWhiteSpace(text));
@@ -3518,8 +3562,10 @@ public class McpPublicContractTests
     private static void AssertWorkerPromptContract(string text)
     {
         Assert.Contains("worker prompt constructed by the caller", text, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("forwarded unchanged", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("does not reinterpret this task payload", text, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("need not be the original user prompt", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("skills", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("forwarded unchanged", text, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("User prompt forwarded to the selected agent", text, StringComparison.Ordinal);
     }
 
@@ -3528,6 +3574,14 @@ public class McpPublicContractTests
         Assert.Contains("distinct", text, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("lost", text, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("For each user task generate one request_id", text, StringComparison.Ordinal);
+    }
+
+    private static void AssertSkillsContract(string text)
+    {
+        Assert.Contains("GitHub Copilot, Grok Build, and Devin CLI translate", text, StringComparison.Ordinal);
+        Assert.Contains("Cursor currently does not translate this field", text, StringComparison.Ordinal);
+        Assert.Contains("worker prompt", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Each driver converts them to that agent's native invocation", text, StringComparison.Ordinal);
     }
 
     private static void AssertDoesNotContainLegacyPassthroughPhrases(string text)
@@ -3539,6 +3593,9 @@ public class McpPublicContractTests
             "For each user task generate one request_id",
             "User prompt forwarded to the selected agent",
             "This facade does not plan or split the task",
+            "forwards that supplied worker prompt unchanged",
+            "forwarded unchanged to the selected external agent",
+            "Each driver converts them to that agent's native invocation",
         ];
         foreach (var phrase in forbidden)
         {
@@ -3602,21 +3659,69 @@ public class McpPublicContractTests
         return "";
     }
 
+    private static ProcessRunResult GrokStdout()
+    {
+        return new ProcessRunResult(
+            0,
+            "{\"type\":\"text\",\"data\":\"ok\"}\n{\"type\":\"end\",\"sessionId\":\"11111111-1111-1111-1111-111111111111\"}",
+            "");
+    }
+
+    private static ProcessRunResult CopilotStdout()
+    {
+        return new ProcessRunResult(
+            0,
+            """
+            {"type":"assistant.message","data":{"content":"ok"}}
+            {"type":"result","sessionId":"22222222-2222-2222-2222-222222222222","exitCode":0}
+            """,
+            "");
+    }
+
+    private static ProcessRunResult DevinStdout()
+    {
+        return new ProcessRunResult(0, """{"type":"assistant","text":"ok","sessionId":"brisk-otter"}""", "");
+    }
+
+    private static ProcessRunResult CursorStdout()
+    {
+        return new ProcessRunResult(
+            0,
+            """{"type":"result","subtype":"success","result":"ok","session_id":"33333333-3333-3333-3333-333333333333"}""",
+            "");
+    }
+
+    private static async Task<AgentJobSnapshot> StartAndWaitAsync(
+        McpClient client,
+        string requestId,
+        string agent,
+        string prompt,
+        IReadOnlyList<string>? skills = null)
+    {
+        var started = await CallStartAgentAsync(client, requestId, agent, prompt, skills);
+        return await WaitForMcpJobAsync(client, started.JobId);
+    }
+
     private static async Task<AgentJobSnapshot> CallStartAgentAsync(
         McpClient client,
         string requestId,
         string agent,
-        string prompt)
+        string prompt,
+        IReadOnlyList<string>? skills = null)
     {
-        var call = await client.CallToolAsync(
-            "start_agent",
-            new Dictionary<string, object?>
-            {
-                ["request_id"] = requestId,
-                ["agent"] = agent,
-                ["prompt"] = prompt,
-                ["working_directory"] = Path.GetTempPath(),
-            });
+        var arguments = new Dictionary<string, object?>
+        {
+            ["request_id"] = requestId,
+            ["agent"] = agent,
+            ["prompt"] = prompt,
+            ["working_directory"] = Path.GetTempPath(),
+        };
+        if (skills is not null)
+        {
+            arguments["skills"] = skills.ToArray();
+        }
+
+        var call = await client.CallToolAsync("start_agent", arguments);
         var text = string.Concat(call.Content.OfType<TextContentBlock>().Select(block => block.Text));
         Assert.True(call.IsError != true, text);
         var result = JsonSerializer.Deserialize<AgentJobSnapshot>(text, AgentJson.Options);
