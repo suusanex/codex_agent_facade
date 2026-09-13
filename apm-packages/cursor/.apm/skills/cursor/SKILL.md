@@ -31,7 +31,7 @@ MCP server はこの Skill の一部ではない。ユーザーの Codex MCP 設
    - `prompt`: この Skill より後のユーザー本文。変更しない
    - `working_directory`: 今開いている Codex workspace / worktree（編集対象リポジトリ。Facade リポジトリではない）
    - `session_id`: 同じ Cursor session を続けるときは、この thread の直前の completed `result.sessionId`
-   - `skills`: ユーザーが通し指定した Skill 名だけ。Codex 形式のまま渡す
+   - `skills`: Cursor Driver は現在この値を明示 invoke へ変換しない。Cursor で Skill を明示実行させる場合は、ユーザー本文側に Cursor native 形式の `/skill-name` を含める
 3. `start_agent` を呼ぶ。
 4. 返された同じ `jobId` に対して `get_agent_job` を poll する。
 5. terminal result を取得する。
