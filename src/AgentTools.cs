@@ -23,7 +23,7 @@ public sealed class AgentTools
         [Description(McpPublicContract.RequestIdDescription)] string request_id,
         [Description("Target agent. github-copilot, grok-build, devin-cli, or cursor.")] string agent,
         [Description(McpPublicContract.PromptDescription)] string prompt,
-        [Description("Working directory or worktree for the agent process.")] string working_directory,
+        [Description(McpPublicContract.WorkingDirectoryDescription)] string working_directory,
         [Description("Existing external agent session id. Omit to start a new session.")] string? session_id = null,
         [Description(McpPublicContract.SkillsDescription)] string[]? skills = null,
         [Description("When true (default), pass the CLI native non-interactive auto-approve flag. Set false to observe question/permission blocking on this same MCP path.")] bool auto_approve = true)

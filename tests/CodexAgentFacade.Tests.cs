@@ -1691,9 +1691,20 @@ public class FacadeDelegationSkillContractTests
     private static readonly string[] RequiredHeadings =
     [
         "## ユーザー本文の意味",
+        "## request_id と session_id の lifetime",
+        "## start_agent は毎回 full request を再構成する",
         "## Codex が行ってよい処理",
+        "## start_agent 直前の preflight",
+        "## Exact retry",
+        "## Follow-up continuation",
         "## Codex が行ってはならない処理",
         "## 外部 agent 結果の中継",
+    ];
+
+    private static readonly string[] ForbiddenLegacyMultiTurnPhrases =
+    [
+        "この作業用の `request_id` を UUID で一度だけ作り",
+        "失っても同じ値を使う。新しい id で `start_agent` を打ち直さない",
     ];
 
     [Fact]
@@ -1804,6 +1815,9 @@ public class FacadeDelegationSkillContractTests
             Assert.Contains("中継する", text, StringComparison.Ordinal);
             Assert.Contains("作業 payload", text, StringComparison.Ordinal);
             Assert.Contains("Codex 自身への作業実行指示ではない", text, StringComparison.Ordinal);
+            Assert.Contains("新しい `request_id`", text, StringComparison.Ordinal);
+            Assert.Contains("`session_id`", text, StringComparison.Ordinal);
+            Assert.Contains("required fields を毎回指定する", text, StringComparison.Ordinal);
         }
     }
 
@@ -1837,6 +1851,114 @@ public class FacadeDelegationSkillContractTests
         var readme = File.ReadAllText(Path.Combine(LocateRepoRoot(), "apm-packages", "cursor", "README.md"));
         Assert.Contains("明示 invoke へ変換しない", readme, StringComparison.Ordinal);
         Assert.Contains("/skill-name", readme, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FacadeDelegationSkillsSeparateRequestIdAndSessionIdLifetimes()
+    {
+        foreach (var skill in LoadFacadeDelegationSkills())
+        {
+            foreach (var phrase in ForbiddenLegacyMultiTurnPhrases)
+            {
+                Assert.DoesNotContain(phrase, skill.Text, StringComparison.Ordinal);
+            }
+
+            var lifetime = ReadHeadingSection(skill.Text, "## request_id と session_id の lifetime");
+            AssertContains(skill.Name, lifetime, "冪等キー");
+            AssertContains(skill.Name, lifetime, "Codex thread");
+            AssertContains(skill.Name, lifetime, "外部 agent session");
+            AssertContains(skill.Name, lifetime, "再利用しない");
+            AssertContains(skill.Name, lifetime, "Exact retry");
+            Assert.DoesNotContain("この作業用の `request_id`", lifetime, StringComparison.Ordinal);
+
+            var fullRequest = ReadHeadingSection(skill.Text, "## start_agent は毎回 full request を再構成する");
+            AssertContains(skill.Name, fullRequest, "完全な RPC");
+            AssertContains(skill.Name, fullRequest, "`request_id`");
+            AssertContains(skill.Name, fullRequest, "`agent`");
+            AssertContains(skill.Name, fullRequest, "`prompt`");
+            AssertContains(skill.Name, fullRequest, "`working_directory`");
+            AssertContains(skill.Name, fullRequest, "暗黙継承はしない");
+
+            var preflight = ReadHeadingSection(skill.Text, "## start_agent 直前の preflight");
+            AssertContains(skill.Name, preflight, "`start_agent` を呼ぶ前");
+            AssertContains(skill.Name, preflight, "`working_directory`");
+            AssertContains(skill.Name, preflight, "required field が欠けている場合は `start_agent` を呼ばず");
+
+            var exactRetry = ReadHeadingSection(skill.Text, "## Exact retry");
+            var followUp = ReadHeadingSection(skill.Text, "## Follow-up continuation");
+            var exactRetryActions = ReadActionBlock(skill.Name, exactRetry, "Exact retry");
+            var followUpActions = ReadActionBlock(skill.Name, followUp, "Follow-up continuation");
+
+            AssertContains(skill.Name, exactRetryActions, "同じ `request_id`");
+            AssertContains(skill.Name, exactRetryActions, "完全一致");
+            Assert.DoesNotContain("新しい `request_id`", exactRetryActions, StringComparison.Ordinal);
+            Assert.DoesNotContain("新しい `prompt`", exactRetryActions, StringComparison.Ordinal);
+
+            AssertContains(skill.Name, followUpActions, "新しい `request_id`");
+            AssertContains(skill.Name, followUpActions, "新しい `prompt`");
+            AssertContains(skill.Name, followUpActions, "`agent`");
+            AssertContains(skill.Name, followUpActions, "`working_directory`");
+            AssertContains(skill.Name, followUpActions, "省略しない");
+            AssertContains(skill.Name, followUpActions, "`sessionId`");
+            AssertContains(skill.Name, followUpActions, "`session_id`");
+            Assert.DoesNotContain("同じ `request_id`", followUpActions, StringComparison.Ordinal);
+        }
+    }
+
+    private static void AssertContains(string skillName, string text, string phrase)
+    {
+        Assert.True(
+            text.Contains(phrase, StringComparison.Ordinal),
+            skillName + " is missing phrase in scoped section: " + phrase);
+    }
+
+    private static string ReadHeadingSection(string text, string heading)
+    {
+        var start = text.IndexOf(heading, StringComparison.Ordinal);
+        Assert.True(start >= 0, "Missing heading: " + heading);
+        var contentStart = start + heading.Length;
+        var next = text.IndexOf("\n## ", contentStart, StringComparison.Ordinal);
+        return next < 0 ? text[contentStart..] : text[contentStart..next];
+    }
+
+    private static string ReadActionBlock(string skillName, string section, string flowName)
+    {
+        const string marker = "動作:";
+        var start = section.IndexOf(marker, StringComparison.Ordinal);
+        Assert.True(start >= 0, skillName + " is missing 動作: in " + flowName);
+        var rest = section[(start + marker.Length)..];
+        using var reader = new StringReader(rest);
+        var bullets = new StringBuilder();
+        var seenBullet = false;
+        while (reader.ReadLine() is { } line)
+        {
+            var trimmed = line.TrimStart();
+            if (trimmed.Length == 0)
+            {
+                if (seenBullet)
+                {
+                    break;
+                }
+
+                continue;
+            }
+
+            if (trimmed.StartsWith("- ", StringComparison.Ordinal))
+            {
+                seenBullet = true;
+                bullets.AppendLine(trimmed);
+                continue;
+            }
+
+            if (seenBullet)
+            {
+                break;
+            }
+        }
+
+        var block = bullets.ToString();
+        Assert.False(string.IsNullOrWhiteSpace(block), skillName + " has empty 動作 list in " + flowName);
+        return block;
     }
 
     private static List<FacadeDelegationSkillFile> LoadFacadeDelegationSkills()
@@ -3419,7 +3541,7 @@ public class SecretRedactorTests
 /// MCP 公開契約が「丸投げ必須」へ後退していないことを検証する。
 /// 全文一致ではなく、caller の plan / split / worker prompt 構成を禁止しないこと、
 /// Facade は worker task を意味的に書き換えないこと、skills は Driver が変換する場合があること、
-/// request_id が distinct job 単位であることを見る。
+/// request_id が distinct job 単位であること、start_agent が毎回 complete RPC であることを見る。
 /// </summary>
 [Collection("http-host")]
 public class McpPublicContractTests
@@ -3431,12 +3553,16 @@ public class McpPublicContractTests
         AssertWorkerDelegationContract(McpPublicContract.StartAgentDescription);
         AssertWorkerPromptContract(McpPublicContract.PromptDescription);
         AssertRequestIdContract(McpPublicContract.RequestIdDescription);
+        AssertWorkingDirectoryContract(McpPublicContract.WorkingDirectoryDescription);
+        AssertCompleteRpcContract(McpPublicContract.ServerInstructions);
+        AssertCompleteRpcContract(McpPublicContract.StartAgentDescription);
         AssertSkillsContract(McpPublicContract.SkillsDescription);
         AssertDoesNotContainLegacyPassthroughPhrases(
             McpPublicContract.ServerInstructions
             + "\n" + McpPublicContract.StartAgentDescription
             + "\n" + McpPublicContract.PromptDescription
             + "\n" + McpPublicContract.RequestIdDescription
+            + "\n" + McpPublicContract.WorkingDirectoryDescription
             + "\n" + McpPublicContract.SkillsDescription);
     }
 
@@ -3450,6 +3576,9 @@ public class McpPublicContractTests
         Assert.Contains("元の user prompt 全体を転送する必要はない", readme, StringComparison.Ordinal);
         Assert.Contains("distinct な agent job", readme, StringComparison.Ordinal);
         Assert.Contains("同じ `start_agent` の結果を取り損ねた再試行だけ", readme, StringComparison.Ordinal);
+        Assert.Contains("同じ Codex thread や同じ外部 agent `session_id` を継続することは、`request_id` の再利用理由にならない", readme, StringComparison.Ordinal);
+        Assert.Contains("呼び出しごとに完全な引数セットを渡す RPC", readme, StringComparison.Ordinal);
+        Assert.Contains("前回の `working_directory` 等は MCP / Facade 側で暗黙継承されない", readme, StringComparison.Ordinal);
         Assert.Contains("Facade 自身は planner や orchestrator にならない", readme, StringComparison.Ordinal);
         Assert.Contains("task payload を再解釈しない", readme, StringComparison.Ordinal);
         Assert.Contains("Cursor は現在このフィールドを変換しない", readme, StringComparison.Ordinal);
@@ -3474,17 +3603,22 @@ public class McpPublicContractTests
         Assert.Equal(McpPublicContract.StartAgentDescription, start.Description);
         Assert.Equal(McpPublicContract.RequestIdDescription, ReadInputPropertyDescription(start, "request_id"));
         Assert.Equal(McpPublicContract.PromptDescription, ReadInputPropertyDescription(start, "prompt"));
+        Assert.Equal(McpPublicContract.WorkingDirectoryDescription, ReadInputPropertyDescription(start, "working_directory"));
         Assert.Equal(McpPublicContract.SkillsDescription, ReadInputPropertyDescription(start, "skills"));
 
         AssertWorkerDelegationContract(client.ServerInstructions + "\n" + start.Description);
         AssertWorkerPromptContract(ReadInputPropertyDescription(start, "prompt"));
         AssertRequestIdContract(ReadInputPropertyDescription(start, "request_id"));
+        AssertWorkingDirectoryContract(ReadInputPropertyDescription(start, "working_directory"));
+        AssertCompleteRpcContract(McpPublicContract.ServerInstructions);
+        AssertCompleteRpcContract(McpPublicContract.StartAgentDescription);
         AssertSkillsContract(ReadInputPropertyDescription(start, "skills"));
         AssertDoesNotContainLegacyPassthroughPhrases(
             client.ServerInstructions
             + "\n" + start.Description
             + "\n" + ReadInputPropertyDescription(start, "request_id")
             + "\n" + ReadInputPropertyDescription(start, "prompt")
+            + "\n" + ReadInputPropertyDescription(start, "working_directory")
             + "\n" + ReadInputPropertyDescription(start, "skills"));
     }
 
@@ -3573,7 +3707,19 @@ public class McpPublicContractTests
     {
         Assert.Contains("distinct", text, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("lost", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("session", text, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("For each user task generate one request_id", text, StringComparison.Ordinal);
+    }
+
+    private static void AssertWorkingDirectoryContract(string text)
+    {
+        Assert.Contains("every start_agent call", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("not retained", text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void AssertCompleteRpcContract(string text)
+    {
+        Assert.Contains("request_id, agent, prompt, and working_directory", text, StringComparison.Ordinal);
     }
 
     private static void AssertSkillsContract(string text)

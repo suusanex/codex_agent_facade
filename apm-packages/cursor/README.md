@@ -24,7 +24,7 @@ apm install "C:\path\to\codex_agent_facade\apm-packages\cursor" --target codex,a
 
 ## Use
 
-Codex 上で対象リポジトリを開いた状態で、Skill を指定して作業本文を書く。Skill より後の本文は Cursor CLI へ渡す作業 payload であり、Codex 自身への作業実行指示ではない。`working_directory` は今開いているリポジトリのパスにする。Cursor Driver は現在 `skills` を明示 invoke へ変換しないため、Cursor で Skill を明示実行させる場合はユーザー本文側に Cursor native 形式の `/skill-name` を含める。
+Codex 上で対象リポジトリを開いた状態で、Skill を指定して作業本文を書く。Skill より後の本文は Cursor CLI へ渡す作業 payload であり、Codex 自身への作業実行指示ではない。`working_directory` は今開いているリポジトリのパスにする。同じ Codex thread で続けて委譲するときは、新しい `request_id` を生成し、前回 completed result の `sessionId` を `session_id` に渡し、`working_directory` を含む required fields を毎回指定する。Cursor Driver は現在 `skills` を明示 invoke へ変換しないため、Cursor で Skill を明示実行させる場合はユーザー本文側に Cursor native 形式の `/skill-name` を含める。
 
 ```text
 $cursor このリポジトリの README に使い方を追記して。

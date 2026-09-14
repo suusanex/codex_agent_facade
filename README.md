@@ -128,16 +128,18 @@ dotnet run --file tools/publish-facade.cs
 
 公開 tool は `start_agent` / `get_agent_job` / `cancel_agent_job`。blocking な `run_agent` は無い。
 
-distinct な agent job / distinct な `start_agent` ごとに、呼び出し側が新しい `request_id` を生成して保持する。同じ `start_agent` の結果を取り損ねた再試行だけ、**同じ `request_id`** を再利用する。別の worker 作業には新しい id を使う。新しい id で打ち直すと別 job になる。
+distinct な agent job / distinct な `start_agent` ごとに、呼び出し側が新しい `request_id` を生成して保持する。同じ `start_agent` の結果を取り損ねた再試行だけ、**同じ `request_id`** を再利用する。別の worker 作業には新しい id を使う。新しい id で打ち直すと別 job になる。同じ Codex thread や同じ外部 agent `session_id` を継続することは、`request_id` の再利用理由にならない。新しいユーザー turn / 新しい payload では新しい `request_id` を生成し、会話継続は completed `result.sessionId` を `session_id` に渡す。
+
+`start_agent` は呼び出しごとに完全な引数セットを渡す RPC である。前回の `working_directory` 等は MCP / Facade 側で暗黙継承されない。continuation でも `request_id`, `agent`, `prompt`, `working_directory` を毎回指定する。
 
 ### `start_agent`
 
 | フィールド | 必須 | 内容 |
 | --- | --- | --- |
-| `request_id` | はい | この distinct な agent job 用の冪等キー。呼び出し側が job ごとに新しく生成する。同じ値の再呼び出しは既存 job を返す |
+| `request_id` | はい | この distinct な agent job 用の冪等キー。呼び出し側が job ごとに新しく生成する。同じ Codex thread / 同じ外部 session でも新しい payload なら新しい値。同じ値の再呼び出しは、引数が完全一致する lost-result retry のときだけ既存 job を返す |
 | `agent` | はい | `github-copilot`、`grok-build`、`devin-cli`、または `cursor` |
 | `prompt` | はい | 呼び出し側が構成した自己完結の worker prompt。元の user prompt 全体である必要はない。Facade はこの task payload を再解釈しない。完全一致の転送は保証せず、`skills` 指定時は対応 Driver が agent 固有の skill 指示を付加する場合がある |
-| `working_directory` | はい | 対象 workspace / worktree |
+| `working_directory` | はい | 対象 workspace / worktree。continuation でも毎回指定する。前回値は暗黙継承されない |
 | `session_id` | いいえ | 同一外部 session の継続。省略時は新規 |
 | `skills` | いいえ | Codex 形式の Skill 名（任意）。GitHub Copilot、Grok Build、Devin CLI は agent 固有の prompt 指示へ変換する。Cursor は現在このフィールドを変換しない。Cursor で Skill を明示 invoke する場合は worker prompt 本文へ含める |
 | `auto_approve` | いいえ | 既定 true。各 CLI の non-interactive 承認フラグを付ける。質問待ちの観測では false |
