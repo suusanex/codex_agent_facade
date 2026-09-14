@@ -983,9 +983,9 @@ internal sealed record JobResult(
     string SessionId,
     int ExitCode,
     string OutputText,
-    string RawOutput,
     string RunId,
     string EventsLogPath,
-    string TextLogPath);
+    string TextLogPath,
+    string? RawOutput = null);
 
 internal sealed record WorkspaceSnapshot(IReadOnlyDictionary<string, string> Files);

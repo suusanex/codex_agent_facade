@@ -43,7 +43,7 @@ public sealed class AgentTools
                     Skills: skills,
                     AutoApprove: auto_approve));
             LogCompleted("start_agent", invocationId, startedAt, snapshot, includeRequestId: true, agent: agent);
-            return JsonSerializer.Serialize(snapshot, AgentJson.Options);
+            return SerializePublic(snapshot);
         }
         catch (Exception ex)
         {
@@ -53,7 +53,7 @@ public sealed class AgentTools
         }
     }
 
-    [McpServerTool(Name = "get_agent_job"), Description("Get the status or terminal result of a previously started agent job. Does not start or restart work.")]
+    [McpServerTool(Name = "get_agent_job"), Description(McpPublicContract.GetAgentJobDescription)]
     public string GetAgentJob(
         [Description("Job id returned by start_agent.")] string job_id)
     {
@@ -64,13 +64,42 @@ public sealed class AgentTools
         {
             var snapshot = _jobs.Get(job_id);
             LogCompleted("get_agent_job", invocationId, startedAt, snapshot, includeRequestId: false, agent: null);
-            return JsonSerializer.Serialize(snapshot, AgentJson.Options);
+            return SerializePublic(snapshot);
         }
         catch (Exception ex)
         {
             LogFailed("get_agent_job", invocationId, startedAt, ex, null, job_id);
             CliJson.TraceException(ex);
             throw Wrap("get_agent_job failed. See the server log for details.", ex);
+        }
+    }
+
+    [McpServerTool(Name = "wait_agent_job"), Description(McpPublicContract.WaitAgentJobDescription)]
+    public async Task<string> WaitAgentJob(
+        [Description("Job id returned by start_agent.")] string job_id,
+        [Description(McpPublicContract.WaitTimeoutSecondsDescription)] int timeout_seconds,
+        CancellationToken cancellationToken)
+    {
+        var invocationId = Guid.NewGuid().ToString("N");
+        var startedAt = Stopwatch.GetTimestamp();
+        LogStarted("wait_agent_job", invocationId, null, job_id, null);
+        try
+        {
+            var snapshot = await _jobs.WaitAsync(job_id, timeout_seconds, cancellationToken).ConfigureAwait(false);
+            LogCompleted("wait_agent_job", invocationId, startedAt, snapshot, includeRequestId: false, agent: null);
+            return SerializePublic(snapshot);
+        }
+        catch (OperationCanceledException ex)
+        {
+            LogFailed("wait_agent_job", invocationId, startedAt, ex, null, job_id);
+            CliJson.TraceException(ex);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            LogFailed("wait_agent_job", invocationId, startedAt, ex, null, job_id);
+            CliJson.TraceException(ex);
+            throw Wrap("wait_agent_job failed. See the server log for details.", ex);
         }
     }
 
@@ -85,7 +114,7 @@ public sealed class AgentTools
         {
             var snapshot = _jobs.Cancel(job_id);
             LogCompleted("cancel_agent_job", invocationId, startedAt, snapshot, includeRequestId: false, agent: null);
-            return JsonSerializer.Serialize(snapshot, AgentJson.Options);
+            return SerializePublic(snapshot);
         }
         catch (Exception ex)
         {
@@ -93,6 +122,11 @@ public sealed class AgentTools
             CliJson.TraceException(ex);
             throw Wrap("cancel_agent_job failed. See the server log for details.", ex);
         }
+    }
+
+    private static string SerializePublic(AgentJobSnapshot snapshot)
+    {
+        return JsonSerializer.Serialize(AgentJobPublicProjection.From(snapshot), AgentJson.Options);
     }
 
     private static void LogStarted(string tool, string invocationId, string? requestId, string? jobId, string? agent)

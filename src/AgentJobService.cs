@@ -11,6 +11,8 @@ using Microsoft.Extensions.Logging;
 public sealed class AgentJobService
 {
     public const int DefaultPollAfterMs = 2000;
+    public const int MinWaitTimeoutSeconds = 1;
+    public const int MaxWaitTimeoutSeconds = 86400;
     public const string InterruptedError = "agent job was interrupted because the facade process exited.";
 
     private readonly AgentFacade _facade;
@@ -149,6 +151,45 @@ public sealed class AgentJobService
         }
 
         return ToSnapshot(RecoverStored(record));
+    }
+
+    /// <summary>
+    /// 既存 job が terminal になるまで待つ。新しい worker は開始・再実行しない。
+    /// timeout では running snapshot を返し、waiter の cancel は job を止めない。
+    /// </summary>
+    public async Task<AgentJobSnapshot> WaitAsync(string jobId, int timeoutSeconds, CancellationToken cancellationToken)
+    {
+        if (timeoutSeconds < MinWaitTimeoutSeconds || timeoutSeconds > MaxWaitTimeoutSeconds)
+        {
+            throw new ArgumentException(
+                "timeout_seconds must be between "
+                + MinWaitTimeoutSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + " and "
+                + MaxWaitTimeoutSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + ".");
+        }
+
+        if (string.IsNullOrWhiteSpace(jobId))
+        {
+            throw new ArgumentException("job_id is required.");
+        }
+
+        var id = jobId.Trim();
+        if (_byJobId.TryGetValue(id, out var live) && !live.IsTerminal)
+        {
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
+            try
+            {
+                await live.WhenTerminal.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                return Get(id);
+            }
+        }
+
+        return Get(id);
     }
 
     private async Task RunWorkerAsync(AgentJob job, string fingerprint)
@@ -322,7 +363,7 @@ public sealed class AgentJobService
 
     private static void WriteAtomic(string path, string contents)
     {
-        var temp = path + ".tmp";
+        var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         File.WriteAllText(temp, contents);
         File.Move(temp, path, overwrite: true);
     }

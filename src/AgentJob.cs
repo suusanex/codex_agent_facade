@@ -10,7 +10,8 @@ public static class AgentJobStatus
 }
 
 /// <summary>
-/// start/get/cancel が返す job snapshot。実行中は result を持たない。
+/// start/get/cancel/wait が内部で扱う job snapshot。実行中は result を持たない。
+/// MCP 公開 JSON は <see cref="AgentJobPublicSnapshot"/> を使う。
 /// </summary>
 public sealed record AgentJobSnapshot(
     string JobId,
@@ -21,12 +22,64 @@ public sealed record AgentJobSnapshot(
     string? Error);
 
 /// <summary>
+/// MCP 公開用の job snapshot。内部の CLI raw output は含めない。
+/// </summary>
+public sealed record AgentJobPublicSnapshot(
+    string JobId,
+    string RequestId,
+    string Status,
+    int PollAfterMs,
+    AgentRunPublicResult? Result,
+    string? Error);
+
+/// <summary>
+/// MCP 公開用の terminal result。Driver が抽出した outputText と run log 識別情報だけを返す。
+/// </summary>
+public sealed record AgentRunPublicResult(
+    string Agent,
+    string SessionId,
+    int ExitCode,
+    string OutputText,
+    string RunId,
+    string EventsLogPath,
+    string TextLogPath);
+
+internal static class AgentJobPublicProjection
+{
+    public static AgentJobPublicSnapshot From(AgentJobSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        return new AgentJobPublicSnapshot(
+            snapshot.JobId,
+            snapshot.RequestId,
+            snapshot.Status,
+            snapshot.PollAfterMs,
+            snapshot.Result is null ? null : From(snapshot.Result),
+            snapshot.Error);
+    }
+
+    public static AgentRunPublicResult From(AgentRunResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        return new AgentRunPublicResult(
+            result.Agent,
+            result.SessionId,
+            result.ExitCode,
+            result.OutputText,
+            result.RunId,
+            result.EventsLogPath,
+            result.TextLogPath);
+    }
+}
+
+/// <summary>
 /// 1 件の agent job。MCP request の lifetime とは独立した CTS を持つ。
 /// </summary>
 public sealed class AgentJob
 {
     private readonly object _gate = new();
     private readonly CancellationTokenSource _cancellation = new();
+    private readonly TaskCompletionSource _terminal = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private string _status = AgentJobStatus.Running;
     private AgentRunResult? _result;
     private string? _error;
@@ -51,6 +104,11 @@ public sealed class AgentJob
     public DateTimeOffset CreatedAt { get; }
 
     public CancellationToken CancellationToken => _cancellation.Token;
+
+    /// <summary>
+    /// terminal 遷移で完了する。waiter の CT とは独立しており、job 自体は cancel しない。
+    /// </summary>
+    public Task WhenTerminal => _terminal.Task;
 
     public bool IsTerminal
     {
@@ -132,8 +190,10 @@ public sealed class AgentJob
             _status = status;
             _result = result;
             _error = error;
-            return true;
         }
+
+        _terminal.TrySetResult();
+        return true;
     }
 
     private static bool IsTerminalStatus(string status)
