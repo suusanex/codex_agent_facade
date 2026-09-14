@@ -53,16 +53,15 @@ server / host 自身の診断ログは run log とは別ファイルへ書く。
 
 起動・listen・停止・bind 失敗・token 不備・MCP / ASP.NET Core の警告・エラー・Facade 内部の重要な例外を残す。コンソールや `System.Diagnostics.Trace` には依存しない。
 
-MCP tool の呼び出しも `server.log` に記録する。`start_agent` / `get_agent_job` / `cancel_agent_job` について、入口・正常終了・失敗の各イベントに tool 名、`invocationId`、`requestId` または `jobId`、status、`pollAfterMs`、`durationMs` などを記録する。job の terminal transition は `JOB` イベントとして同じ `jobId` を記録するため、次のように MCP call と完了時刻を時系列で追跡できる。
+MCP tool の呼び出しも `server.log` に記録する。`start_agent` / `wait_agent_job` / `get_agent_job` / `cancel_agent_job` について、入口・正常終了・失敗の各イベントに tool 名、`invocationId`、`requestId` または `jobId`、status、`pollAfterMs`、`durationMs` などを記録する。job の terminal transition は `JOB` イベントとして同じ `jobId` を記録するため、次のように MCP call と完了時刻を時系列で追跡できる。
 
 ```text
 MCP tool=start_agent phase=completed ... jobId=... agent=grok-build status=running terminal=false pollAfterMs=2000 durationMs=...
-MCP tool=get_agent_job phase=completed ... jobId=... status=running terminal=false pollAfterMs=2000 durationMs=...
-MCP tool=get_agent_job phase=completed ... jobId=... status=completed terminal=true pollAfterMs=2000 durationMs=...
+MCP tool=wait_agent_job phase=completed ... jobId=... status=completed terminal=true pollAfterMs=2000 durationMs=...
 JOB phase=completed jobId=... status=completed exitCode=0
 ```
 
-prompt、agent の回答本文、result本文、credential、token、その他の大きなtool payloadは `server.log` に記録しない。長時間jobの調査では、同じ `jobId` の `get_agent_job` の回数・時刻・最後のstatusと、`JOB` terminalイベントの時刻を比較する。
+prompt、agent の回答本文、result本文、credential、token、その他の大きなtool payloadは `server.log` に記録しない。長時間jobの調査では、同じ `jobId` の `wait_agent_job` / `get_agent_job` の回数・時刻・最後のstatusと、`JOB` terminalイベントの時刻を比較する。
 
 ## Windows 常駐（Task Scheduler）
 
@@ -95,7 +94,7 @@ exe は GUI subsystem（WinExe）なので、ログオン時にコンソール�
 
 `/mcp` ではこの server を有効化できない。設定ファイルに最初から `enabled = true` を書く。
 
-`start_agent` / `get_agent_job` / `cancel_agent_job` は短時間の MCP RPC である。長時間の agent 実行は job として Facade process 内で継続する。`direct_only_tool_namespaces` を指定しないと、Codex 側が進捗確認とタイムアウトを行い、期待どおり完了しない。いずれもホスト側設定であり、Facade の迂回実装ではない。
+`start_agent` / `get_agent_job` / `cancel_agent_job` は短時間の MCP RPC である。`wait_agent_job` は最大 `timeout_seconds` までブロックするが、worker の寿命とは独立である。wait の cancel・切断・timeout だけでは worker を止めない。長時間の agent 実行は job として Facade process 内で継続する。`direct_only_tool_namespaces` を指定しないと、Codex 側が進捗確認とタイムアウトを行い、期待どおり完了しない。`tool_timeout_sec` は wait の実用値（300 秒）より先に host 側 timeout が発火しない値にする。いずれもホスト側設定であり、Facade の迂回実装ではない。
 
 Facade を再起動したあと、Codex が自動 reconnect するとは限らない。その場合は既存 thread を捨てず、Codex 側の MCP refresh / reconnect を行う。
 
@@ -107,7 +106,7 @@ direct_only_tool_namespaces = ["mcp__codex_agent_facade"]
 url = "http://127.0.0.1:18765/mcp"
 bearer_token_env_var = "CODEX_AGENT_FACADE_TOKEN"
 startup_timeout_sec = 30
-tool_timeout_sec = 60
+tool_timeout_sec = 1800
 default_tools_approval_mode = "auto"
 enabled = true
 ```
@@ -126,7 +125,7 @@ dotnet run --file tools/publish-facade.cs
 
 ## MCP tool
 
-公開 tool は `start_agent` / `get_agent_job` / `cancel_agent_job`。blocking な `run_agent` は無い。
+公開 tool は `start_agent` / `wait_agent_job` / `get_agent_job` / `cancel_agent_job`。blocking な `run_agent` は無い。通常経路は `start_agent` のあと `wait_agent_job` で terminal まで待つ。`get_agent_job` は明示的な状態照会・復旧・診断用であり、長時間 worker の短周期 poll には使わない。
 
 distinct な agent job / distinct な `start_agent` ごとに、呼び出し側が新しい `request_id` を生成して保持する。同じ `start_agent` の結果を取り損ねた再試行だけ、**同じ `request_id`** を再利用する。別の worker 作業には新しい id を使う。新しい id で打ち直すと別 job になる。同じ Codex thread や同じ外部 agent `session_id` を継続することは、`request_id` の再利用理由にならない。新しいユーザー turn / 新しい payload では新しい `request_id` を生成し、会話継続は completed `result.sessionId` を `session_id` に渡す。
 
@@ -159,18 +158,28 @@ distinct な agent job / distinct な `start_agent` ごとに、呼び出し側�
 | --- | --- | --- |
 | `job_id` | はい | `start_agent` が返した `jobId` |
 
-何度呼んでも agent を再実行しない。不明な `jobId` は tool error。`completed` のとき `result` に次を含む。
+何度呼んでも agent を再実行しない。不明な `jobId` は tool error。`completed` のとき `result` に次を含む。CLI の raw stream 全体（`rawOutput`）は既定では返さない。詳細確認は既存の run log を使う。
 
 - `agent`
 - `sessionId`（CLI が明示した session フィールド、または Copilot の `--resume=` hint。任意 UUID は使わない。読めなければ空）
 - `exitCode`
 - `outputText`
-- `rawOutput`
 - `runId`（`jobId` と同じ）
 - `eventsLogPath`
 - `textLogPath`
 
+この compact な `result` は `start_agent` の idempotent retry、`wait_agent_job`、`cancel_agent_job` でも同じである。
+
 `failed` / `cancelled` では `error` を返す。失敗時はフォールバックせず MCP tool error になる。
+
+### `wait_agent_job`
+
+| フィールド | 必須 | 内容 |
+| --- | --- | --- |
+| `job_id` | はい | `start_agent` が返した `jobId` |
+| `timeout_seconds` | はい | terminal まで待つ上限秒。範囲は 1〜86400。実用値は `300` |
+
+新しい worker を開始・再実行しない。既に terminal なら即時に返す。running なら terminal 化または指定 timeout まで待つ。timeout 時は `status=running` の snapshot を返し、worker は継続する。wait 呼び出しのキャンセル・切断・timeout だけでは worker を cancel しない。worker 停止は `cancel_agent_job` の責務である。
 
 ### `cancel_agent_job`
 
@@ -192,7 +201,7 @@ Codex が `start_agent` の応答だけを取り損ねた場合（Facade は生�
 
 ## Run log
 
-Codex UI へのストリーミング表示とは独立して、各 agent job の逐次出力を Facade 専用ディレクトリへ保存する。対象リポジトリの working tree は使わない。run log は観測用であり、`get_agent_job` の代わりにはならない。
+Codex UI へのストリーミング表示とは独立して、各 agent job の逐次出力を Facade 専用ディレクトリへ保存する。対象リポジトリの working tree は使わない。run log は観測用であり、`wait_agent_job` / `get_agent_job` の代わりにはならない。raw な逐次出力はここから確認する。
 
 既定の保存先:
 
@@ -237,7 +246,7 @@ apm install "C:\path\to\codex_agent_facade\apm-packages\devin-cli" --target code
 apm install "C:\path\to\codex_agent_facade\apm-packages\cursor" --target codex,agent-skills
 ```
 
-展開先は `.agents/skills/github-copilot/`、`.agents/skills/grok-build/`、`.agents/skills/devin-cli/`、`.agents/skills/cursor/`。Codex 上では `$github-copilot` / `$grok-build` / `$devin-cli` / `$cursor` で本文を外部 agent へ渡す。これらの Skill を指定した turn では、その Skill の契約どおり Codex 自身は対象作業を実行せず、Skill より後のユーザー本文を worker prompt として外部 agent へ委譲し、結果を中継する。Skill 無しで `start_agent` / `get_agent_job` を直接呼ぶ場合、呼び出し側は元の user prompt 全体を転送する必要はなく、限定した worker 専用 prompt を構成して渡してよい。
+展開先は `.agents/skills/github-copilot/`、`.agents/skills/grok-build/`、`.agents/skills/devin-cli/`、`.agents/skills/cursor/`。Codex 上では `$github-copilot` / `$grok-build` / `$devin-cli` / `$cursor` で本文を外部 agent へ渡す。これらの Skill を指定した turn では、その Skill の契約どおり Codex 自身は対象作業を実行せず、Skill より後のユーザー本文を worker prompt として外部 agent へ委譲し、結果を中継する。Skill 無しで `start_agent` / `wait_agent_job` を直接呼ぶ場合、呼び出し側は元の user prompt 全体を転送する必要はなく、限定した worker 専用 prompt を構成して渡してよい。`get_agent_job` は明示照会・復旧・診断用である。
 
 更新・削除:
 

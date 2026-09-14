@@ -30,7 +30,7 @@ Codex 上で対象リポジトリを開いた状態で、Skill を指定して�
 $github-copilot このリポジトリの README に使い方を追記して。
 ```
 
-Skill 無しで MCP tool `start_agent` / `get_agent_job` を直接呼んでもよい。
+Skill 無しで MCP tool `start_agent` / `wait_agent_job` を直接呼んでもよい。`get_agent_job` は明示照会・復旧・診断用である。
 
 ## Update and remove
 

@@ -12,7 +12,7 @@ user-invocable: true
 
 この Skill が指定された turn で、Codex は planner / executor / reviewer / orchestrator ではない。Codex は Cursor CLI に対する薄い UI shell / relay である。対象作業は Cursor CLI が行い、Codex はその結果を中継する。
 
-MCP tool `start_agent` と `get_agent_job` を server `codex_agent_facade` で呼ぶ。
+MCP tool `start_agent` と `wait_agent_job` を server `codex_agent_facade` で呼ぶ。`get_agent_job` は明示的な状態照会や復旧・診断に残すが、長時間完了待ちの短周期 poll には使わない。
 
 MCP server はこの Skill の一部ではない。ユーザーの Codex MCP 設定（publish した Facade 実行ファイルを `~/.codex/config.toml` に書く）が必要である。この Skill は server の導入・ダウンロード・起動を行わない。
 
@@ -56,8 +56,8 @@ MCP server はこの Skill の一部ではない。ユーザーの Codex MCP 設
    - `auto_approve`: その turn で必要な場合だけ明示する
 3. `start_agent` 直前の preflight を行う。required field が欠けている場合は呼ばない。
 4. `start_agent` を呼ぶ。
-5. 返された同じ `jobId` に対して `get_agent_job` を poll する。
-6. terminal result を取得する。
+5. 返された同じ `jobId` に対して `wait_agent_job` を呼ぶ。`timeout_seconds` は実用上 300 を使う。
+6. terminal result を取得する。timeout で `running` が返った場合だけ、同じ `jobId` で再度 `wait_agent_job` する。`get_agent_job` の短周期 poll はしない。
 7. `completed` なら `result.outputText` をユーザーへ中継する。これがユーザーへの主たる応答である。
 8. 次の turn で同一 Cursor session を継続できるよう `result.sessionId` を保持する。この値は次の Follow-up continuation の `session_id` であり、次の `request_id` ではない。
 9. Facade / tool 呼び出しそのものが失敗した場合、その失敗をユーザーへ報告する。
