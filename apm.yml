@@ -11,9 +11,7 @@ targets:
   - copilot
 dependencies:
   apm:
-    - suusanex/coding_agent_plan_and_verify_process/apm-packages/persistent-purpose-review
     - suusanex/coding_agent_plan_and_verify_process/apm-packages/adaptive-implementation-execution
-    - suusanex/agent_skills_dotnet_utility/.agents/skills/dotnet-file-based-apps
   mcp: []
 includes: auto
 scripts: {}

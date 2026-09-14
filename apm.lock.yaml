@@ -2,34 +2,6 @@ lockfile_version: '1'
 generated_at: '2026-08-23T04:14:26.516871+00:00'
 apm_version: 0.26.0
 dependencies:
-- repo_url: suusanex/agent_skills_dotnet_utility
-  name: dotnet-file-based-apps
-  host: github.com
-  resolved_commit: 8f20bbdc5f2b071eaa6518e12ff039cf19b71d8e
-  version: unknown
-  virtual_path: .agents/skills/dotnet-file-based-apps
-  is_virtual: true
-  package_type: claude_skill
-  deployed_files:
-  - .agents/skills/dotnet-file-based-apps
-  - .agents/skills/dotnet-file-based-apps/SKILL.md
-  deployed_file_hashes:
-    .agents/skills/dotnet-file-based-apps/SKILL.md: sha256:a612eb06415c9c149ceacf0598f597544cbe5f5ffe4d8cf9e42223c1d1097710
-  content_hash: sha256:f915ad8100702665872888bdede4363e60af398d1ab1f012176361de551b05de
-- repo_url: suusanex/coding_agent_plan_and_verify_process
-  name: persistent-purpose-review
-  host: github.com
-  resolved_commit: 3c369132d7d2b3cba5ff43774bf9b60a507080fc
-  version: 0.2.2
-  virtual_path: apm-packages/persistent-purpose-review
-  is_virtual: true
-  package_type: apm_package
-  deployed_files:
-  - .agents/skills/persistent-purpose-review
-  - .agents/skills/persistent-purpose-review/SKILL.md
-  deployed_file_hashes:
-    .agents/skills/persistent-purpose-review/SKILL.md: sha256:0d653ad1e929a4f703b99903441357ad6f0ac5106739628317d411c5e1967a90
-  content_hash: sha256:a64a062246d43790f4ae5c61d4fed77acffecb2963c3896792b631bed4b2fb27
 - repo_url: suusanex/coding_agent_plan_and_verify_process
   name: adaptive-implementation-execution
   host: github.com
@@ -104,42 +76,6 @@ deployments:
   - suusanex/coding_agent_plan_and_verify_process/apm-packages/adaptive-implementation-execution
   active_owner: suusanex/coding_agent_plan_and_verify_process/apm-packages/adaptive-implementation-execution
   content_hash: sha256:4f38d5fe12569fe20c1782438b4528f5ac99fa20cd4be682bab25732c0244da5
-- kind: project-relative
-  target: agents
-  value: .agents/skills/dotnet-file-based-apps
-  runtime: null
-  scope: project
-  owners:
-  - suusanex/agent_skills_dotnet_utility/.agents/skills/dotnet-file-based-apps
-  active_owner: suusanex/agent_skills_dotnet_utility/.agents/skills/dotnet-file-based-apps
-  content_hash: null
-- kind: project-relative
-  target: agents
-  value: .agents/skills/dotnet-file-based-apps/SKILL.md
-  runtime: null
-  scope: project
-  owners:
-  - suusanex/agent_skills_dotnet_utility/.agents/skills/dotnet-file-based-apps
-  active_owner: suusanex/agent_skills_dotnet_utility/.agents/skills/dotnet-file-based-apps
-  content_hash: sha256:a612eb06415c9c149ceacf0598f597544cbe5f5ffe4d8cf9e42223c1d1097710
-- kind: project-relative
-  target: agents
-  value: .agents/skills/persistent-purpose-review
-  runtime: null
-  scope: project
-  owners:
-  - suusanex/coding_agent_plan_and_verify_process/apm-packages/persistent-purpose-review
-  active_owner: suusanex/coding_agent_plan_and_verify_process/apm-packages/persistent-purpose-review
-  content_hash: null
-- kind: project-relative
-  target: agents
-  value: .agents/skills/persistent-purpose-review/SKILL.md
-  runtime: null
-  scope: project
-  owners:
-  - suusanex/coding_agent_plan_and_verify_process/apm-packages/persistent-purpose-review
-  active_owner: suusanex/coding_agent_plan_and_verify_process/apm-packages/persistent-purpose-review
-  content_hash: sha256:0d653ad1e929a4f703b99903441357ad6f0ac5106739628317d411c5e1967a90
 - kind: project-relative
   target: codex
   value: .codex/agents/high-implementation-starter.toml
