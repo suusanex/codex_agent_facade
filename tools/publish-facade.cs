@@ -8,8 +8,15 @@ var configPath = args.Length > 0 ? Path.GetFullPath(args[0]) : Path.Combine(repo
 if (!File.Exists(configPath))
     throw new FileNotFoundException("Publish configuration was not found. Copy tools/publish-facade.local.example.json and edit it.", configPath);
 
-var config = JsonSerializer.Deserialize<PublishConfig>(await File.ReadAllTextAsync(configPath), new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
-    ?? throw new InvalidOperationException("Publish configuration is empty.");
+using var configDocument = JsonDocument.Parse(await File.ReadAllTextAsync(configPath));
+var configRoot = configDocument.RootElement;
+var config = new PublishConfig(
+    configRoot.TryGetProperty("deploymentDirectory", out var deploymentDirectory)
+        ? deploymentDirectory.GetString() ?? string.Empty
+        : string.Empty,
+    configRoot.TryGetProperty("taskName", out var taskName)
+        ? taskName.GetString() ?? string.Empty
+        : string.Empty);
 if (string.IsNullOrWhiteSpace(config.DeploymentDirectory)) throw new InvalidOperationException("deploymentDirectory is required.");
 if (string.IsNullOrWhiteSpace(config.TaskName)) throw new InvalidOperationException("taskName is required.");
 var deployment = Path.GetFullPath(config.DeploymentDirectory);
