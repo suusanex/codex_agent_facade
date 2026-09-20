@@ -51,27 +51,54 @@ public sealed class GitHubCopilotDriver
                     OnLaunchResolved: runLog.WriteLaunch),
                 cancellationToken).ConfigureAwait(false);
         }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (ProcessStartException ex)
+        {
+            CliJson.TraceException(ex);
+            CliJson.MarkFailure(ex, "process_start_failed");
+            throw;
+        }
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
+            CliJson.MarkFailure(ex, "internal_error");
             throw;
         }
 
         if (processResult.ExitCode != 0)
         {
-            var failure = new InvalidOperationException(
-                SecretRedactor.RedactText(
-                    $"GitHub Copilot CLI exited with code {processResult.ExitCode}. stdout: {processResult.StandardOutput} stderr: {processResult.StandardError}"));
+            var message = SecretRedactor.RedactText(
+                $"GitHub Copilot CLI exited with code {processResult.ExitCode}. stdout: {processResult.StandardOutput} stderr: {processResult.StandardError}");
+            var failure = new InvalidOperationException(message);
+            CliJson.MarkFailure(
+                failure,
+                "non_zero_exit",
+                $"GitHub Copilot CLI exited with code {processResult.ExitCode}. stderr: {processResult.StandardError}",
+                processResult.ExitCode);
             CliJson.TraceException(failure);
             throw failure;
         }
 
-        var parsed = accumulator.Complete();
+        ParsedCliOutput parsed;
+        try
+        {
+            parsed = accumulator.Complete();
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            CliJson.MarkFailure(ex, "output_parse_failed");
+            throw;
+        }
         return new AgentRunResult(
             Agent: AgentFacade.GitHubCopilotAgent,
             SessionId: parsed.SessionId,
             ExitCode: processResult.ExitCode,
             OutputText: parsed.OutputText,
+            OutputKind: parsed.OutputKind,
             RawOutput: processResult.StandardOutput,
             RunId: runLog.RunId,
             EventsLogPath: runLog.EventsPath,
@@ -140,7 +167,6 @@ public sealed class GitHubCopilotDriver
         return "/" + name;
     }
 }
-
 /// <summary>
 /// Copilot JSONL を 1 パスで蓄積する。Grok の wire schema には合わせない。
 /// </summary>
@@ -148,10 +174,17 @@ internal sealed class GitHubCopilotStreamAccumulator
 {
     private readonly IAgentRunLog _runLog;
     private readonly List<string> _texts = [];
+    private readonly List<string> _completedTurns = [];
+    private readonly List<string> _currentTurn = [];
     private string? _sessionId;
     private int _jsonLineCount;
     private bool _sawNonWhitespace;
     private JsonException? _lastJsonError;
+    private bool _insideAssistantTurn;
+    private bool _sawCompleteAssistantTurn;
+    private bool _sawTerminalResult;
+    private bool _sawUnscopedAssistantText;
+    private bool _sawIncompleteAssistantTurn;
 
     public GitHubCopilotStreamAccumulator(IAgentRunLog runLog)
     {
@@ -191,11 +224,48 @@ internal sealed class GitHubCopilotStreamAccumulator
         _sessionId ??= CliJson.FindExplicitSessionId(root);
         _sessionId ??= CliJson.FindCopilotResumeHint(line);
         var type = CliJson.FindFirstString(root, "type") ?? "unknown";
+        if (GitHubCopilotOutputParser.IsAssistantTurnStart(type))
+        {
+            if (_insideAssistantTurn || _currentTurn.Count > 0)
+            {
+                _sawIncompleteAssistantTurn = true;
+                _currentTurn.Clear();
+            }
+
+            _insideAssistantTurn = true;
+        }
         var assistantText = GitHubCopilotOutputParser.ReadAssistantText(root);
         _runLog.WriteAgentEvent(type, root, GitHubCopilotHumanSummary.Format(type, root, assistantText));
         if (!string.IsNullOrWhiteSpace(assistantText))
         {
             _texts.Add(assistantText);
+            if (_insideAssistantTurn)
+            {
+                _currentTurn.Add(assistantText);
+            }
+            else
+            {
+                _sawUnscopedAssistantText = true;
+            }
+        }
+
+        if (GitHubCopilotOutputParser.IsAssistantTurnEnd(type))
+        {
+            if (!_insideAssistantTurn)
+            {
+                _sawIncompleteAssistantTurn = true;
+            }
+            else
+            {
+                CommitTurn();
+            }
+
+            _insideAssistantTurn = false;
+        }
+
+        if (GitHubCopilotOutputParser.IsTerminalResult(type))
+        {
+            _sawTerminalResult = true;
         }
     }
 
@@ -218,10 +288,33 @@ internal sealed class GitHubCopilotStreamAccumulator
             throw new InvalidOperationException("GitHub Copilot CLI JSONL did not contain assistant text.");
         }
 
-        return new ParsedCliOutput(_sessionId ?? string.Empty, string.Join("\n", _texts));
+        var hasVerifiedFinalResponse = _sawTerminalResult
+            && _sawCompleteAssistantTurn
+            && !_insideAssistantTurn
+            && !_sawIncompleteAssistantTurn
+            && !_sawUnscopedAssistantText
+            && _completedTurns.Count > 0;
+        var output = hasVerifiedFinalResponse
+            ? _completedTurns[^1]
+            : string.Join("\n", _texts);
+        var outputKind = hasVerifiedFinalResponse
+            ? "final_response"
+            : "assistant_transcript";
+        return new ParsedCliOutput(_sessionId ?? string.Empty, output, outputKind);
+    }
+
+    private void CommitTurn()
+    {
+        if (_currentTurn.Count == 0)
+        {
+            return;
+        }
+
+        _completedTurns.Add(string.Join("", _currentTurn));
+        _currentTurn.Clear();
+        _sawCompleteAssistantTurn = true;
     }
 }
-
 internal static class GitHubCopilotHumanSummary
 {
     public static string Format(string type, JsonElement root, string? assistantText)
@@ -259,6 +352,21 @@ internal static class GitHubCopilotHumanSummary
 
 internal static class GitHubCopilotOutputParser
 {
+    internal static bool IsAssistantTurnStart(string type)
+    {
+        return string.Equals(type, "assistant.turn_start", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static bool IsAssistantTurnEnd(string type)
+    {
+        return string.Equals(type, "assistant.turn_end", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static bool IsTerminalResult(string type)
+    {
+        return string.Equals(type, "result", StringComparison.OrdinalIgnoreCase);
+    }
+
     internal static string? ReadAssistantText(JsonElement root)
     {
         if (CliJson.TryGetPropertyIgnoreCase(root, "type", out var typeElement))
@@ -287,5 +395,3 @@ internal static class GitHubCopilotOutputParser
         return CliJson.FindFirstString(root, "text", "content", "message", "output", "result");
     }
 }
-
-internal sealed record ParsedCliOutput(string SessionId, string OutputText);

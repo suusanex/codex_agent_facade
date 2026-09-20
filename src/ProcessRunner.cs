@@ -45,6 +45,17 @@ public sealed record ProcessRunRequest(
 public sealed record ProcessRunResult(int ExitCode, string StandardOutput, string StandardError);
 
 /// <summary>
+/// CLI processを開始できず、workerの処理が実行されていないことを示す。
+/// </summary>
+public sealed class ProcessStartException : Exception
+{
+    public ProcessStartException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
+}
+
+/// <summary>
 /// 起動済み子プロセスを OS の終了保証へ関連付ける。Windows では Job Object。テストでは失敗を注入する。
 /// </summary>
 public interface IProcessJobGuard
@@ -93,7 +104,21 @@ public sealed class ProcessRunner : IProcessRunner
         {
             resolved = ExecutableResolver.Resolve(request.FileName);
             startInfo = CreateStartInfo(resolved, request, out wrapperKind);
-            request.OnLaunchResolved?.Invoke(new ProcessLaunchInfo(
+        }
+        catch (ArgumentException ex)
+        {
+            CliJson.TraceException(ex);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            var wrapped = new ProcessStartException($"Failed to prepare process '{request.FileName}'.", ex);
+            CliJson.TraceException(wrapped);
+            throw wrapped;
+        }
+
+        request.OnLaunchResolved?.Invoke(new ProcessLaunchInfo(
                 request.FileName,
                 resolved,
                 startInfo.FileName,
@@ -109,12 +134,6 @@ public sealed class ProcessRunner : IProcessRunner
                     ? null
                     : new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)
                         .GetByteCount(request.StandardInputText)));
-        }
-        catch (Exception ex)
-        {
-            CliJson.TraceException(ex);
-            throw;
-        }
 
         using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
         var stdout = new StringBuilder();
@@ -130,7 +149,9 @@ public sealed class ProcessRunner : IProcessRunner
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
-            throw;
+            var wrapped = new ProcessStartException($"Failed to start process '{resolved}'.", ex);
+            CliJson.TraceException(wrapped);
+            throw wrapped;
         }
 
         IDisposable? killOnClose = null;

@@ -55,27 +55,54 @@ public sealed class CursorCliDriver
                     OnLaunchResolved: runLog.WriteLaunch),
                 cancellationToken).ConfigureAwait(false);
         }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (ProcessStartException ex)
+        {
+            CliJson.TraceException(ex);
+            CliJson.MarkFailure(ex, "process_start_failed");
+            throw;
+        }
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
+            CliJson.MarkFailure(ex, "internal_error");
             throw;
         }
 
         if (processResult.ExitCode != 0)
         {
-            var failure = new InvalidOperationException(
-                SecretRedactor.RedactText(
-                    $"Cursor CLI exited with code {processResult.ExitCode}. stdout: {processResult.StandardOutput} stderr: {processResult.StandardError}"));
+            var message = SecretRedactor.RedactText(
+                $"Cursor CLI exited with code {processResult.ExitCode}. stdout: {processResult.StandardOutput} stderr: {processResult.StandardError}");
+            var failure = new InvalidOperationException(message);
+            CliJson.MarkFailure(
+                failure,
+                "non_zero_exit",
+                $"Cursor CLI exited with code {processResult.ExitCode}. stderr: {processResult.StandardError}",
+                processResult.ExitCode);
             CliJson.TraceException(failure);
             throw failure;
         }
 
-        var parsed = accumulator.Complete();
+        ParsedCliOutput parsed;
+        try
+        {
+            parsed = accumulator.Complete();
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            CliJson.MarkFailure(ex, "output_parse_failed");
+            throw;
+        }
         return new AgentRunResult(
             Agent: AgentFacade.CursorAgent,
             SessionId: parsed.SessionId,
             ExitCode: processResult.ExitCode,
             OutputText: parsed.OutputText,
+            OutputKind: parsed.OutputKind,
             RawOutput: processResult.StandardOutput,
             RunId: runLog.RunId,
             EventsLogPath: runLog.EventsPath,
@@ -125,11 +152,13 @@ internal sealed class CursorStreamAccumulator
 {
     private readonly IAgentRunLog _runLog;
     private readonly List<string> _assistantTexts = [];
+    private readonly List<string> _assistantGroups = [];
     private string? _sessionId;
     private string? _resultText;
     private int _jsonEventCount;
     private bool _sawNonWhitespace;
     private bool _sawProtocolViolation;
+    private bool _toolSinceAssistant;
     private JsonException? _lastJsonError;
 
     public CursorStreamAccumulator(IAgentRunLog runLog)
@@ -195,6 +224,12 @@ internal sealed class CursorStreamAccumulator
             return;
         }
 
+        if (string.Equals(type, "tool_call", StringComparison.OrdinalIgnoreCase)
+            || AgentLogSummary.LooksLikeTool(type, root))
+        {
+            _toolSinceAssistant = _assistantGroups.Count > 0;
+        }
+
         _runLog.WriteAgentEvent(type, root, CursorCliHumanSummary.Format(type, root, assistantText: null));
     }
 
@@ -219,15 +254,40 @@ internal sealed class CursorStreamAccumulator
                 _lastJsonError);
         }
 
-        var outputText = !string.IsNullOrWhiteSpace(_resultText)
-            ? _resultText
-            : string.Join("\n", _assistantTexts);
+        var (outputText, outputKind) = SelectPublicOutput();
         if (string.IsNullOrWhiteSpace(outputText))
         {
             throw new InvalidOperationException("Cursor CLI JSON did not contain a recognized response field.");
         }
 
-        return new ParsedCliOutput(_sessionId ?? string.Empty, outputText);
+        return new ParsedCliOutput(
+            _sessionId ?? string.Empty,
+            outputText,
+            outputKind);
+    }
+
+    private (string OutputText, string OutputKind) SelectPublicOutput()
+    {
+        if (string.IsNullOrWhiteSpace(_resultText))
+        {
+            return (string.Join("\n", _assistantTexts), "assistant_transcript");
+        }
+
+        if (_assistantTexts.Count == 0)
+        {
+            return (_resultText, "assistant_transcript");
+        }
+
+        var finalAssistantText = _assistantGroups[^1];
+        var assistantTranscript = string.Concat(_assistantTexts);
+        if (string.Equals(_resultText, finalAssistantText, StringComparison.Ordinal)
+            || string.Equals(_resultText, assistantTranscript, StringComparison.Ordinal))
+        {
+            return (finalAssistantText, "final_response");
+        }
+
+        // resultの格納場所だけでは本文が最終報告のみとは断定できないため、情報を保持して限界を明示する。
+        return (_resultText, "assistant_transcript");
     }
 
     private void HandleAssistant(JsonElement root, string type)
@@ -246,6 +306,16 @@ internal sealed class CursorStreamAccumulator
         }
 
         _runLog.AppendHumanFragment("assistant", assistantText);
+        if (_assistantGroups.Count == 0 || _toolSinceAssistant)
+        {
+            _assistantGroups.Add(assistantText);
+        }
+        else
+        {
+            _assistantGroups[^1] += assistantText;
+        }
+
+        _toolSinceAssistant = false;
         if (CursorCliOutputParser.IsStreamingDelta(root)
             && _assistantTexts.Count > 0)
         {

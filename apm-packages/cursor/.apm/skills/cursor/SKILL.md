@@ -56,7 +56,7 @@ MCP server はこの Skill の一部ではない。ユーザーの Codex MCP 設
    - `auto_approve`: その turn で必要な場合だけ明示する
 3. `start_agent` 直前の preflight を行う。required field が欠けている場合は呼ばない。
 4. `start_agent` を呼ぶ。
-5. 返された同じ `jobId` に対して `wait_agent_job` を呼ぶ。`timeout_seconds` は実用上 300 を使う。
+5. 返された同じ `jobId` に対して、通常は `timeout_seconds` を指定せず `wait_agent_job(job_id)` を呼ぶ。診断・テスト・上位環境の明示的な制約など、既定の300秒を上書きする理由がある場合だけ指定する。
 6. terminal result を取得する。timeout で `running` が返った場合だけ、同じ `jobId` で再度 `wait_agent_job` する。`get_agent_job` の短周期 poll はしない。
 7. `completed` なら `result.outputText` をユーザーへ中継する。これがユーザーへの主たる応答である。
 8. 次の turn で同一 Cursor session を継続できるよう `result.sessionId` を保持する。この値は次の Follow-up continuation の `session_id` であり、次の `request_id` ではない。

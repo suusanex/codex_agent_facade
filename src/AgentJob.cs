@@ -17,9 +17,9 @@ public sealed record AgentJobSnapshot(
     string JobId,
     string RequestId,
     string Status,
-    int PollAfterMs,
     AgentRunResult? Result,
-    string? Error);
+    string? Error,
+    AgentJobFailure? Failure);
 
 /// <summary>
 /// MCP 公開用の job snapshot。内部の CLI raw output は含めない。
@@ -28,9 +28,9 @@ public sealed record AgentJobPublicSnapshot(
     string JobId,
     string RequestId,
     string Status,
-    int PollAfterMs,
     AgentRunPublicResult? Result,
-    string? Error);
+    string? Error,
+    AgentJobFailure? Failure);
 
 /// <summary>
 /// MCP 公開用の terminal result。Driver が抽出した outputText と run log 識別情報だけを返す。
@@ -42,7 +42,19 @@ public sealed record AgentRunPublicResult(
     string OutputText,
     string RunId,
     string EventsLogPath,
-    string TextLogPath);
+    string TextLogPath,
+    string OutputKind = "assistant_transcript");
+
+/// <summary>
+/// 失敗時に親が復旧判断へ使う、公開可能な最小限の診断情報。
+/// </summary>
+public sealed record AgentJobFailure(
+    string Kind,
+    string Summary,
+    int? ExitCode = null,
+    string? RunId = null,
+    string? EventsLogPath = null,
+    string? TextLogPath = null);
 
 internal static class AgentJobPublicProjection
 {
@@ -53,9 +65,9 @@ internal static class AgentJobPublicProjection
             snapshot.JobId,
             snapshot.RequestId,
             snapshot.Status,
-            snapshot.PollAfterMs,
             snapshot.Result is null ? null : From(snapshot.Result),
-            snapshot.Error);
+            snapshot.Error,
+            snapshot.Failure);
     }
 
     public static AgentRunPublicResult From(AgentRunResult result)
@@ -68,7 +80,8 @@ internal static class AgentJobPublicProjection
             result.OutputText,
             result.RunId,
             result.EventsLogPath,
-            result.TextLogPath);
+            result.TextLogPath,
+            result.OutputKind);
     }
 }
 
@@ -83,6 +96,7 @@ public sealed class AgentJob
     private string _status = AgentJobStatus.Running;
     private AgentRunResult? _result;
     private string? _error;
+    private AgentJobFailure? _failure;
 
     public AgentJob(string jobId, string requestId, AgentRunRequest request, DateTimeOffset createdAt)
     {
@@ -141,10 +155,10 @@ public sealed class AgentJob
         return TryFinish(AgentJobStatus.Completed, result, error: null);
     }
 
-    public bool Fail(string error)
+    public bool Fail(string error, AgentJobFailure? failure = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(error);
-        return TryFinish(AgentJobStatus.Failed, result: null, error);
+        return TryFinish(AgentJobStatus.Failed, result: null, error, failure);
     }
 
     public bool MarkCancelled()
@@ -152,7 +166,7 @@ public sealed class AgentJob
         return TryFinish(AgentJobStatus.Cancelled, result: null, error: "cancelled");
     }
 
-    public AgentJobSnapshot CreateSnapshot(int pollAfterMs)
+    public AgentJobSnapshot CreateSnapshot()
     {
         lock (_gate)
         {
@@ -160,9 +174,9 @@ public sealed class AgentJob
                 JobId,
                 RequestId,
                 _status,
-                pollAfterMs,
                 _result,
-                _error);
+                _error,
+                _failure);
         }
     }
 
@@ -178,7 +192,7 @@ public sealed class AgentJob
         }
     }
 
-    private bool TryFinish(string status, AgentRunResult? result, string? error)
+    private bool TryFinish(string status, AgentRunResult? result, string? error, AgentJobFailure? failure = null)
     {
         lock (_gate)
         {
@@ -190,6 +204,7 @@ public sealed class AgentJob
             _status = status;
             _result = result;
             _error = error;
+            _failure = failure;
         }
 
         _terminal.TrySetResult();

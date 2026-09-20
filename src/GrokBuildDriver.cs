@@ -50,27 +50,54 @@ public sealed class GrokBuildDriver
                     OnLaunchResolved: runLog.WriteLaunch),
                 cancellationToken).ConfigureAwait(false);
         }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (ProcessStartException ex)
+        {
+            CliJson.TraceException(ex);
+            CliJson.MarkFailure(ex, "process_start_failed");
+            throw;
+        }
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
+            CliJson.MarkFailure(ex, "internal_error");
             throw;
         }
 
         if (processResult.ExitCode != 0)
         {
-            var failure = new InvalidOperationException(
-                SecretRedactor.RedactText(
-                    $"Grok Build CLI exited with code {processResult.ExitCode}. stdout: {processResult.StandardOutput} stderr: {processResult.StandardError}"));
+            var message = SecretRedactor.RedactText(
+                $"Grok Build CLI exited with code {processResult.ExitCode}. stdout: {processResult.StandardOutput} stderr: {processResult.StandardError}");
+            var failure = new InvalidOperationException(message);
+            CliJson.MarkFailure(
+                failure,
+                "non_zero_exit",
+                $"Grok Build CLI exited with code {processResult.ExitCode}. stderr: {processResult.StandardError}",
+                processResult.ExitCode);
             CliJson.TraceException(failure);
             throw failure;
         }
 
-        var parsed = accumulator.Complete();
+        ParsedCliOutput parsed;
+        try
+        {
+            parsed = accumulator.Complete();
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            CliJson.MarkFailure(ex, "output_parse_failed");
+            throw;
+        }
         return new AgentRunResult(
             Agent: AgentFacade.GrokBuildAgent,
             SessionId: parsed.SessionId,
             ExitCode: processResult.ExitCode,
             OutputText: parsed.OutputText,
+            OutputKind: parsed.OutputKind,
             RawOutput: processResult.StandardOutput,
             RunId: runLog.RunId,
             EventsLogPath: runLog.EventsPath,

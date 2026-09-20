@@ -330,9 +330,7 @@ internal static class DevinMcpSmoke
                 return last;
             }
 
-            var delayMs = last.PollAfterMs > 0 ? last.PollAfterMs : 2000;
-            delayMs = Math.Clamp(delayMs, 1000, 5000);
-            await Task.Delay(delayMs);
+            await Task.Delay(TimeSpan.FromSeconds(2));
         }
 
         throw new TimeoutException(
@@ -974,7 +972,6 @@ internal sealed record JobSnapshot(
     string JobId,
     string RequestId,
     string Status,
-    int PollAfterMs,
     JobResult? Result,
     string? Error);
 
