@@ -77,15 +77,15 @@ public sealed class AgentTools
     [McpServerTool(Name = "wait_agent_job"), Description(McpPublicContract.WaitAgentJobDescription)]
     public async Task<string> WaitAgentJob(
         [Description("Job id returned by start_agent.")] string job_id,
-        [Description(McpPublicContract.WaitTimeoutSecondsDescription)] int timeout_seconds,
-        CancellationToken cancellationToken)
+        [Description(McpPublicContract.WaitTimeoutSecondsDescription)] int? timeout_seconds = null,
+        CancellationToken cancellationToken = default)
     {
         var invocationId = Guid.NewGuid().ToString("N");
         var startedAt = Stopwatch.GetTimestamp();
         LogStarted("wait_agent_job", invocationId, null, job_id, null);
         try
         {
-            var snapshot = await _jobs.WaitAsync(job_id, timeout_seconds, cancellationToken).ConfigureAwait(false);
+            var snapshot = await _jobs.WaitAsync(job_id, timeout_seconds ?? AgentJobService.DefaultWaitTimeoutSeconds, cancellationToken).ConfigureAwait(false);
             LogCompleted("wait_agent_job", invocationId, startedAt, snapshot, includeRequestId: false, agent: null);
             return SerializePublic(snapshot);
         }
@@ -141,9 +141,9 @@ public sealed class AgentTools
         var durationMs = (long)Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
         var terminal = snapshot.Status is AgentJobStatus.Completed or AgentJobStatus.Failed or AgentJobStatus.Cancelled;
         FacadeLog.CreateLogger(FacadeLogging.LoggerCategory).LogInformation(
-            "MCP tool={Tool} phase=completed invocationId={InvocationId} requestId={RequestId} jobId={JobId} agent={Agent} status={Status} terminal={Terminal} pollAfterMs={PollAfterMs} durationMs={DurationMs}",
+            "MCP tool={Tool} phase=completed invocationId={InvocationId} requestId={RequestId} jobId={JobId} agent={Agent} status={Status} terminal={Terminal} durationMs={DurationMs}",
             SafeLogValue(tool), SafeLogValue(invocationId), SafeLogValue(includeRequestId ? snapshot.RequestId : null), SafeLogValue(snapshot.JobId),
-            SafeLogValue(agent), snapshot.Status, terminal ? "true" : "false", snapshot.PollAfterMs, durationMs);
+            SafeLogValue(agent), snapshot.Status, terminal ? "true" : "false", durationMs);
     }
 
     private static void LogFailed(string tool, string invocationId, long startedAt, Exception exception, string? requestId, string? jobId)

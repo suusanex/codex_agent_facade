@@ -16,10 +16,14 @@ public static class McpPublicContract
         + "Generate a new request_id for each distinct agent job. "
         + "A new user turn in the same Codex thread, or continuation of the same external session, still requires a new request_id. "
         + "Reuse the same request_id only when retrying the exact same start_agent request after its result may have been lost. "
-        + "After start_agent, call wait_agent_job with the returned jobId until completed, failed, or cancelled. "
+        + "After start_agent, normally call wait_agent_job with only the returned jobId until completed, failed, or cancelled. "
+        + "Omit timeout_seconds for the normal completion path to use the 300-second default; specify it only when diagnosis, testing, or another explicit constraint requires an override. "
         + "Do not use short-interval get_agent_job polling to wait out a long-running worker. "
         + "Use get_agent_job only for explicit status checks, recovery, or diagnosis. "
         + "wait_agent_job does not start, restart, or cancel the worker. "
+        + "A completed job means only that the external CLI finished; review the reported response, diff, tests, and other evidence before accepting the work. "
+        + "Distinguish failed jobs, lost responses, and wait timeouts. A recovery retry reuses the same request_id and must not start a second job. "
+        + "Successful results expose outputKind as final_response or assistant_transcript; raw streams are available only in run logs. "
         + "Reuse session_id from a completed result to continue the same external agent session.";
 
     public const string StartAgentDescription =
@@ -27,7 +31,11 @@ public static class McpPublicContract
         + "The caller constructs a self-contained worker prompt and a request_id for this distinct job. "
         + "Pass request_id, agent, prompt, and working_directory on every call. "
         + "Reuse that request_id only if this start_agent result is lost. "
-        + "Then call wait_agent_job with the returned jobId until the job is terminal. "
+        + "Then normally call wait_agent_job with only the returned jobId until the job is terminal. "
+        + "Omit timeout_seconds to use the 300-second default unless diagnosis, testing, or another explicit constraint requires an override. "
+        + "Completed means only CLI execution completed; the caller must review the response, diff, tests, and evidence before accepting the work. "
+        + "A lost response is recovered with the same request_id; do not start a new job for recovery. "
+        + "Successful results expose outputKind as final_response or assistant_transcript; raw streams are not returned by MCP. "
         + "The Facade does not plan, split, or semantically rewrite the supplied worker task. "
         + "Structured options such as skills may be translated by the selected driver.";
 
@@ -35,20 +43,21 @@ public static class McpPublicContract
         "Get the current status or terminal result of a previously started agent job. "
         + "Does not start, restart, or cancel work. "
         + "Use this for explicit status checks, recovery, or diagnosis. "
+        + "A failed snapshot includes a stable failure object when available; it is distinct from a wait timeout or a lost response. "
         + "Do not poll this tool at a short interval to wait for a long-running worker; use wait_agent_job instead.";
 
     public const string WaitAgentJobDescription =
-        "Wait until a previously started agent job is completed, failed, or cancelled, or until timeout_seconds elapses. "
+        "Wait until a previously started agent job is completed, failed, or cancelled, or until timeout_seconds elapses. Normally omit timeout_seconds and use wait_agent_job(job_id); the Facade then applies a 300-second upper bound. "
+        + "Specify timeout_seconds only for diagnosis, testing, or another explicit constraint; an explicit value is not replaced by the default. "
         + "Does not start, restart, or cancel the worker. "
         + "If the job is already terminal, return immediately. "
         + "On timeout, return the current running snapshot and leave the worker running. "
         + "Cancelling this wait does not cancel the worker; use cancel_agent_job to stop it. "
-        + "A practical timeout_seconds value is 300.";
+        + "Do not repeat short waits as the normal completion path.";
 
     public const string WaitTimeoutSecondsDescription =
-        "Maximum seconds to wait for a terminal job state. "
-        + "Must be an integer from 1 to 86400. "
-        + "A practical value is 300 so that multi-minute workers can complete in one wait. "
+        "Optional maximum seconds to wait for a terminal job state. Normally omit this argument; the Facade uses 300 seconds. "
+        + "Specify it only for diagnosis, testing, or another explicit constraint. When provided, it must be an integer from 1 to 86400 and is not replaced by the default. "
         + "Timeout returns the current snapshot without cancelling the worker.";
 
     public const string RequestIdDescription =

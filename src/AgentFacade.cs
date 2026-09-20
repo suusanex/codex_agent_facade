@@ -25,7 +25,13 @@ public sealed record AgentRunResult(
     string RawOutput,
     string RunId,
     string EventsLogPath,
-    string TextLogPath);
+    string TextLogPath,
+    string OutputKind = "assistant_transcript");
+
+internal sealed record ParsedCliOutput(
+    string SessionId,
+    string OutputText,
+    string OutputKind = "assistant_transcript");
 
 internal static class AgentJson
 {
@@ -109,6 +115,7 @@ public sealed class AgentFacade
         }
         catch (Exception ex)
         {
+            CliJson.AttachFailureLog(ex, log);
             CliJson.TraceException(ex);
             log.WriteFailed(ex);
             throw;
@@ -136,6 +143,38 @@ public sealed class AgentFacade
 
 internal static class CliJson
 {
+    internal const string FailureKindKey = "CodexAgentFacade.FailureKind";
+    internal const string FailureExitCodeKey = "CodexAgentFacade.FailureExitCode";
+    internal const string FailureSummaryKey = "CodexAgentFacade.FailureSummary";
+    internal const string FailureRunIdKey = "CodexAgentFacade.FailureRunId";
+    internal const string FailureEventsLogPathKey = "CodexAgentFacade.FailureEventsLogPath";
+    internal const string FailureTextLogPathKey = "CodexAgentFacade.FailureTextLogPath";
+
+    public static void MarkFailure(
+        Exception exception,
+        string kind,
+        string? summary = null,
+        int? exitCode = null)
+    {
+        exception.Data[FailureKindKey] = kind;
+        if (summary is not null)
+        {
+            exception.Data[FailureSummaryKey] = summary;
+        }
+
+        if (exitCode is not null)
+        {
+            exception.Data[FailureExitCodeKey] = exitCode.Value;
+        }
+    }
+
+    public static void AttachFailureLog(Exception exception, IAgentRunLog log)
+    {
+        exception.Data[FailureRunIdKey] = log.RunId;
+        exception.Data[FailureEventsLogPathKey] = log.EventsPath;
+        exception.Data[FailureTextLogPathKey] = log.TextLogPath;
+    }
+
     public static bool TryGetPropertyIgnoreCase(JsonElement element, string name, out JsonElement value)
     {
         if (element.ValueKind != JsonValueKind.Object)

@@ -10,7 +10,7 @@ using Microsoft.Extensions.Logging;
 /// </summary>
 public sealed class AgentJobService
 {
-    public const int DefaultPollAfterMs = 2000;
+    public const int DefaultWaitTimeoutSeconds = 300;
     public const int MinWaitTimeoutSeconds = 1;
     public const int MaxWaitTimeoutSeconds = 86400;
     public const string InterruptedError = "agent job was interrupted because the facade process exited.";
@@ -58,7 +58,7 @@ public sealed class AgentJobService
         if (_byRequestId.TryGetValue(key, out var existing))
         {
             EnsureSameRequest(existing.Request, request);
-            return existing.CreateSnapshot(DefaultPollAfterMs);
+            return existing.CreateSnapshot();
         }
 
         var stored = TryReadByRequestId(key);
@@ -76,7 +76,7 @@ public sealed class AgentJobService
             created.Discard();
             var winner = _byRequestId[key];
             EnsureSameRequest(winner.Request, request);
-            return winner.CreateSnapshot(DefaultPollAfterMs);
+            return winner.CreateSnapshot();
         }
 
         if (!_byJobId.TryAdd(jobId, created))
@@ -88,7 +88,7 @@ public sealed class AgentJobService
 
         try
         {
-            Persist(ToRecord(created.CreateSnapshot(DefaultPollAfterMs), fingerprint));
+            Persist(ToRecord(created.CreateSnapshot(), fingerprint));
         }
         catch (Exception ex)
         {
@@ -98,7 +98,7 @@ public sealed class AgentJobService
         }
 
         _ = RunWorkerAsync(created, fingerprint);
-        return created.CreateSnapshot(DefaultPollAfterMs);
+        return created.CreateSnapshot();
     }
 
     public AgentJobSnapshot Get(string jobId)
@@ -111,7 +111,7 @@ public sealed class AgentJobService
         var id = jobId.Trim();
         if (_byJobId.TryGetValue(id, out var live))
         {
-            return live.CreateSnapshot(DefaultPollAfterMs);
+            return live.CreateSnapshot();
         }
 
         var stored = TryReadByJobId(id);
@@ -133,10 +133,10 @@ public sealed class AgentJobService
         var id = jobId.Trim();
         if (_byJobId.TryGetValue(id, out var live))
         {
-            var snapshot = live.CreateSnapshot(DefaultPollAfterMs);
+            var snapshot = live.CreateSnapshot();
             if (live.RequestCancel())
             {
-                snapshot = live.CreateSnapshot(DefaultPollAfterMs);
+                snapshot = live.CreateSnapshot();
                 LogTerminal(snapshot, AgentJobStatus.Cancelled, exitCode: null, errorType: null);
             }
             Persist(ToRecord(snapshot, ComputeRequestFingerprint(live.Request)));
@@ -157,7 +157,10 @@ public sealed class AgentJobService
     /// 既存 job が terminal になるまで待つ。新しい worker は開始・再実行しない。
     /// timeout では running snapshot を返し、waiter の cancel は job を止めない。
     /// </summary>
-    public async Task<AgentJobSnapshot> WaitAsync(string jobId, int timeoutSeconds, CancellationToken cancellationToken)
+    public async Task<AgentJobSnapshot> WaitAsync(
+        string jobId,
+        int timeoutSeconds = DefaultWaitTimeoutSeconds,
+        CancellationToken cancellationToken = default)
     {
         if (timeoutSeconds < MinWaitTimeoutSeconds || timeoutSeconds > MaxWaitTimeoutSeconds)
         {
@@ -204,7 +207,7 @@ public sealed class AgentJobService
                 .ConfigureAwait(false);
             if (job.Complete(result))
             {
-                LogTerminal(job.CreateSnapshot(DefaultPollAfterMs), AgentJobStatus.Completed, result.ExitCode, errorType: null);
+                LogTerminal(job.CreateSnapshot(), AgentJobStatus.Completed, result.ExitCode, errorType: null);
             }
         }
         catch (OperationCanceledException ex)
@@ -212,19 +215,20 @@ public sealed class AgentJobService
             CliJson.TraceException(ex);
             if (job.MarkCancelled())
             {
-                LogTerminal(job.CreateSnapshot(DefaultPollAfterMs), AgentJobStatus.Cancelled, exitCode: null, errorType: ex.GetType().Name);
+                LogTerminal(job.CreateSnapshot(), AgentJobStatus.Cancelled, exitCode: null, errorType: ex.GetType().Name);
             }
         }
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
-            if (job.Fail("agent job failed. See the server log for details."))
+            var failure = CreateFailure(ex);
+            if (job.Fail("agent job failed. See the server log for details.", failure))
             {
-                LogTerminal(job.CreateSnapshot(DefaultPollAfterMs), AgentJobStatus.Failed, exitCode: null, errorType: ex.GetType().Name);
+                LogTerminal(job.CreateSnapshot(), AgentJobStatus.Failed, exitCode: failure.ExitCode, errorType: ex.GetType().Name);
             }
         }
 
-        Persist(ToRecord(job.CreateSnapshot(DefaultPollAfterMs), fingerprint));
+        Persist(ToRecord(job.CreateSnapshot(), fingerprint));
         Evict(job);
     }
 
@@ -285,6 +289,9 @@ public sealed class AgentJobService
             Status = AgentJobStatus.Failed,
             Error = InterruptedError,
             Result = null,
+            Failure = new AgentJobFailure(
+                "facade_interrupted",
+                InterruptedError),
         };
         LogTerminal(ToSnapshot(failed), AgentJobStatus.Failed, exitCode: null, errorType: "InterruptedError");
         Persist(failed);
@@ -431,9 +438,9 @@ public sealed class AgentJobService
             record.JobId,
             record.RequestId,
             record.Status,
-            record.PollAfterMs,
             record.Result,
-            record.Error);
+            record.Error,
+            record.Failure);
     }
 
     private static AgentJobRecord ToRecord(AgentJobSnapshot snapshot, string fingerprint)
@@ -442,10 +449,42 @@ public sealed class AgentJobService
             snapshot.JobId,
             snapshot.RequestId,
             snapshot.Status,
-            snapshot.PollAfterMs,
             fingerprint,
             snapshot.Result,
-            snapshot.Error);
+            snapshot.Error,
+            snapshot.Failure);
+    }
+
+    private static AgentJobFailure CreateFailure(Exception exception)
+    {
+        if (exception.Data[CliJson.FailureKindKey] is string kind)
+        {
+            var exitCode = exception.Data[CliJson.FailureExitCodeKey] is int code ? code : (int?)null;
+            var summary = exception.Data[CliJson.FailureSummaryKey] as string ?? exception.Message;
+            return new AgentJobFailure(
+                kind,
+                FailureSummary(summary),
+                exitCode,
+                exception.Data[CliJson.FailureRunIdKey] as string,
+                exception.Data[CliJson.FailureEventsLogPathKey] as string,
+                exception.Data[CliJson.FailureTextLogPathKey] as string);
+        }
+
+        return new AgentJobFailure(
+            "internal_error",
+            FailureSummary(exception.Message),
+            null,
+            exception.Data[CliJson.FailureRunIdKey] as string,
+            exception.Data[CliJson.FailureEventsLogPathKey] as string,
+            exception.Data[CliJson.FailureTextLogPathKey] as string);
+    }
+
+    private static string FailureSummary(string summary)
+    {
+        var oneLine = SecretRedactor.RedactText(summary)
+            .Replace('\r', ' ')
+            .Replace('\n', ' ');
+        return oneLine.Length <= 512 ? oneLine : oneLine[..512];
     }
 }
 
@@ -453,9 +492,9 @@ internal sealed record AgentJobRecord(
     string JobId,
     string RequestId,
     string Status,
-    int PollAfterMs,
     string RequestFingerprint,
     AgentRunResult? Result,
-    string? Error);
+    string? Error,
+    AgentJobFailure? Failure);
 
 

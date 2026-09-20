@@ -53,11 +53,11 @@ server / host 自身の診断ログは run log とは別ファイルへ書く。
 
 起動・listen・停止・bind 失敗・token 不備・MCP / ASP.NET Core の警告・エラー・Facade 内部の重要な例外を残す。コンソールや `System.Diagnostics.Trace` には依存しない。
 
-MCP tool の呼び出しも `server.log` に記録する。`start_agent` / `wait_agent_job` / `get_agent_job` / `cancel_agent_job` について、入口・正常終了・失敗の各イベントに tool 名、`invocationId`、`requestId` または `jobId`、status、`pollAfterMs`、`durationMs` などを記録する。job の terminal transition は `JOB` イベントとして同じ `jobId` を記録するため、次のように MCP call と完了時刻を時系列で追跡できる。
+MCP tool の呼び出しも `server.log` に記録する。`start_agent` / `wait_agent_job` / `get_agent_job` / `cancel_agent_job` について、入口・正常終了・失敗の各イベントに tool 名、`invocationId`、`requestId` または `jobId`、status、`durationMs` などを記録する。job の terminal transition は `JOB` イベントとして同じ `jobId` を記録するため、次のように MCP call と完了時刻を時系列で追跡できる。
 
 ```text
-MCP tool=start_agent phase=completed ... jobId=... agent=grok-build status=running terminal=false pollAfterMs=2000 durationMs=...
-MCP tool=wait_agent_job phase=completed ... jobId=... status=completed terminal=true pollAfterMs=2000 durationMs=...
+MCP tool=start_agent phase=completed ... jobId=... agent=grok-build status=running terminal=false durationMs=...
+MCP tool=wait_agent_job phase=completed ... jobId=... status=completed terminal=true durationMs=...
 JOB phase=completed jobId=... status=completed exitCode=0
 ```
 
@@ -148,7 +148,6 @@ distinct な agent job / distinct な `start_agent` ごとに、呼び出し側�
 - `jobId`
 - `requestId`
 - `status`（`running` / `completed` / `failed` / `cancelled`）
-- `pollAfterMs`
 
 同じ `request_id` で入力が違う場合は tool error。既存 job は継続する。MCP 接続が切れても job は止まらない。
 
@@ -164,22 +163,27 @@ distinct な agent job / distinct な `start_agent` ごとに、呼び出し側�
 - `sessionId`（CLI が明示した session フィールド、または Copilot の `--resume=` hint。任意 UUID は使わない。読めなければ空）
 - `exitCode`
 - `outputText`
+- `outputKind`（`final_response` または `assistant_transcript`）
 - `runId`（`jobId` と同じ）
 - `eventsLogPath`
 - `textLogPath`
 
 この compact な `result` は `start_agent` の idempotent retry、`wait_agent_job`、`cancel_agent_job` でも同じである。
 
-`failed` / `cancelled` では `error` を返す。失敗時はフォールバックせず MCP tool error になる。
+Cursor は terminal `result.result` とassistantイベントの対応を確認できる場合だけ、最後のassistant報告を `final_response` として返す。対応を確認できないterminal resultや、result自体が欠落する形式では、情報を削らず `assistant_transcript` として返す。Copilot は対になった `assistant.turn_start` / `assistant.turn_end` とterminal `result`を確認できる場合だけ、最後に完了したassistant turnを `final_response` とする。未完了turn、他種イベントのcompleted属性、対応 lifecycle が確認できない旧形式では、認識済みassistant本文の連結を `assistant_transcript` とする。過去 turn、reasoning、tool の前後の断片を根拠なく削除したり、暗黙に要約・truncateしたりしない。
+
+`failed` / `cancelled` のsnapshotは `error` を返す。`failed` には可能な場合、`failure.kind`（`process_start_failed` / `non_zero_exit` / `output_parse_failed` / `facade_interrupted` / `internal_error`）、単一行で redaction 済みの最大 512 文字の `summary`、取得できた `exitCode`、生成済み run log の参照を含める。例外全文、stdout/stderr 全文、raw stream は公開しない。不明なjob IDや不正な引数などtool呼び出し自体の失敗だけをMCP tool errorとし、workerの失敗を成功扱いや別jobへのフォールバックへ変換しない。
 
 ### `wait_agent_job`
 
 | フィールド | 必須 | 内容 |
 | --- | --- | --- |
 | `job_id` | はい | `start_agent` が返した `jobId` |
-| `timeout_seconds` | はい | terminal まで待つ上限秒。範囲は 1〜86400。実用値は `300` |
+| `timeout_seconds` | いいえ | terminal まで待つ上限秒。省略時は `300`。明示時の範囲は 1〜86400 |
 
-新しい worker を開始・再実行しない。既に terminal なら即時に返す。running なら terminal 化または指定 timeout まで待つ。timeout 時は `status=running` の snapshot を返し、worker は継続する。wait 呼び出しのキャンセル・切断・timeout だけでは worker を cancel しない。worker 停止は `cancel_agent_job` の責務である。
+通常の完了待ちは `wait_agent_job(job_id)` とし、`timeout_seconds` を省略する。診断・テスト・上位環境の明示的な制約など、既定値を上書きする理由がある場合だけ指定する。新しい worker を開始・再実行しない。既に terminal なら即時に返す。running なら terminal 化または待機上限まで待つ。timeout 時は `status=running` の snapshot を返し、worker は継続する。wait 呼び出しのキャンセル・切断・timeout だけでは worker を cancel しない。worker 停止は `cancel_agent_job` の責務である。
+
+`completed` は CLI 実行が完了したことだけを示す。親エージェントは応答、差分、テスト、run log などをレビューしてから受入判断を行う。`failed`、応答喪失、wait timeout は別状態として扱い、応答喪失の回収 retry は同じ `request_id` を使って既存 job を取得する。
 
 ### `cancel_agent_job`
 
