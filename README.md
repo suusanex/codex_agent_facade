@@ -1,13 +1,13 @@
 # codex_agent_facade
 
-Codex App から GitHub Copilot、Grok Build、Devin CLI、Cursor CLI へ作業を中継する feasibility PoC。
+Codex App から GitHub Copilot、Grok Build、Cursor CLI へ作業を中継する feasibility PoC。
 
 Facade 自身は planner や orchestrator にならない薄い execution transport である。呼び出し側（Codex の親エージェントなど）は作業の計画・分割・委譲方針を決め、自己完結した worker prompt を `start_agent` に渡せる。元の user prompt 全体を転送する必要はない。Facade はその worker task を計画・分割・意味的に書き換えない。caller が明示した `skills` などの structured option は、対応 Driver が agent 固有の呼び出し表現へ変換する場合がある。選択した agent の CLI へ変換して実行し、完了結果を返す。
 
 ## 必要環境
 
 - .NET 11 SDK（Preview 可）。`#:include` で複数ファイルをコンパイルする
-- PATH 上の `copilot`（GitHub Copilot CLI）、`grok`（Grok Build CLI）、`devin`（Devin CLI）、および / または `cursor-agent`（Cursor CLI）
+- PATH 上の `copilot`（GitHub Copilot CLI）、`grok`（Grok Build CLI）、および / または `cursor-agent`（Cursor CLI）
 - Windows で Cursor CLI を使う場合は PowerShell 7（`pwsh.exe`）を PATH 上に配置する。Facade の `.ps1` 起動経路は PowerShell 7 を使用する
 - 実作業には各 CLI へのログインが必要
 
@@ -136,11 +136,11 @@ distinct な agent job / distinct な `start_agent` ごとに、呼び出し側�
 | フィールド | 必須 | 内容 |
 | --- | --- | --- |
 | `request_id` | はい | この distinct な agent job 用の冪等キー。呼び出し側が job ごとに新しく生成する。同じ Codex thread / 同じ外部 session でも新しい payload なら新しい値。同じ値の再呼び出しは、引数が完全一致する lost-result retry のときだけ既存 job を返す |
-| `agent` | はい | `github-copilot`、`grok-build`、`devin-cli`、または `cursor` |
+| `agent` | はい | `github-copilot`、`grok-build`、または `cursor` |
 | `prompt` | はい | 呼び出し側が構成した自己完結の worker prompt。元の user prompt 全体である必要はない。Facade はこの task payload を再解釈しない。完全一致の転送は保証せず、`skills` 指定時は対応 Driver が agent 固有の skill 指示を付加する場合がある |
 | `working_directory` | はい | 対象 workspace / worktree。continuation でも毎回指定する。前回値は暗黙継承されない |
 | `session_id` | いいえ | 同一外部 session の継続。省略時は新規 |
-| `skills` | いいえ | Codex 形式の Skill 名（任意）。GitHub Copilot、Grok Build、Devin CLI は agent 固有の prompt 指示へ変換する。Cursor は現在このフィールドを変換しない。Cursor で Skill を明示 invoke する場合は worker prompt 本文へ含める |
+| `skills` | いいえ | Codex 形式の Skill 名（任意）。GitHub Copilot と Grok Build は agent 固有の prompt 指示へ変換する。Cursor は現在このフィールドを変換しない。Cursor で Skill を明示 invoke する場合は worker prompt 本文へ含める |
 | `auto_approve` | いいえ | 既定 true。各 CLI の non-interactive 承認フラグを付ける。質問待ちの観測では false |
 
 戻り JSON:
@@ -237,7 +237,6 @@ Skill は **編集する work repository** の root で APM から入れる。�
 ```powershell
 apm install suusanex/codex_agent_facade/apm-packages/github-copilot --target codex,agent-skills
 apm install suusanex/codex_agent_facade/apm-packages/grok-build --target codex,agent-skills
-apm install suusanex/codex_agent_facade/apm-packages/devin-cli --target codex,agent-skills
 apm install suusanex/codex_agent_facade/apm-packages/cursor --target codex,agent-skills
 ```
 
@@ -246,11 +245,10 @@ apm install suusanex/codex_agent_facade/apm-packages/cursor --target codex,agent
 ```powershell
 apm install "C:\path\to\codex_agent_facade\apm-packages\github-copilot" --target codex,agent-skills
 apm install "C:\path\to\codex_agent_facade\apm-packages\grok-build" --target codex,agent-skills
-apm install "C:\path\to\codex_agent_facade\apm-packages\devin-cli" --target codex,agent-skills
 apm install "C:\path\to\codex_agent_facade\apm-packages\cursor" --target codex,agent-skills
 ```
 
-展開先は `.agents/skills/github-copilot/`、`.agents/skills/grok-build/`、`.agents/skills/devin-cli/`、`.agents/skills/cursor/`。Codex 上では `$github-copilot` / `$grok-build` / `$devin-cli` / `$cursor` で本文を外部 agent へ渡す。これらの Skill を指定した turn では、その Skill の契約どおり Codex 自身は対象作業を実行せず、Skill より後のユーザー本文を worker prompt として外部 agent へ委譲し、結果を中継する。Skill 無しで `start_agent` / `wait_agent_job` を直接呼ぶ場合、呼び出し側は元の user prompt 全体を転送する必要はなく、限定した worker 専用 prompt を構成して渡してよい。`get_agent_job` は明示照会・復旧・診断用である。
+展開先は `.agents/skills/github-copilot/`、`.agents/skills/grok-build/`、`.agents/skills/cursor/`。Codex 上では `$github-copilot` / `$grok-build` / `$cursor` で本文を外部 agent へ渡す。これらの Skill を指定した turn では、その Skill の契約どおり Codex 自身は対象作業を実行せず、Skill より後のユーザー本文を worker prompt として外部 agent へ委譲し、結果を中継する。Skill 無しで `start_agent` / `wait_agent_job` を直接呼ぶ場合、呼び出し側は元の user prompt 全体を転送する必要はなく、限定した worker 専用 prompt を構成して渡してよい。`get_agent_job` は明示照会・復旧・診断用である。
 
 更新・削除:
 
@@ -258,7 +256,6 @@ apm install "C:\path\to\codex_agent_facade\apm-packages\cursor" --target codex,a
 apm update
 apm uninstall github-copilot
 apm uninstall grok-build
-apm uninstall devin-cli
 apm uninstall cursor
 ```
 
@@ -276,25 +273,19 @@ Grok Build:
 grok --no-auto-update -p <prompt> --cwd <working_directory> --output-format streaming-json [--always-approve] [--resume <session_id>]
 ```
 
-Devin CLI（プロセス cwd = `working_directory`）:
-
-```text
-devin --respect-workspace-trust false [--permission-mode dangerous] [--resume <session_id>] --print -- <prompt>
-```
-
 Cursor CLI（プロセス cwd = `working_directory`。実行ファイル名は Unix では `cursor-agent`、Windows では `cursor-agent.ps1`）:
 
 ```text
 cursor-agent --print --output-format stream-json --trust --workspace <working_directory> [--force] [--resume <session_id>] <prompt>
 ```
 
-`--allow-all` / `--always-approve` / `--permission-mode dangerous` / `--force` は `auto_approve=true` のときだけ付ける。Copilot は全OSで PATH 上の `copilot` を選び、`--prompt` は使わず、Skill付き完全promptをUTF-8 stdinへ渡す。GitHub公式の [programmatic usage](https://docs.github.com/en/copilot/how-tos/copilot-cli/automate-copilot-cli/run-cli-programmatically) に従う。Windowsの`copilot.CMD`は汎用cmd経路でstdin handleをchildへ継承し、PATH上で`copilot.exe`が先に解決される環境では通常のnative経路を使う。npm shim内容やnpm loaderの解析は行わない。`devin` は PATH 上の実行ファイルを使う。Cursor は PATH 上の `cursor-agent` を使う。同梱の `agent` は Grok Build の `agent` と衝突するため使わない。Windows では公式の `cursor-agent.ps1` を `pwsh -File` で起動する。`cursor-agent.cmd` は cmd が CR/LF を引数へ渡せないため使わない。
+`--allow-all` / `--always-approve` / `--force` は `auto_approve=true` のときだけ付ける。Copilot は全OSで PATH 上の `copilot` を選び、`--prompt` は使わず、Skill付き完全promptをUTF-8 stdinへ渡す。GitHub公式の [programmatic usage](https://docs.github.com/en/copilot/how-tos/copilot-cli/automate-copilot-cli/run-cli-programmatically) に従う。Windowsの`copilot.CMD`は汎用cmd経路でstdin handleをchildへ継承し、PATH上で`copilot.exe`が先に解決される環境では通常のnative経路を使う。npm shim内容やnpm loaderの解析は行わない。Cursor は PATH 上の `cursor-agent` を使う。同梱の `agent` は Grok Build の `agent` と衝突するため使わない。Windows では公式の `cursor-agent.ps1` を `pwsh -File` で起動する。`cursor-agent.cmd` は cmd が CR/LF を引数へ渡せないため使わない。
 
-Skill 変換は共通化しない。Copilot は `Use the /name skill.`、Grok と Devin は `/name` 行。Cursor は Codex / `.codex/skills` を native discovery するため、`skills` 配列を prompt へ変換しない。prompt 本文で `/skill-name` と書けば headless でも invoke できる。詳細は `docs/poc-observations.md`。
+Skill 変換は共通化しない。Copilot は `Use the /name skill.`、Grok は `/name` 行。Cursor は Codex / `.codex/skills` を native discovery するため、`skills` 配列を prompt へ変換しない。prompt 本文で `/skill-name` と書けば headless でも invoke できる。詳細は `docs/poc-observations.md`。
 
 ## テスト
 
-CI / 通常テストは実 `copilot` / `grok` / `devin` / `cursor-agent` を呼ばない（`dotnet --version` の収集確認だけ実プロセスを使う）。
+CI / 通常テストは実 `copilot` / `grok` / `cursor-agent` を呼ばない（`dotnet --version` の収集確認だけ実プロセスを使う）。
 Windows の `.cmd` / `.bat` は `ProcessStartInfo.Arguments` の raw command string として `cmd.exe /d /v:off /s /c` で起動する。`.NET` の `ArgumentList` は使わず、引用符は二重化し、`%` はプロセス限定環境変数の置換結果で保護してから cmd に渡す。`&`、`|`、`^`、空白、日本語、`!`、括弧、`<`、`>`、引用符を含む値は実プロセス fixture で検証している。NUL と CR/LF は cmd のバッチ引数 ABI で忠実かつ安全に表現できないため、`.cmd` / `.bat` 経路では実行前エラーになる。Copilotの複数行promptは公式stdin経路で渡し、`--prompt`と併用しない。stdin指定時はUTF-8 BOMなしで本文をそのままwrite/flush/closeし、launch logには本文を記録せず、指定有無とbyte countだけを記録する。通常の`.ps1`は汎用`pwsh.exe -NoLogo -NoProfile -NonInteractive -File <script>`の`ArgumentList`、通常の`.exe`は従来どおり`ArgumentList`を使う。stdout は UTF-8 JSONL のまま、Windows の `.cmd` / `.bat` wrapper の stderr は OS の OEM encoding、wrapperなし（native executable と PowerShell host）は UTF-8として厳密にデコードする。選択した encoding で解釈できなければ実行を失敗させる。
 
 ```powershell
@@ -306,14 +297,6 @@ dotnet run --file tests/CodexAgentFacade.Tests.cs
 ```powershell
 dotnet run --file src/PocSmoke.cs
 ```
-
-実 Streamable HTTP MCP 経路の Devin スモーク（実 `devin` を呼ぶ。通常テストでは実行しない）:
-
-```powershell
-dotnet run --file src/DevinMcpSmoke.cs
-```
-
-`DevinMcpSmoke.cs` は Facade を別プロセスで起動し、`ModelContextProtocol.Client` から `start_agent` / `get_agent_job` を呼ぶ。Free plan の quota を消費するため、人手で明示実行する。
 
 ### Cursor CLI の事前セットアップ
 
@@ -357,7 +340,7 @@ Cursor 固有の対応:
 
 `--force` は Copilot の `--allow-all` や Grok の `--always-approve` と完全同義ではない。Cursor の permission model では「明示 deny 以外を通す」フラグであり、MCP server 承認（`--approve-mcps`）や sandbox は別スイッチである。Facade はそれらを勝手に付けない。
 
-`--trust` は `auto_approve` とは独立で、headless 実行が未信頼 workspace の確認で止まらないように常に付ける。Devin の `--respect-workspace-trust false` と同じ役割。
+`--trust` は `auto_approve` とは独立で、headless 実行が未信頼 workspace の確認で止まらないように常に付ける。
 
 print モードでは公式ドキュメント上 `thinking` event は出ない。出た場合は run log の thought として残し、`outputText` には混ぜない。最終応答は `type=result` の `result` を優先する。このフィールドは assistant 本文の連結であり、tool 前の中間 assistant 文も含む。`request_id` は session ID ではない。
 
@@ -369,7 +352,7 @@ PoC の成果物は実装に加え、成立 / 不可の記録である。`docs/p
 
 - `CODEX_AGENT_FACADE_TOKEN` をユーザー環境に設定し、Facade プロセスを事前起動する（Windows では Task Scheduler から `CodexAgentFacade.exe` を直接起動してよい）
 - 常駐 exe を直接起動したときコンソールウィンドウが出ないことの確認（WinExe。自動テストでは検証しない）
-- GitHub Copilot CLI と Grok Build CLI、Devin CLI、Cursor CLI へのログイン
+- GitHub Copilot CLI と Grok Build CLI、Cursor CLI へのログイン
 - Codex への MCP 登録（`url`、`bearer_token_env_var`、`enabled = true`、`direct_only_tool_namespaces`）
 - Facade 再起動後に自動 reconnect しない場合の、同一 thread 上での MCP refresh / reconnect
 - Desktop Codex App の composer / 完了通知 / 別 thread 並行（HTTP 移行後の start/get 実機確認は `docs/poc-observations.md`）

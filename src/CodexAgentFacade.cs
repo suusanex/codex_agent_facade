@@ -15,7 +15,6 @@
 #:include FacadeLogging.cs
 #:include GitHubCopilotDriver.cs
 #:include GrokBuildDriver.cs
-#:include DevinCliDriver.cs
 #:include CursorCliDriver.cs
 #:include AgentTools.cs
 #:include McpPublicContract.cs

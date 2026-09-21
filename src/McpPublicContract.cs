@@ -5,7 +5,7 @@
 public static class McpPublicContract
 {
     public const string ServerInstructions =
-        "Thin execution transport from Codex to GitHub Copilot, Grok Build, Devin CLI, or Cursor CLI. "
+        "Thin execution transport from Codex to GitHub Copilot, Grok Build, or Cursor CLI. "
         + "The caller is responsible for deciding whether and how to delegate work and for constructing a self-contained prompt for the selected external agent. "
         + "The Facade itself does not plan, split, or semantically rewrite the worker prompt supplied to start_agent. "
         + "Do not interpret this as requiring the caller to forward the original user prompt. "
@@ -27,7 +27,7 @@ public static class McpPublicContract
         + "Reuse session_id from a completed result to continue the same external agent session.";
 
     public const string StartAgentDescription =
-        "Start a coding agent job (github-copilot, grok-build, devin-cli, or cursor) and return a jobId immediately. "
+        "Start a coding agent job (github-copilot, grok-build, or cursor) and return a jobId immediately. "
         + "The caller constructs a self-contained worker prompt and a request_id for this distinct job. "
         + "Pass request_id, agent, prompt, and working_directory on every call. "
         + "Reuse that request_id only if this start_agent result is lost. "
@@ -76,6 +76,6 @@ public static class McpPublicContract
         + "Exact delivery of this string is not guaranteed; the selected driver may add agent-native skill directives when skills are supplied.";
 
     public const string SkillsDescription =
-        "Optional Codex-format skill names. GitHub Copilot, Grok Build, and Devin CLI translate them to agent-native prompt directives. "
+        "Optional Codex-format skill names. GitHub Copilot and Grok Build translate them to agent-native prompt directives. "
         + "Cursor currently does not translate this field; explicit Cursor skill invocation must be included in the worker prompt.";
 }

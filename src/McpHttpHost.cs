@@ -107,7 +107,6 @@ public static class McpHttpHost
         builder.Services.AddSingleton<IAgentRunLogFactory>(options.RunLogFactory ?? new AgentRunLogFactory());
         builder.Services.AddSingleton<GitHubCopilotDriver>();
         builder.Services.AddSingleton<GrokBuildDriver>();
-        builder.Services.AddSingleton<DevinCliDriver>();
         builder.Services.AddSingleton<CursorCliDriver>();
         builder.Services.AddSingleton<AgentFacade>();
         builder.Services.AddSingleton(sp => new AgentJobService(

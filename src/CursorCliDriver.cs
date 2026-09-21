@@ -112,7 +112,7 @@ public sealed class CursorCliDriver
     /// <summary>
     /// Cursor CLI 2.x（実機 2026.09.02-c22c1a3）の headless 引数。
     /// <c>-p/--print</c> が非対話。<c>--output-format stream-json</c> が NDJSON。
-    /// <c>--trust</c> は workspace 信頼ダイアログ回避のため常に付ける（Devin の respect-workspace-trust に相当）。
+    /// <c>--trust</c> は workspace 信頼ダイアログ回避のため常に付ける。
     /// <c>--force</c> だけが <c>auto_approve</c> に対応する。Skill は prompt 変換しない。
     /// </summary>
     internal static List<string> BuildArguments(AgentRunRequest request)

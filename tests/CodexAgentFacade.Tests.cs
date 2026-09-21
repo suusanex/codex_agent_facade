@@ -16,7 +16,6 @@
 #:include ../src/FacadeLogging.cs
 #:include ../src/GitHubCopilotDriver.cs
 #:include ../src/GrokBuildDriver.cs
-#:include ../src/DevinCliDriver.cs
 #:include ../src/CursorCliDriver.cs
 #:include ../src/AgentTools.cs
 #:include ../src/McpPublicContract.cs
@@ -154,7 +153,8 @@ public class AgentFacadeTests
             onStdoutLine: null,
             CancellationToken.None));
         Assert.Contains("Unknown agent", ex.Message, StringComparison.Ordinal);
-        Assert.Contains(AgentFacade.DevinCliAgent, ex.Message, StringComparison.Ordinal);
+        Assert.Contains(AgentFacade.GitHubCopilotAgent, ex.Message, StringComparison.Ordinal);
+        Assert.Contains(AgentFacade.GrokBuildAgent, ex.Message, StringComparison.Ordinal);
         Assert.Contains(AgentFacade.CursorAgent, ex.Message, StringComparison.Ordinal);
     }
 
@@ -217,23 +217,6 @@ public class AgentFacadeTests
     }
 
     [Fact]
-    public async Task RoutesDevinCli()
-    {
-        var facade = CreateFacade(out var runner);
-        runner.Result = new ProcessRunResult(0, "pong", "");
-        var result = await facade.RunAsync(
-            new AgentRunRequest(AgentFacade.DevinCliAgent, "hello", Path.GetTempPath(), null, null),
-            onStdoutLine: null,
-            CancellationToken.None);
-        Assert.Equal("devin", runner.LastRequest!.FileName);
-        Assert.Equal(AgentFacade.DevinCliAgent, result.Agent);
-        Assert.Equal("pong", result.OutputText);
-        Assert.False(string.IsNullOrWhiteSpace(result.RunId));
-        Assert.True(File.Exists(result.EventsLogPath));
-        Assert.True(File.Exists(result.TextLogPath));
-    }
-
-    [Fact]
     public async Task RoutesCursor()
     {
         var facade = CreateFacade(out var runner);
@@ -270,7 +253,6 @@ public class AgentFacadeTests
         return new AgentFacade(
             new GitHubCopilotDriver(runner),
             new GrokBuildDriver(runner),
-            new DevinCliDriver(runner),
             new CursorCliDriver(runner),
             factory);
     }
@@ -1295,231 +1277,6 @@ public class GrokBuildDriverTests
     }
 }
 
-public class DevinCliDriverTests
-{
-    [Fact]
-    public void BuildArgumentsIncludeNonInteractiveFlags()
-    {
-        var args = DevinCliDriver.BuildArguments(
-            new AgentRunRequest(AgentFacade.DevinCliAgent, "fix the bug", @"C:\repo", null, null));
-        Assert.Equal(
-            [
-                "--respect-workspace-trust",
-                "false",
-                "--permission-mode",
-                "dangerous",
-                "--print",
-                "--",
-                "fix the bug",
-            ],
-            args);
-    }
-
-    [Fact]
-    public void BuildArgumentsOmitsPermissionModeWhenAutoApproveFalse()
-    {
-        var args = DevinCliDriver.BuildArguments(
-            new AgentRunRequest(AgentFacade.DevinCliAgent, "ask", @"C:\repo", null, null, AutoApprove: false));
-        Assert.Equal(
-            ["--respect-workspace-trust", "false", "--print", "--", "ask"],
-            args);
-        Assert.DoesNotContain("--permission-mode", args);
-        Assert.DoesNotContain("dangerous", args);
-        Assert.DoesNotContain("--continue", args);
-    }
-
-    [Fact]
-    public void BuildArgumentsResumeAndSkills()
-    {
-        var args = DevinCliDriver.BuildArguments(
-            new AgentRunRequest(
-                AgentFacade.DevinCliAgent,
-                "continue",
-                @"C:\repo",
-                "brisk-otter",
-                ["$dotnet-file-based-apps", "review"]));
-        Assert.Contains("--resume", args);
-        Assert.Contains("brisk-otter", args);
-        Assert.DoesNotContain("--continue", args);
-        var prompt = args[^1];
-        Assert.Equal("/dotnet-file-based-apps\n/review\ncontinue", prompt);
-        Assert.Equal("--print", args[^3]);
-        Assert.Equal("--", args[^2]);
-    }
-
-    [Fact]
-    public async Task ParsesPlainTextStdout()
-    {
-        var runner = new RecordingProcessRunner
-        {
-            Result = new ProcessRunResult(0, "pong\n", ""),
-        };
-        var result = await RunAsync(runner);
-        Assert.Equal("pong", result.OutputText);
-        Assert.Equal(string.Empty, result.SessionId);
-        Assert.Equal(0, result.ExitCode);
-        Assert.Equal("devin", runner.LastRequest!.FileName);
-        Assert.Equal(Path.GetTempPath(), runner.LastRequest.WorkingDirectory);
-    }
-
-    [Fact]
-    public void LooksLikeJsonObjectLineRequiresLeadingBrace()
-    {
-        Assert.False(DevinStreamAccumulator.LooksLikeJsonObjectLine("pong"));
-        Assert.False(DevinStreamAccumulator.LooksLikeJsonObjectLine("[1,2]"));
-        Assert.False(DevinStreamAccumulator.LooksLikeJsonObjectLine("  [1,2]"));
-        Assert.True(DevinStreamAccumulator.LooksLikeJsonObjectLine("""{"type":"assistant"}"""));
-        Assert.True(DevinStreamAccumulator.LooksLikeJsonObjectLine("  {\"type\":\"assistant\"}"));
-        Assert.True(DevinStreamAccumulator.LooksLikeJsonObjectLine("{oops"));
-    }
-
-    [Fact]
-    public async Task MultilinePlainTextDoesNotRequireJson()
-    {
-        var runner = new RecordingProcessRunner
-        {
-            Result = new ProcessRunResult(
-                0,
-                "I'll create the DEVIN_SMOKE.txt file.\nDone. Created DEVIN_SMOKE.txt.",
-                ""),
-        };
-        await using var log = TestRunLogs.CreateLog();
-        var result = await new DevinCliDriver(runner).RunAsync(
-            new AgentRunRequest(AgentFacade.DevinCliAgent, "go", Path.GetTempPath(), null, null),
-            log,
-            onStdoutLine: null,
-            CancellationToken.None);
-        var events = TestRunLogs.ReadShared(result.EventsLogPath);
-        Assert.Equal(
-            "I'll create the DEVIN_SMOKE.txt file.\nDone. Created DEVIN_SMOKE.txt.",
-            result.OutputText);
-        Assert.Contains("\"source\":\"process\"", events, StringComparison.Ordinal);
-        Assert.Contains("\"type\":\"stdout\"", events, StringComparison.Ordinal);
-        Assert.DoesNotContain("\"source\":\"agent\"", events, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task ParsesJsonSessionAndText()
-    {
-        var runner = new RecordingProcessRunner
-        {
-            Result = new ProcessRunResult(
-                0,
-                """
-                {"type":"assistant","text":"pong","sessionId":"brisk-otter"}
-                """,
-                ""),
-        };
-        var result = await RunAsync(runner);
-        Assert.Equal("pong", result.OutputText);
-        Assert.Equal("brisk-otter", result.SessionId);
-    }
-
-    [Fact]
-    public async Task PrefersJsonAssistantTextOverPlainProgressLines()
-    {
-        var runner = new RecordingProcessRunner
-        {
-            Result = new ProcessRunResult(
-                0,
-                """
-                starting
-                {"type":"assistant","text":"pong"}
-                """,
-                ""),
-        };
-        var result = await RunAsync(runner);
-        Assert.Equal("pong", result.OutputText);
-    }
-
-    [Fact]
-    public async Task DoesNotTreatArbitraryUuidAsSessionId()
-    {
-        var runner = new RecordingProcessRunner
-        {
-            Result = new ProcessRunResult(
-                0,
-                "see 99999999-9999-9999-9999-999999999999",
-                ""),
-        };
-        var result = await RunAsync(runner);
-        Assert.Equal(string.Empty, result.SessionId);
-        Assert.Contains("99999999-9999-9999-9999-999999999999", result.OutputText, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task NonZeroExitThrows()
-    {
-        var runner = new RecordingProcessRunner
-        {
-            Result = new ProcessRunResult(2, "out", "err"),
-        };
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => RunAsync(runner));
-        Assert.Contains("exited with code 2", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("err", ex.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task EmptyStdoutThrows()
-    {
-        var runner = new RecordingProcessRunner
-        {
-            Result = new ProcessRunResult(0, "  ", ""),
-        };
-        await Assert.ThrowsAsync<InvalidOperationException>(() => RunAsync(runner));
-    }
-
-    [Fact]
-    public async Task JsonWithoutAssistantTextThrows()
-    {
-        var runner = new RecordingProcessRunner
-        {
-            Result = new ProcessRunResult(
-                0,
-                """{"type":"session","sessionId":"brisk-otter"}""",
-                ""),
-        };
-        await Assert.ThrowsAsync<InvalidOperationException>(() => RunAsync(runner));
-    }
-
-    [Fact]
-    public async Task StreamsJsonEventsToRunLog()
-    {
-        var runner = new RecordingProcessRunner
-        {
-            Result = new ProcessRunResult(
-                0,
-                """
-                {"type":"assistant","text":"pong"}
-                {"type":"session","sessionId":"brisk-otter"}
-                """,
-                ""),
-        };
-        await using var log = TestRunLogs.CreateLog();
-        var result = await new DevinCliDriver(runner).RunAsync(
-            new AgentRunRequest(AgentFacade.DevinCliAgent, "go", Path.GetTempPath(), null, null),
-            log,
-            onStdoutLine: null,
-            CancellationToken.None);
-        var events = TestRunLogs.ReadShared(result.EventsLogPath);
-        var text = TestRunLogs.ReadShared(result.TextLogPath);
-        Assert.Contains("\"type\":\"assistant\"", events, StringComparison.Ordinal);
-        Assert.Contains("assistant: pong", text, StringComparison.Ordinal);
-        Assert.Equal("pong", result.OutputText);
-        Assert.Equal("brisk-otter", result.SessionId);
-    }
-
-    private static async Task<AgentRunResult> RunAsync(RecordingProcessRunner runner)
-    {
-        await using var log = TestRunLogs.CreateLog();
-        return await new DevinCliDriver(runner).RunAsync(
-            new AgentRunRequest(AgentFacade.DevinCliAgent, "go", Path.GetTempPath(), null, null),
-            log,
-            onStdoutLine: null,
-            CancellationToken.None);
-    }
-}
-
 public class CursorCliDriverTests
 {
     [Fact]
@@ -1971,21 +1728,10 @@ public class SkillConversionTests
     }
 
     [Fact]
-    public void DevinConvertsCodexSkillPrefixToSlash()
-    {
-        Assert.Equal("body", DevinCliDriver.ApplyDevinSkills("body", null));
-        Assert.Equal("body", DevinCliDriver.ApplyDevinSkills("body", []));
-        Assert.Equal("/dotnet-file-based-apps", DevinCliDriver.ToSlashInvocation("$dotnet-file-based-apps"));
-        Assert.Equal("/review", DevinCliDriver.ToSlashInvocation("/review"));
-        Assert.Equal("/review\nbody", DevinCliDriver.ApplyDevinSkills("body", ["review"]));
-    }
-
-    [Fact]
     public void EmptySkillNameThrowsOnEachDriver()
     {
         Assert.Throws<ArgumentException>(() => GitHubCopilotDriver.ToSlashName("$"));
         Assert.Throws<ArgumentException>(() => GrokBuildDriver.ToSlashInvocation("$"));
-        Assert.Throws<ArgumentException>(() => DevinCliDriver.ToSlashInvocation("$"));
     }
 }
 
@@ -2000,7 +1746,6 @@ public class FacadeDelegationSkillContractTests
     [
         "github-copilot",
         "grok-build",
-        "devin-cli",
         "cursor",
     ];
 
@@ -2008,7 +1753,6 @@ public class FacadeDelegationSkillContractTests
     [
         ("github-copilot", "Copilot session"),
         ("grok-build", "Grok session"),
-        ("devin-cli", "Devin session"),
         ("cursor", "Cursor session"),
     ];
 
@@ -3956,7 +3700,7 @@ public class McpPublicContractTests
         Assert.Contains("Facade 自身は planner や orchestrator にならない", readme, StringComparison.Ordinal);
         Assert.Contains("task payload を再解釈しない", readme, StringComparison.Ordinal);
         Assert.Contains("Cursor は現在このフィールドを変換しない", readme, StringComparison.Ordinal);
-        Assert.Contains("GitHub Copilot、Grok Build、Devin CLI は agent 固有の prompt 指示へ変換する", readme, StringComparison.Ordinal);
+        Assert.Contains("GitHub Copilot と Grok Build は agent 固有の prompt 指示へ変換する", readme, StringComparison.Ordinal);
         Assert.Contains("`wait_agent_job`", readme, StringComparison.Ordinal);
         Assert.Contains("通常の完了待ちは `wait_agent_job(job_id)`", readme, StringComparison.Ordinal);
         Assert.Contains("理由がある場合だけ指定する", readme, StringComparison.Ordinal);
@@ -4076,18 +3820,12 @@ public class McpPublicContractTests
         Assert.Equal("/review\n" + task, grokPrompt);
         Assert.EndsWith(task, grokPrompt, StringComparison.Ordinal);
 
-        session.Runner.Result = DevinStdout();
-        await StartAndWaitAsync(client, "req-skill-devin", AgentFacade.DevinCliAgent, task, skills);
-        var devinPrompt = session.Runner.LastRequest!.Arguments[^1];
-        Assert.Equal("/review\n" + task, devinPrompt);
-        Assert.EndsWith(task, devinPrompt, StringComparison.Ordinal);
-
         session.Runner.Result = CursorStdout();
         await StartAndWaitAsync(client, "req-skill-cursor", AgentFacade.CursorAgent, task, skills);
         Assert.Equal(task, session.Runner.LastRequest!.Arguments[^1]);
         Assert.DoesNotContain("/review", session.Runner.LastRequest.Arguments, StringComparer.Ordinal);
         Assert.DoesNotContain("Use the /review skill.", session.Runner.LastRequest.Arguments, StringComparer.Ordinal);
-        Assert.Equal(4, session.Runner.CallCount);
+        Assert.Equal(3, session.Runner.CallCount);
     }
 
     private static void AssertWorkerDelegationContract(string text)
@@ -4144,7 +3882,7 @@ public class McpPublicContractTests
 
     private static void AssertSkillsContract(string text)
     {
-        Assert.Contains("GitHub Copilot, Grok Build, and Devin CLI translate", text, StringComparison.Ordinal);
+        Assert.Contains("GitHub Copilot and Grok Build translate", text, StringComparison.Ordinal);
         Assert.Contains("Cursor currently does not translate this field", text, StringComparison.Ordinal);
         Assert.Contains("worker prompt", text, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("Each driver converts them to that agent's native invocation", text, StringComparison.Ordinal);
@@ -4242,11 +3980,6 @@ public class McpPublicContractTests
             {"type":"result","sessionId":"22222222-2222-2222-2222-222222222222","exitCode":0}
             """,
             "");
-    }
-
-    private static ProcessRunResult DevinStdout()
-    {
-        return new ProcessRunResult(0, """{"type":"assistant","text":"ok","sessionId":"brisk-otter"}""", "");
     }
 
     private static ProcessRunResult CursorStdout()
