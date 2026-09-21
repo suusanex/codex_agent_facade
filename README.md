@@ -230,6 +230,18 @@ Get-Content -Wait "$env:USERPROFILE\.codex-agent-facade\runs\<runId>.log"
 
 `runId` は `jobId` と同じ値である。パスは completed の `result` に含まれる。heartbeat は 15 秒間隔で、経過時間・process 生存・最後の外部出力からの経過を記録する。出力が無いこととハングは同義ではない。認証情報・credential・token は書き込み前に `[REDACTED]` へ置換する。起動時には PATH 解決後の実行ファイル、wrapper 種別、host / wrapper switch と論理引数を記録する。
 
+## 親エージェント用 Skill のグローバル導入
+
+Codex が計画・分割・レビュー・受入を担当し、外部 agent へ実作業を委譲する場合は、親用 Skill をユーザースコープへ導入する。
+
+```powershell
+apm install -g suusanex/codex_agent_facade/apm-packages/external-agent-orchestration --target codex,agent-skills
+```
+
+Codex で `$external-agent-orchestration` と「このスレッドでは github-copilot へ委譲してください」を指定する。Cursor なら委譲先を `cursor` にする。モデルは変更しない。MCP 接続は別途必要である。
+
+既存の中継用 Skill とは責任が異なるため、同じ作業に重ねて適用しない。導入・更新・使い分けは [親用 Skill の README](apm-packages/external-agent-orchestration/README.md) を参照。
+
 ## 編集対象リポジトリへの Skill 導入
 
 Skill は **編集する work repository** の root で APM から入れる。この Facade リポジトリへ入れる必要はない。MCP server は APM では入らない。

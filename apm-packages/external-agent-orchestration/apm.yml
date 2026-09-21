@@ -1,0 +1,11 @@
+name: external-agent-orchestration
+version: 0.1.0
+description: Codex が要件理解・設計判断・作業分解・レビュー・受入を担当し、Codex Agent Facade 経由で外部エージェントへ実作業を委譲する親エージェント用 Skill。
+type: hybrid
+targets:
+  - codex
+  - agent-skills
+includes: auto
+
+dependencies:
+  apm: []
