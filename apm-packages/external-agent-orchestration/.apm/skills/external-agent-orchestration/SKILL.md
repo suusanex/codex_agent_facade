@@ -1,6 +1,7 @@
 ---
 name: external-agent-orchestration
 description: codex_agent_facade経由で外部コーディングエージェントを使い、親は要件理解・設計判断・作業分解・レビュー・受入を担当する。AstraやSolを親としてCopilotやCursor等へ実作業を委譲する依頼に使う。本文をそのまま転送するだけの中継用途や、通常の単独実装には使わない。
+user-invocable: true
 ---
 
 # 外部エージェントの統括
