@@ -21,7 +21,7 @@ public sealed class AgentTools
     [McpServerTool(Name = "start_agent"), Description(McpPublicContract.StartAgentDescription)]
     public string StartAgent(
         [Description(McpPublicContract.RequestIdDescription)] string request_id,
-        [Description("Target agent. github-copilot, grok-build, devin-cli, or cursor.")] string agent,
+        [Description("Target agent. github-copilot, grok-build, or cursor.")] string agent,
         [Description(McpPublicContract.PromptDescription)] string prompt,
         [Description(McpPublicContract.WorkingDirectoryDescription)] string working_directory,
         [Description("Existing external agent session id. Omit to start a new session.")] string? session_id = null,
