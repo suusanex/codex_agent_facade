@@ -1822,6 +1822,26 @@ public class FacadeDelegationSkillContractTests
     }
 
     [Fact]
+    public void ExternalAgentOrchestrationSkillDefinesParentContract()
+    {
+        var path = EnumerateSkillFiles(LocateRepoRoot())
+            .Single(path => path.Contains("external-agent-orchestration", StringComparison.Ordinal));
+        var text = File.ReadAllText(path);
+        var skill = ParseSkill(path, text);
+        var frontmatterEnd = text.IndexOf("\n---", StringComparison.Ordinal);
+        var frontmatter = text[..frontmatterEnd];
+
+        Assert.Equal("external-agent-orchestration", skill.Name);
+        Assert.Equal("true", ReadFrontmatterValue(frontmatter, "user-invocable"));
+        Assert.False(IsRelayOnlyFacadeDelegationSkill(text));
+        Assert.Contains("親は目的・制約・受入条件の理解", text, StringComparison.Ordinal);
+        Assert.Contains("成果の統合判断、レビュー、受入", text, StringComparison.Ordinal);
+        Assert.Contains("修正可能な不足は、根拠・期待結果・修正範囲を添えてworkerへ戻す", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Codex 自身は対象作業を実行しない", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("薄い UI shell / relay", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void FacadeDelegationSkillsShareRelayOnlyContract()
     {
         var skills = LoadFacadeDelegationSkills();
@@ -1896,7 +1916,7 @@ public class FacadeDelegationSkillContractTests
         foreach (var path in EnumerateSkillFiles(LocateRepoRoot()))
         {
             var text = File.ReadAllText(path);
-            if (IsFacadeDelegationSkill(text))
+            if (IsRelayOnlyFacadeDelegationSkill(text))
             {
                 continue;
             }
@@ -2072,7 +2092,7 @@ public class FacadeDelegationSkillContractTests
         foreach (var path in EnumerateSkillFiles(LocateRepoRoot()))
         {
             var text = File.ReadAllText(path);
-            if (!IsFacadeDelegationSkill(text))
+            if (!IsRelayOnlyFacadeDelegationSkill(text))
             {
                 continue;
             }
@@ -2083,11 +2103,11 @@ public class FacadeDelegationSkillContractTests
         return skills;
     }
 
-    private static bool IsFacadeDelegationSkill(string text)
+    private static bool IsRelayOnlyFacadeDelegationSkill(string text)
     {
-        return text.Contains("codex_agent_facade", StringComparison.Ordinal)
-            && text.Contains("start_agent", StringComparison.Ordinal)
-            && text.Contains("get_agent_job", StringComparison.Ordinal);
+        return text.Contains("Codex 自身は対象作業を実行しない。", StringComparison.Ordinal)
+            && text.Contains("薄い UI shell / relay", StringComparison.Ordinal)
+            && text.Contains("外部 agent に渡す作業 payload", StringComparison.Ordinal);
     }
 
     private static FacadeDelegationSkillFile ParseSkill(string path, string text)
