@@ -29,7 +29,8 @@ public sealed class GitHubCopilotDriver
             Skills: request.Skills,
             Prompt: prompt,
             FileName: "copilot",
-            Arguments: arguments));
+            Arguments: arguments,
+            Model: request.Model));
 
         var accumulator = new GitHubCopilotStreamAccumulator(runLog);
         ProcessRunResult processResult;
@@ -118,6 +119,8 @@ public sealed class GitHubCopilotDriver
             arguments.Add("--allow-all");
         }
 
+        AppendModelArgument(arguments, request.Model);
+
         if (!string.IsNullOrWhiteSpace(request.SessionId))
         {
             arguments.Add("--resume");
@@ -125,6 +128,17 @@ public sealed class GitHubCopilotDriver
         }
 
         return arguments;
+    }
+
+    private static void AppendModelArgument(List<string> arguments, string? model)
+    {
+        if (string.IsNullOrWhiteSpace(model))
+        {
+            return;
+        }
+
+        arguments.Add("--model");
+        arguments.Add(model);
     }
 
     /// <summary>

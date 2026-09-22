@@ -34,7 +34,8 @@ public sealed class CursorCliDriver
             Skills: request.Skills,
             Prompt: request.Prompt,
             FileName: FileName,
-            Arguments: arguments));
+            Arguments: arguments,
+            Model: request.Model));
 
         var accumulator = new CursorStreamAccumulator(runLog);
         ProcessRunResult processResult;
@@ -114,6 +115,7 @@ public sealed class CursorCliDriver
     /// <c>-p/--print</c> が非対話。<c>--output-format stream-json</c> が NDJSON。
     /// <c>--trust</c> は workspace 信頼ダイアログ回避のため常に付ける。
     /// <c>--force</c> だけが <c>auto_approve</c> に対応する。Skill は prompt 変換しない。
+    /// <c>--model</c> は空白以外の <c>Model</c> のときだけ、caller の文字列のまま付ける。
     /// </summary>
     internal static List<string> BuildArguments(AgentRunRequest request)
     {
@@ -132,6 +134,8 @@ public sealed class CursorCliDriver
             arguments.Add("--force");
         }
 
+        AppendModelArgument(arguments, request.Model);
+
         if (!string.IsNullOrWhiteSpace(request.SessionId))
         {
             arguments.Add("--resume");
@@ -140,6 +144,17 @@ public sealed class CursorCliDriver
 
         arguments.Add(request.Prompt);
         return arguments;
+    }
+
+    private static void AppendModelArgument(List<string> arguments, string? model)
+    {
+        if (string.IsNullOrWhiteSpace(model))
+        {
+            return;
+        }
+
+        arguments.Add("--model");
+        arguments.Add(model);
     }
 }
 

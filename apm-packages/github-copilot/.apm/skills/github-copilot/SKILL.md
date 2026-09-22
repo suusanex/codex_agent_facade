@@ -18,7 +18,16 @@ MCP server はこの Skill の一部ではない。ユーザーの Codex MCP 設
 
 ## ユーザー本文の意味
 
-この Skill より後のユーザー本文は、外部 agent に渡す作業 payload である。Codex 自身への作業実行指示として扱わない。`prompt` としてそのまま外部 agent に渡す。Codex は補足、要約、再構成、再計画、分割をしない。
+この Skill より後のユーザー本文は、外部 agent に渡す作業 payload である。Codex 自身への作業実行指示として扱わない。作業本文は `prompt` としてそのまま外部 agent に渡す。Codex は補足、要約、再構成、再計画、分割をしない。
+
+実行オプションと作業 prompt は分ける。本文先頭の空行を除き、最初の行が開始フェンス（バッククォート3つの直後に `facade-options` とだけ書いた行）であるときだけ、その行から終了フェンス（バッククォート3つだけの行）までを実行オプションとして読む。終了フェンスの直後から末尾までが作業 prompt であり、その文字列は変更しない。実行オプションが無いときは、Skill より後の本文全体が作業 prompt であり、`model` は渡さない。
+
+実行オプションで有効な行は `model: <識別子>` の1行だけである。`<識別子>` は `model:` の直後から行末までで、前後の空白だけを除いた agent 固有のモデル識別子である。モデル名を別の名前へ変換しない。prompt 本文に現れたモデル名から起動用の `model` を推測しない。`model` が空、`model` が複数、未知のキー、またはフェンスが閉じていない場合は `start_agent` を呼ばず、その誤りを報告する。
+
+    ```facade-options
+    model: <model-id>
+    ```
+    <作業 prompt>
 
 ## request_id と session_id の lifetime
 
@@ -28,7 +37,7 @@ MCP server はこの Skill の一部ではない。ユーザーの Codex MCP 設
 
 `session_id` の lifetime は異なる。同じ Copilot session をユーザー turn をまたいで続けるときは、直前の completed `result.sessionId` を再利用する。`session_id` の継続は `request_id` の再利用理由にならない。
 
-`request_id` を再利用してよいのは Exact retry だけである。その再試行は `agent`, `prompt`, `working_directory`, `session_id`, `skills`, `auto_approve` を前回と完全一致させる。
+`request_id` を再利用してよいのは Exact retry だけである。その再試行は `agent`, `prompt`, `working_directory`, `session_id`, `skills`, `auto_approve`, `model` を前回と完全一致させる。
 
 ## start_agent は毎回 full request を再構成する
 
@@ -39,7 +48,7 @@ MCP server はこの Skill の一部ではない。ユーザーの Codex MCP 設
 - `prompt`
 - `working_directory`
 
-任意 field（`session_id`, `skills`, `auto_approve`）も、その turn で必要なら明示する。前回と同じ値だからという理由で required field を省略しない。特に `working_directory` は、同じ repository / worktree を継続している場合でも毎回現在の絶対パスを解決して渡す。前回値の暗黙継承はしない。
+任意 field（`session_id`, `skills`, `auto_approve`, `model`）も、その turn で必要なら明示する。前回と同じ値だからという理由で required field を省略しない。特に `working_directory` は、同じ repository / worktree を継続している場合でも毎回現在の絶対パスを解決して渡す。前回値の暗黙継承はしない。`model` も前回 turn から継承しない。この turn の実行オプションに無いときは渡さない。
 
 ## Codex が行ってよい処理
 
@@ -49,11 +58,12 @@ MCP server はこの Skill の一部ではない。ユーザーの Codex MCP 設
 2. この Skill の規約に従って `start_agent` の引数を、呼び出しごとに完全な RPC として機械的に構成する。
    - `request_id`: 1つの論理的な `start_agent` request / agent job の冪等キー
    - `agent`: `github-copilot`
-   - `prompt`: この Skill より後のユーザー本文。変更しない
+   - `prompt`: 実行オプションが無いときは、この Skill より後のユーザー本文全体。変更しない。実行オプションがあるときは、終了フェンスの直後から末尾までだけを渡す。実行オプションのブロックは `prompt` に含めない
    - `working_directory`: 今開いている Codex workspace / worktree の絶対パス（編集対象リポジトリ。Facade リポジトリではない）。同じ repository を継続していても毎回解決して渡す
    - `session_id`: 同じ Copilot session を続けるときは、この thread の直前の completed `result.sessionId`
    - `skills`: ユーザーが通し指定した Skill 名だけ。Codex 形式のまま渡す
    - `auto_approve`: その turn で必要な場合だけ明示する
+   - `model`: この turn の実行オプションに `model` があるときだけ、その識別子を渡す。無いときは引数を省略する。前回 turn のモデルや prompt 本文中のモデル名は使わない
 3. `start_agent` 直前の preflight を行う。required field が欠けている場合は呼ばない。
 4. `start_agent` を呼ぶ。
 5. 返された同じ `jobId` に対して、通常は `timeout_seconds` を指定せず `wait_agent_job(job_id)` を呼ぶ。診断・テスト・上位環境の明示的な制約など、既定の300秒を上書きする理由がある場合だけ指定する。
@@ -70,10 +80,11 @@ MCP server はこの Skill の一部ではない。ユーザーの Codex MCP 設
 
 - `request_id` がある。この distinct payload 用の新しい UUID である。ただし Exact retry のときだけ前回と同じ値
 - `agent` があり、この Skill の agent 名と一致する
-- `prompt` があり、今回の委譲 payload である
+- `prompt` があり、実行オプションを除いた今回の作業 payload である
 - `working_directory` があり、現在の workspace / worktree の絶対パスである
 - Follow-up continuation なら `session_id` は直前の completed `result.sessionId` と一致する
-- Exact retry なら全ての `start_agent` 引数が前回の試行と同一である
+- この turn の実行オプションに `model` があるなら、その識別子を `model` に渡す。無いなら `model` を渡さない
+- Exact retry なら `model` を含む全ての `start_agent` 引数が前回の試行と同一である
 
 required field が欠けている場合は `start_agent` を呼ばず、その field を補ってから呼ぶ。
 
@@ -107,6 +118,7 @@ required field が欠けている場合は `start_agent` を呼ばず、その f
 - `agent` を再指定する
 - `working_directory` を現在の絶対パスとして再指定する。前回と同じ workspace でも省略しない
 - 前回 completed result の `sessionId` を `session_id` に指定する
+- この turn の実行オプションに `model` があるときだけ `model` を指定する。前回 session のモデルは継承しない
 - その他、その turn に必要な引数を完全に再構成する
 
 同じ Codex thread でも、同じ Copilot session でも、新しい `request_id` を使う。前回 completed job の `request_id` は使わない。

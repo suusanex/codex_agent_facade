@@ -5,6 +5,8 @@ using System.Text.RegularExpressions;
 /// <summary>
 /// Codex から受け取る構造化入力。caller が渡した worker task payload は再解釈しない。
 /// skills 等の structured option は、対応 Driver が agent 固有形式へ変換する場合がある。
+/// Model は agent 固有のモデル識別子である。null、空、空白のみは未指定で、Driver はモデル引数を付けない。
+/// Facade はモデル名の対応表、自動選択、別モデルへの置換を持たない。
 /// </summary>
 public sealed record AgentRunRequest(
     string Agent,
@@ -12,7 +14,8 @@ public sealed record AgentRunRequest(
     string WorkingDirectory,
     string? SessionId,
     IReadOnlyList<string>? Skills,
-    bool AutoApprove = true);
+    bool AutoApprove = true,
+    string? Model = null);
 
 /// <summary>
 /// CLI から得た結果。独自セマンティクスは持たせず、Driver が読めた範囲だけを返す。
@@ -131,6 +134,13 @@ public sealed class AgentFacade
         if (string.IsNullOrWhiteSpace(request.WorkingDirectory))
         {
             throw new ArgumentException("working_directory is required.");
+        }
+
+        // fingerprint は行単位である。改行を含む model は別フィールドと衝突し、CLI の1引数としても渡せない。
+        if (request.Model is not null
+            && (request.Model.Contains('\r') || request.Model.Contains('\n')))
+        {
+            throw new ArgumentException("model must not contain line breaks.");
         }
     }
 }

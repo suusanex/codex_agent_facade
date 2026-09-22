@@ -397,3 +397,23 @@ cursor-agent --print --output-format stream-json --trust --workspace <dir> [--fo
 - `outputText` は `type=result` の `result` を優先する。無いときだけ assistant 本文へ落とす
 - キャンセルは既存 `ProcessRunner` / Job Object。Driver 内に新しい process lifecycle は無い
 
+## モデル指定（issue #24 第1段階、2026-09-22）
+
+Cursor CLI `2026.09.18-9a7762b`。`CursorCliDriver` が `ProcessRunner` 経由で `cursor-agent.ps1` を起動した。MCP と relay SKILL の実呼び出しは行っていない。GitHub Copilot と Grok Build の実 CLI は起動していない。
+
+引数伝達と、CLI が報告した選択モデルは別の証拠である。
+
+引数伝達:
+
+- 要求した識別子は `composer-2.5-fast`
+- 新規実行の launch `processArguments` に `--model` と `composer-2.5-fast` が、作業 prompt とは別の引数として入った。run log は `C:\WindowsTemp\caf-cursor-model-log-xgmnz45y.nvq\20260922T014719Z-d24b0c7d.events.jsonl`
+- 同じ session `84ce74fb-6efc-4ad9-b103-2cc0cb399d37` の継続でも、`--model` `composer-2.5-fast` と `--resume` がその session id とともに入った。run log は `C:\WindowsTemp\caf-cursor-model-log-zgpgklhl.ncg\20260922T014750Z-bf89e3bd.events.jsonl`
+
+選択モデル:
+
+- どちらの実行でも stream-json の `type=system` `subtype=init` の `model` は `Composer 2.5 Fast` だった
+- これは表示名である。引数の識別子 `composer-2.5-fast` とは文字列が違う。`cursor-agent models` では `composer-2.5-fast - Composer 2.5 Fast` と並んでいた
+- 新規の `outputText` は `pong`、継続の `outputText` は `pingpong`。usage の token 数はモデル選択の証拠にしていない
+
+存在しないモデル `definitely-not-a-model` を同じ `--print` 経路で直接起動すると、CLI は exit 1 と `Cannot use this model` を返した。別モデルでの成功応答にはならなかった。この失敗確認は Facade の Driver 経由ではなく、CLI を直接起動した結果である。
+

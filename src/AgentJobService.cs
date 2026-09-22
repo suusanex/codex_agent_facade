@@ -424,6 +424,14 @@ public sealed class AgentJobService
             }
         }
 
+        // 未指定は何も足さない。モデル導入前に保存した request の fingerprint と一致させる。
+        // skill は末尾改行付きで連結する。model は改行で終わらない接尾辞にし、
+        // skill 名が model=... でも同一 request と誤認しない。model 自体の改行は Validate で拒否する。
+        if (!string.IsNullOrWhiteSpace(request.Model))
+        {
+            builder.Append('\u0001').Append("model=").Append(request.Model);
+        }
+
         return HashText(builder.ToString());
     }
 

@@ -11,6 +11,9 @@ public static class McpPublicContract
         + "Do not interpret this as requiring the caller to forward the original user prompt. "
         + "The caller may derive a narrower worker-specific prompt from its own instructions and context. "
         + "Caller-supplied structured options such as skills may be translated by the selected driver into that agent's native invocation form. "
+        + "Optional model is an agent-native model id supplied by the caller. "
+        + "When it is omitted, empty, or whitespace, the Facade does not pass a model argument and does not select, rename, or fall back to another model. "
+        + "Model names inside the worker prompt are not launch settings. "
         + "Call start_agent with request_id, agent, prompt, and working_directory. "
         + "Each start_agent call is a complete RPC; previous arguments are not retained. "
         + "Generate a new request_id for each distinct agent job. "
@@ -37,7 +40,10 @@ public static class McpPublicContract
         + "A lost response is recovered with the same request_id; do not start a new job for recovery. "
         + "Successful results expose outputKind as final_response or assistant_transcript; raw streams are not returned by MCP. "
         + "The Facade does not plan, split, or semantically rewrite the supplied worker task. "
-        + "Structured options such as skills may be translated by the selected driver.";
+        + "Structured options such as skills may be translated by the selected driver. "
+        + "Optional model is forwarded unchanged to the selected CLI when the caller sets it. "
+        + "When model is omitted, the Facade does not pass a model argument and does not choose another model. "
+        + "Model names inside the worker prompt are not launch settings.";
 
     public const string GetAgentJobDescription =
         "Get the current status or terminal result of a previously started agent job. "
@@ -73,9 +79,17 @@ public static class McpPublicContract
     public const string PromptDescription =
         "Self-contained worker prompt constructed by the caller. "
         + "The Facade does not reinterpret this task payload. It need not be the original user prompt. "
-        + "Exact delivery of this string is not guaranteed; the selected driver may add agent-native skill directives when skills are supplied.";
+        + "Exact delivery of this string is not guaranteed; the selected driver may add agent-native skill directives when skills are supplied. "
+        + "Model names written in this text are not launch settings; pass model separately to select one.";
 
     public const string SkillsDescription =
         "Optional Codex-format skill names. GitHub Copilot and Grok Build translate them to agent-native prompt directives. "
         + "Cursor currently does not translate this field; explicit Cursor skill invocation must be included in the worker prompt.";
+
+    public const string ModelDescription =
+        "Optional agent-native model id. When omitted, empty, or whitespace, the Facade does not pass a model argument and does not choose, rename, or fall back to another model. "
+        + "When set, the value is forwarded unchanged to the selected CLI as --model. "
+        + "Model names that appear only inside the worker prompt are not launch settings. "
+        + "A value containing a line break is rejected before launch. "
+        + "Pass the same value again on an exact retry. Continuing a session does not inherit a previous model.";
 }
