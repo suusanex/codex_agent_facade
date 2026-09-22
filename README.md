@@ -261,7 +261,7 @@ apm install "C:\path\to\codex_agent_facade\apm-packages\grok-build" --target cod
 apm install "C:\path\to\codex_agent_facade\apm-packages\cursor" --target codex,agent-skills
 ```
 
-展開先は `.agents/skills/github-copilot/`、`.agents/skills/grok-build/`、`.agents/skills/cursor/`。Codex 上では `$github-copilot` / `$grok-build` / `$cursor` で本文を外部 agent へ渡す。これらの Skill を指定した turn では、その Skill の契約どおり Codex 自身は対象作業を実行せず、Skill より後のユーザー本文を worker prompt として外部 agent へ委譲し、結果を中継する。モデルを起動時に指定するときは、作業本文の前に実行オプションを置く。先頭の空行を除いた最初の行が開始フェンス（バッククォート3つ + `facade-options`）のときだけ、閉じるフェンス（バッククォート3つだけの行）までを実行オプションとして読み、その直後からを作業 prompt として変更せず渡す。有効な行は `model: <識別子>` の1行だけである。実行オプションが無い本文はすべて作業 prompt であり、`model` は渡さない。prompt 本文に現れたモデル名から起動設定を推測しない。Skill 無しで `start_agent` / `wait_agent_job` を直接呼ぶ場合、呼び出し側は元の user prompt 全体を転送する必要はなく、限定した worker 専用 prompt を構成して渡してよい。モデルは `model` 引数で渡す。`get_agent_job` は明示照会・復旧・診断用である。
+展開先は `.agents/skills/github-copilot/`、`.agents/skills/grok-build/`、`.agents/skills/cursor/`。Codex 上では `$github-copilot` / `$grok-build` / `$cursor` で本文を外部 agent へ渡す。これらの Skill を指定した turn では、その Skill の契約どおり Codex 自身は対象作業を実行せず、Skill より後のユーザー本文を worker prompt として外部 agent へ委譲し、結果を中継する。モデルを起動時に指定するときは、作業本文の前に実行オプションを置く。先頭の空行を除いた最初の行が開始フェンス（バッククォート3つ + `facade-options`）のときだけ、閉じるフェンス（バッククォート3つだけの行）までを実行オプションとして読み、その直後からを作業 prompt として変更せず渡す。有効な行は `model: <識別子>` の1行だけである。実行オプションが無い本文はすべて作業 prompt であり、`model` は渡さない。prompt 本文に現れたモデル名から起動設定を推測しない。`model:` に指定する CLI 識別子の一覧（UI 表示名との対応を含む）は [Agent モデル識別子一覧](docs/agent-model-ids.md) を参照。Skill 無しで `start_agent` / `wait_agent_job` を直接呼ぶ場合、呼び出し側は元の user prompt 全体を転送する必要はなく、限定した worker 専用 prompt を構成して渡してよい。モデルは `model` 引数で渡す。`get_agent_job` は明示照会・復旧・診断用である。
 
 更新・削除:
 
