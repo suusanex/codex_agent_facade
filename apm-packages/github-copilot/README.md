@@ -30,7 +30,14 @@ Codex 上で対象リポジトリを開いた状態で、Skill を指定して�
 $github-copilot このリポジトリの README に使い方を追記して。
 ```
 
-Skill 無しで MCP tool `start_agent` / `wait_agent_job` を直接呼んでもよい。`get_agent_job` は明示照会・復旧・診断用である。
+モデルを指定するときは、作業本文の前に実行オプションを置く。先頭の空行を除いた最初の行が開始フェンス（バッククォート3つ + `facade-options`）のときだけ、閉じるフェンスまでを実行オプションとして読み、直後からを作業 prompt として変更せず渡す。有効な行は `model: <識別子>` の1行だけである。実行オプションが無い本文はすべて作業 prompt であり、本文中のモデル名は起動設定にしない。
+
+    ```facade-options
+    model: <model-id>
+    ```
+    このリポジトリの README に使い方を追記して。
+
+Skill 無しで MCP tool `start_agent` / `wait_agent_job` を直接呼んでもよい。その場合のモデル指定は `start_agent` の `model` 引数である。`get_agent_job` は明示照会・復旧・診断用である。
 
 ## Update and remove
 

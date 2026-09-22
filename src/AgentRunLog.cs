@@ -37,7 +37,8 @@ public sealed record AgentRunStartedInfo(
     IReadOnlyList<string>? Skills,
     string Prompt,
     string FileName,
-    IReadOnlyList<string> Arguments);
+    IReadOnlyList<string> Arguments,
+    string? Model = null);
 
 /// <summary>
 /// ユーザー領域へ run log を作る。テストではディレクトリと TimeProvider を注入する。
@@ -204,7 +205,8 @@ internal sealed class AgentRunLog : IAgentRunLog
                 info.Skills,
                 info.Prompt,
                 info.FileName,
-                info.Arguments),
+                info.Arguments,
+                info.Model),
             AgentJson.Options);
         var skills = info.Skills is null || info.Skills.Count == 0
             ? ""
@@ -214,6 +216,7 @@ internal sealed class AgentRunLog : IAgentRunLog
             + " sessionId=" + (info.SessionId ?? "")
             + " autoApprove=" + info.AutoApprove.ToString(CultureInfo.InvariantCulture)
             + " skills=" + skills
+            + " model=" + (info.Model ?? "")
             + " fileName=" + info.FileName
             + " prompt=" + info.Prompt;
         WriteEnvelope("facade", "started", data, human);
@@ -718,7 +721,8 @@ internal sealed class AgentRunLog : IAgentRunLog
         IReadOnlyList<string>? Skills,
         string Prompt,
         string FileName,
-        IReadOnlyList<string> Arguments);
+        IReadOnlyList<string> Arguments,
+        string? Model);
 
     private sealed record ProcessLinePayload(string Stream, string Line);
 

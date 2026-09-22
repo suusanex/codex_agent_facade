@@ -2,7 +2,7 @@
 
 Codex App から GitHub Copilot、Grok Build、Cursor CLI へ作業を中継する feasibility PoC。
 
-Facade 自身は planner や orchestrator にならない薄い execution transport である。呼び出し側（Codex の親エージェントなど）は作業の計画・分割・委譲方針を決め、自己完結した worker prompt を `start_agent` に渡せる。元の user prompt 全体を転送する必要はない。Facade はその worker task を計画・分割・意味的に書き換えない。caller が明示した `skills` などの structured option は、対応 Driver が agent 固有の呼び出し表現へ変換する場合がある。選択した agent の CLI へ変換して実行し、完了結果を返す。
+Facade 自身は planner や orchestrator にならない薄い execution transport である。呼び出し側（Codex の親エージェントなど）は作業の計画・分割・委譲方針を決め、自己完結した worker prompt を `start_agent` に渡せる。元の user prompt 全体を転送する必要はない。Facade はその worker task を計画・分割・意味的に書き換えない。caller が明示した `skills` などの structured option は、対応 Driver が agent 固有の呼び出し表現へ変換する場合がある。任意の `model` は agent 固有のモデル識別子として、指定されたときだけ各 CLI の `--model` へそのまま渡す。未指定時はモデル引数を付けず、モデル名の対応表・自動選択・別モデルへの fallback は行わない。選択した agent の CLI へ変換して実行し、完了結果を返す。
 
 ## 必要環境
 
@@ -142,6 +142,7 @@ distinct な agent job / distinct な `start_agent` ごとに、呼び出し側�
 | `session_id` | いいえ | 同一外部 session の継続。省略時は新規 |
 | `skills` | いいえ | Codex 形式の Skill 名（任意）。GitHub Copilot と Grok Build は agent 固有の prompt 指示へ変換する。Cursor は現在このフィールドを変換しない。Cursor で Skill を明示 invoke する場合は worker prompt 本文へ含める |
 | `auto_approve` | いいえ | 既定 true。各 CLI の non-interactive 承認フラグを付ける。質問待ちの観測では false |
+| `model` | いいえ | agent 固有のモデル識別子。指定時は各 CLI の `--model` へそのまま渡す。省略、空、空白のみではモデル引数を付けない。prompt 本文中のモデル名は起動設定にしない。改行を含む値は起動前エラー。session 継続時も前回のモデルは継承しない |
 
 戻り JSON:
 
@@ -260,7 +261,7 @@ apm install "C:\path\to\codex_agent_facade\apm-packages\grok-build" --target cod
 apm install "C:\path\to\codex_agent_facade\apm-packages\cursor" --target codex,agent-skills
 ```
 
-展開先は `.agents/skills/github-copilot/`、`.agents/skills/grok-build/`、`.agents/skills/cursor/`。Codex 上では `$github-copilot` / `$grok-build` / `$cursor` で本文を外部 agent へ渡す。これらの Skill を指定した turn では、その Skill の契約どおり Codex 自身は対象作業を実行せず、Skill より後のユーザー本文を worker prompt として外部 agent へ委譲し、結果を中継する。Skill 無しで `start_agent` / `wait_agent_job` を直接呼ぶ場合、呼び出し側は元の user prompt 全体を転送する必要はなく、限定した worker 専用 prompt を構成して渡してよい。`get_agent_job` は明示照会・復旧・診断用である。
+展開先は `.agents/skills/github-copilot/`、`.agents/skills/grok-build/`、`.agents/skills/cursor/`。Codex 上では `$github-copilot` / `$grok-build` / `$cursor` で本文を外部 agent へ渡す。これらの Skill を指定した turn では、その Skill の契約どおり Codex 自身は対象作業を実行せず、Skill より後のユーザー本文を worker prompt として外部 agent へ委譲し、結果を中継する。モデルを起動時に指定するときは、作業本文の前に実行オプションを置く。先頭の空行を除いた最初の行が開始フェンス（バッククォート3つ + `facade-options`）のときだけ、閉じるフェンス（バッククォート3つだけの行）までを実行オプションとして読み、その直後からを作業 prompt として変更せず渡す。有効な行は `model: <識別子>` の1行だけである。実行オプションが無い本文はすべて作業 prompt であり、`model` は渡さない。prompt 本文に現れたモデル名から起動設定を推測しない。Skill 無しで `start_agent` / `wait_agent_job` を直接呼ぶ場合、呼び出し側は元の user prompt 全体を転送する必要はなく、限定した worker 専用 prompt を構成して渡してよい。モデルは `model` 引数で渡す。`get_agent_job` は明示照会・復旧・診断用である。
 
 更新・削除:
 
@@ -276,19 +277,19 @@ apm uninstall cursor
 GitHub Copilot（プロセス cwd = `working_directory`）:
 
 ```text
-<UTF-8 prompt source> | copilot --output-format json [--allow-all] [--resume <session_id>]
+<UTF-8 prompt source> | copilot --output-format json [--allow-all] [--model <model>] [--resume <session_id>]
 ```
 
 Grok Build:
 
 ```text
-grok --no-auto-update -p <prompt> --cwd <working_directory> --output-format streaming-json [--always-approve] [--resume <session_id>]
+grok --no-auto-update -p <prompt> --cwd <working_directory> --output-format streaming-json [--always-approve] [--model <model>] [--resume <session_id>]
 ```
 
 Cursor CLI（プロセス cwd = `working_directory`。実行ファイル名は Unix では `cursor-agent`、Windows では `cursor-agent.ps1`）:
 
 ```text
-cursor-agent --print --output-format stream-json --trust --workspace <working_directory> [--force] [--resume <session_id>] <prompt>
+cursor-agent --print --output-format stream-json --trust --workspace <working_directory> [--force] [--model <model>] [--resume <session_id>] <prompt>
 ```
 
 `--allow-all` / `--always-approve` / `--force` は `auto_approve=true` のときだけ付ける。Copilot は全OSで PATH 上の `copilot` を選び、`--prompt` は使わず、Skill付き完全promptをUTF-8 stdinへ渡す。GitHub公式の [programmatic usage](https://docs.github.com/en/copilot/how-tos/copilot-cli/automate-copilot-cli/run-cli-programmatically) に従う。Windowsの`copilot.CMD`は汎用cmd経路でstdin handleをchildへ継承し、PATH上で`copilot.exe`が先に解決される環境では通常のnative経路を使う。npm shim内容やnpm loaderの解析は行わない。Cursor は PATH 上の `cursor-agent` を使う。同梱の `agent` は Grok Build の `agent` と衝突するため使わない。Windows では公式の `cursor-agent.ps1` を `pwsh -File` で起動する。`cursor-agent.cmd` は cmd が CR/LF を引数へ渡せないため使わない。
@@ -348,6 +349,7 @@ Cursor 固有の対応:
 | 新規 `sessionId` | stream-json の明示フィールド `session_id` だけを返す。`request_id` や任意 UUID は使わない |
 | `auto_approve=true` | `--force`（コマンド / ファイル変更の承認を省略。denied なものは通さない） |
 | `auto_approve=false` | `--force` を付けない。workspace 信頼ダイアログだけ `--trust` で避ける |
+| `model` | 空白以外のとき `--model <model>`。値は変換しない。未指定時は付けない |
 | Skills | 変換しない。Cursor は `.codex/skills` 等を native discovery する。明示 invoke は prompt の `/skill-name` |
 
 `--force` は Copilot の `--allow-all` や Grok の `--always-approve` と完全同義ではない。Cursor の permission model では「明示 deny 以外を通す」フラグであり、MCP server 承認（`--approve-mcps`）や sandbox は別スイッチである。Facade はそれらを勝手に付けない。

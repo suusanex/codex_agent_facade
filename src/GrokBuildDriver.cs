@@ -29,7 +29,8 @@ public sealed class GrokBuildDriver
             Skills: request.Skills,
             Prompt: prompt,
             FileName: "grok",
-            Arguments: arguments));
+            Arguments: arguments,
+            Model: request.Model));
 
         var accumulator = new GrokStreamAccumulator(runLog);
         ProcessRunResult processResult;
@@ -123,6 +124,8 @@ public sealed class GrokBuildDriver
             arguments.Add("--always-approve");
         }
 
+        AppendModelArgument(arguments, request.Model);
+
         if (!string.IsNullOrWhiteSpace(request.SessionId))
         {
             // --session-id は新規作成用。実機では既存 ID に対して "already in use" になるため継続は --resume。
@@ -131,6 +134,17 @@ public sealed class GrokBuildDriver
         }
 
         return arguments;
+    }
+
+    private static void AppendModelArgument(List<string> arguments, string? model)
+    {
+        if (string.IsNullOrWhiteSpace(model))
+        {
+            return;
+        }
+
+        arguments.Add("--model");
+        arguments.Add(model);
     }
 
     /// <summary>

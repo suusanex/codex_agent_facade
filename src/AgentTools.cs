@@ -26,7 +26,8 @@ public sealed class AgentTools
         [Description(McpPublicContract.WorkingDirectoryDescription)] string working_directory,
         [Description("Existing external agent session id. Omit to start a new session.")] string? session_id = null,
         [Description(McpPublicContract.SkillsDescription)] string[]? skills = null,
-        [Description("When true (default), pass the CLI native non-interactive auto-approve flag. Set false to observe question/permission blocking on this same MCP path.")] bool auto_approve = true)
+        [Description("When true (default), pass the CLI native non-interactive auto-approve flag. Set false to observe question/permission blocking on this same MCP path.")] bool auto_approve = true,
+        [Description(McpPublicContract.ModelDescription)] string? model = null)
     {
         var invocationId = Guid.NewGuid().ToString("N");
         var startedAt = Stopwatch.GetTimestamp();
@@ -41,7 +42,8 @@ public sealed class AgentTools
                     WorkingDirectory: working_directory,
                     SessionId: session_id,
                     Skills: skills,
-                    AutoApprove: auto_approve));
+                    AutoApprove: auto_approve,
+                    Model: model));
             LogCompleted("start_agent", invocationId, startedAt, snapshot, includeRequestId: true, agent: agent);
             return SerializePublic(snapshot);
         }

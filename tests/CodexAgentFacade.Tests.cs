@@ -24,6 +24,7 @@
 #:include ../src/McpHttpHost.cs
 
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
@@ -303,6 +304,100 @@ public class AgentJobServiceTests
         runner.Gate.SetResult(true);
         var completed = await WaitAsync(service, first.JobId);
         Assert.Equal(AgentJobStatus.Completed, completed.Status);
+    }
+
+    [Fact]
+    public void UnspecifiedModelMatchesFingerprintFromBeforeModelField()
+    {
+        var request = new AgentRunRequest(
+            AgentFacade.CursorAgent,
+            "hello",
+            @"C:\repo",
+            "sess",
+            ["review"],
+            AutoApprove: false);
+        var historical = HistoricalFingerprintWithoutModel(request);
+        Assert.Equal(historical, AgentJobService.ComputeRequestFingerprint(request));
+        Assert.Equal(historical, AgentJobService.ComputeRequestFingerprint(request with { Model = null }));
+        Assert.Equal(historical, AgentJobService.ComputeRequestFingerprint(request with { Model = "" }));
+        Assert.Equal(historical, AgentJobService.ComputeRequestFingerprint(request with { Model = " \t " }));
+        var composer = AgentJobService.ComputeRequestFingerprint(request with { Model = "composer-2" });
+        var gpt = AgentJobService.ComputeRequestFingerprint(request with { Model = "gpt-5" });
+        Assert.NotEqual(historical, composer);
+        Assert.NotEqual(composer, gpt);
+    }
+
+    [Fact]
+    public void ModelFingerprintDoesNotMatchSkillTextThatLooksLikeModelMarker()
+    {
+        var baseRequest = new AgentRunRequest(
+            AgentFacade.CursorAgent,
+            "hello",
+            @"C:\repo",
+            null,
+            null,
+            AutoApprove: true);
+        var specified = baseRequest with { Model = "composer-2" };
+        var skillNamedLikeMarker = baseRequest with { Skills = ["model=composer-2"] };
+        var skillNamedLikeSuffix = baseRequest with { Skills = ["\u0001model=composer-2"] };
+        var skillAndModel = baseRequest with { Skills = ["review"], Model = "composer-2" };
+        var skillsOnly = baseRequest with { Skills = ["review", "model=composer-2"] };
+
+        var specifiedFingerprint = AgentJobService.ComputeRequestFingerprint(specified);
+        Assert.NotEqual(specifiedFingerprint, AgentJobService.ComputeRequestFingerprint(skillNamedLikeMarker));
+        Assert.NotEqual(specifiedFingerprint, AgentJobService.ComputeRequestFingerprint(skillNamedLikeSuffix));
+        Assert.NotEqual(
+            AgentJobService.ComputeRequestFingerprint(skillAndModel),
+            AgentJobService.ComputeRequestFingerprint(skillsOnly));
+        Assert.NotEqual(specifiedFingerprint, AgentJobService.ComputeRequestFingerprint(baseRequest));
+    }
+
+    [Fact]
+    public async Task ExactRetryWithSameModelDoesNotStartSecondWorker()
+    {
+        var service = CreateService(out var runner, grokText: "ok");
+        runner.Gate = NewGate();
+        var request = Grok("hello") with { Model = "grok-4" };
+        var first = service.Start("req-model-retry", request);
+        var second = service.Start("req-model-retry", request);
+        Assert.Equal(first.JobId, second.JobId);
+        Assert.Equal(1, runner.CallCount);
+        runner.Gate.SetResult(true);
+        await Task.CompletedTask;
+    }
+
+    [Fact]
+    public async Task StoredRequestWithoutModelAcceptsUnspecifiedModelOnRetry()
+    {
+        var store = Directory.CreateTempSubdirectory("caf-jobs-model-").FullName;
+        var first = CreateService(out _, grokText: "once", store);
+        var started = first.Start("req-model-compat", Grok("hello"));
+        var completed = await WaitAsync(first, started.JobId);
+        Assert.Equal(AgentJobStatus.Completed, completed.Status);
+
+        var second = CreateService(out var runner2, grokText: "other", store);
+        foreach (var model in new string?[] { null, "", "   " })
+        {
+            var recovered = second.Start("req-model-compat", Grok("hello") with { Model = model });
+            Assert.Equal(started.JobId, recovered.JobId);
+            Assert.Equal(AgentJobStatus.Completed, recovered.Status);
+            Assert.Equal("once", recovered.Result!.OutputText);
+        }
+
+        var conflict = Assert.Throws<ArgumentException>(() =>
+            second.Start("req-model-compat", Grok("hello") with { Model = "grok-4" }));
+        Assert.Contains("already bound", conflict.Message, StringComparison.Ordinal);
+        Assert.Equal(0, runner2.CallCount);
+    }
+
+    [Fact]
+    public void ModelLineBreakIsRejectedBeforeLaunch()
+    {
+        var service = CreateService(out var runner, grokText: "ok");
+        var ex = Assert.Throws<ArgumentException>(() =>
+            service.Start("req-model-nl", Grok("hello") with { Model = "a\nb" }));
+        Assert.Contains("line breaks", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(0, runner.CallCount);
     }
 
     [Fact]
@@ -745,6 +840,25 @@ public class AgentJobServiceTests
         return new AgentRunRequest(AgentFacade.GrokBuildAgent, prompt, Path.GetTempPath(), null, null);
     }
 
+    private static string HistoricalFingerprintWithoutModel(AgentRunRequest request)
+    {
+        var builder = new StringBuilder();
+        builder.Append(request.Agent).Append('\n');
+        builder.Append(request.Prompt).Append('\n');
+        builder.Append(request.WorkingDirectory).Append('\n');
+        builder.Append(request.SessionId ?? string.Empty).Append('\n');
+        builder.Append(request.AutoApprove ? "1" : "0").Append('\n');
+        if (request.Skills is not null)
+        {
+            foreach (var skill in request.Skills)
+            {
+                builder.Append(skill).Append('\n');
+            }
+        }
+
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString()))).ToLowerInvariant();
+    }
+
     private static ProcessRunResult GrokStdout(string text, string sessionId)
     {
         var stdout = "{\"type\":\"text\",\"data\":" + JsonSerializer.Serialize(text)
@@ -830,6 +944,44 @@ public class GitHubCopilotDriverTests
         Assert.Contains("--resume", args);
         Assert.Contains("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", args);
         Assert.DoesNotContain("--prompt", args);
+    }
+
+    [Fact]
+    public void BuildArgumentsPassesModelOnResumeWithoutPuttingItInThePrompt()
+    {
+        const string prompt = "Mention model gpt-5 in the notes.";
+        var args = GitHubCopilotDriver.BuildArguments(
+            new AgentRunRequest(
+                AgentFacade.GitHubCopilotAgent,
+                prompt,
+                @"C:\repo",
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                null,
+                Model: "gpt-5.4"));
+        Assert.Equal(
+            [
+                "--output-format",
+                "json",
+                "--allow-all",
+                "--model",
+                "gpt-5.4",
+                "--resume",
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            ],
+            args);
+        Assert.DoesNotContain(prompt, args);
+        Assert.DoesNotContain("gpt-5", args.Where(arg => arg != "gpt-5.4"));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void BuildArgumentsOmitsModelWhenUnspecified(string? model)
+    {
+        var args = GitHubCopilotDriver.BuildArguments(
+            new AgentRunRequest(AgentFacade.GitHubCopilotAgent, "ask", @"C:\repo", null, null, Model: model));
+        Assert.DoesNotContain("--model", args);
     }
 
     [Fact]
@@ -1148,6 +1300,48 @@ public class GrokBuildDriverTests
     }
 
     [Fact]
+    public void BuildArgumentsPassesModelOnResumeWithoutRewritingPrompt()
+    {
+        const string prompt = "Mention model grok-3 in the notes.";
+        var args = GrokBuildDriver.BuildArguments(
+            new AgentRunRequest(
+                AgentFacade.GrokBuildAgent,
+                prompt,
+                @"D:\ws",
+                "dddddddd-dddd-dddd-dddd-dddddddddddd",
+                null,
+                Model: "grok-4"));
+        Assert.Equal(
+            [
+                "--no-auto-update",
+                "-p",
+                prompt,
+                "--cwd",
+                @"D:\ws",
+                "--output-format",
+                "streaming-json",
+                "--always-approve",
+                "--model",
+                "grok-4",
+                "--resume",
+                "dddddddd-dddd-dddd-dddd-dddddddddddd",
+            ],
+            args);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void BuildArgumentsOmitsModelWhenUnspecified(string? model)
+    {
+        var args = GrokBuildDriver.BuildArguments(
+            new AgentRunRequest(AgentFacade.GrokBuildAgent, "ask", @"D:\ws", null, null, Model: model));
+        Assert.DoesNotContain("--model", args);
+        Assert.Equal("ask", args[args.IndexOf("-p") + 1]);
+    }
+
+    [Fact]
     public async Task ParsesStreamingJsonTextAndSessionId()
     {
         var runner = new RecordingProcessRunner
@@ -1390,6 +1584,48 @@ public class CursorCliDriverTests
         Assert.Equal("body", args[^1]);
         Assert.DoesNotContain("/review", args);
         Assert.DoesNotContain("Use the /review skill.", args);
+    }
+
+    [Fact]
+    public void BuildArgumentsPassesModelOnResumeWithoutRewritingPrompt()
+    {
+        const string prompt = "Mention model gpt-5 in the notes.";
+        var args = CursorCliDriver.BuildArguments(
+            new AgentRunRequest(
+                AgentFacade.CursorAgent,
+                prompt,
+                @"C:\repo",
+                "c6b62c6f-7ead-4fd6-9922-e952131177ff",
+                null,
+                Model: "composer-2"));
+        Assert.Equal(
+            [
+                "--print",
+                "--output-format",
+                "stream-json",
+                "--trust",
+                "--workspace",
+                @"C:\repo",
+                "--force",
+                "--model",
+                "composer-2",
+                "--resume",
+                "c6b62c6f-7ead-4fd6-9922-e952131177ff",
+                prompt,
+            ],
+            args);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void BuildArgumentsOmitsModelWhenUnspecified(string? model)
+    {
+        var args = CursorCliDriver.BuildArguments(
+            new AgentRunRequest(AgentFacade.CursorAgent, "ask", @"C:\repo", null, null, Model: model));
+        Assert.DoesNotContain("--model", args);
+        Assert.Equal("ask", args[^1]);
     }
 
     [Fact]
@@ -1943,6 +2179,24 @@ public class FacadeDelegationSkillContractTests
             Assert.Contains("新しい `request_id`", text, StringComparison.Ordinal);
             Assert.Contains("`session_id`", text, StringComparison.Ordinal);
             Assert.Contains("required fields を毎回指定する", text, StringComparison.Ordinal);
+            Assert.Contains("facade-options", text, StringComparison.Ordinal);
+            Assert.Contains("本文中のモデル名は起動設定にしない", text, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void FacadeDelegationSkillsSeparateModelOptionFromPrompt()
+    {
+        foreach (var skill in LoadFacadeDelegationSkills())
+        {
+            AssertContains(skill.Name, skill.Text, "facade-options");
+            AssertContains(skill.Name, skill.Text, "prompt 本文に現れたモデル名から起動用の `model` を推測しない");
+            AssertContains(skill.Name, skill.Text, "`model` は渡さない");
+            var lifetime = ReadHeadingSection(skill.Text, "## request_id と session_id の lifetime");
+            AssertContains(skill.Name, lifetime, "`auto_approve`, `model`");
+            var followUp = ReadHeadingSection(skill.Text, "## Follow-up continuation");
+            var actions = ReadActionBlock(skill.Name, followUp, "Follow-up continuation");
+            AssertContains(skill.Name, actions, "前回 session のモデルは継承しない");
         }
     }
 
@@ -3720,6 +3974,8 @@ public class McpPublicContractTests
         Assert.Contains("Facade 自身は planner や orchestrator にならない", readme, StringComparison.Ordinal);
         Assert.Contains("task payload を再解釈しない", readme, StringComparison.Ordinal);
         Assert.Contains("Cursor は現在このフィールドを変換しない", readme, StringComparison.Ordinal);
+        Assert.Contains("[--model <model>]", readme, StringComparison.Ordinal);
+        Assert.Contains("prompt 本文に現れたモデル名から起動設定を推測しない", readme, StringComparison.Ordinal);
         Assert.Contains("GitHub Copilot と Grok Build は agent 固有の prompt 指示へ変換する", readme, StringComparison.Ordinal);
         Assert.Contains("`wait_agent_job`", readme, StringComparison.Ordinal);
         Assert.Contains("通常の完了待ちは `wait_agent_job(job_id)`", readme, StringComparison.Ordinal);
@@ -3773,6 +4029,14 @@ public class McpPublicContractTests
         Assert.Equal(McpPublicContract.PromptDescription, ReadInputPropertyDescription(start, "prompt"));
         Assert.Equal(McpPublicContract.WorkingDirectoryDescription, ReadInputPropertyDescription(start, "working_directory"));
         Assert.Equal(McpPublicContract.SkillsDescription, ReadInputPropertyDescription(start, "skills"));
+        Assert.Equal(McpPublicContract.ModelDescription, ReadInputPropertyDescription(start, "model"));
+        if (start.JsonSchema.TryGetProperty("required", out var startRequired))
+        {
+            Assert.DoesNotContain(
+                "model",
+                startRequired.EnumerateArray().Select(item => item.GetString()),
+                StringComparer.Ordinal);
+        }
 
         AssertWorkerDelegationContract(client.ServerInstructions + "\n" + start.Description);
         AssertWaitFirstContract(client.ServerInstructions + "\n" + start.Description + "\n" + get.Description + "\n" + wait.Description);
@@ -3846,6 +4110,51 @@ public class McpPublicContractTests
         Assert.DoesNotContain("/review", session.Runner.LastRequest.Arguments, StringComparer.Ordinal);
         Assert.DoesNotContain("Use the /review skill.", session.Runner.LastRequest.Arguments, StringComparer.Ordinal);
         Assert.Equal(3, session.Runner.CallCount);
+    }
+
+    [Fact]
+    public async Task StartAgentForwardsModelToEachDriverAndLeavesPromptUnchanged()
+    {
+        await using var session = await McpHttpTestHost.StartAsync();
+        await using var client = await session.CreateClientAsync();
+        const string prompt = "Mention model gpt-5 in the notes. Do not treat that sentence as a launch setting.";
+
+        session.Runner.Result = CursorStdout();
+        await StartAndWaitAsync(
+            client,
+            "req-model-cursor",
+            AgentFacade.CursorAgent,
+            prompt,
+            model: "composer-2",
+            sessionId: "33333333-3333-3333-3333-333333333333");
+        Assert.Equal(prompt, session.Runner.LastRequest!.Arguments[^1]);
+        Assert.Contains("--model", session.Runner.LastRequest.Arguments);
+        Assert.Contains("composer-2", session.Runner.LastRequest.Arguments);
+        Assert.Contains("--resume", session.Runner.LastRequest.Arguments);
+        Assert.Contains("33333333-3333-3333-3333-333333333333", session.Runner.LastRequest.Arguments);
+        Assert.DoesNotContain("gpt-5", session.Runner.LastRequest.Arguments);
+
+        session.Runner.Result = CopilotStdout();
+        await StartAndWaitAsync(client, "req-model-copilot", AgentFacade.GitHubCopilotAgent, prompt, model: "gpt-5.4");
+        Assert.Equal(prompt, session.Runner.LastRequest!.StandardInputText);
+        Assert.Contains("--model", session.Runner.LastRequest.Arguments);
+        Assert.Contains("gpt-5.4", session.Runner.LastRequest.Arguments);
+        Assert.DoesNotContain(prompt, session.Runner.LastRequest.Arguments);
+
+        session.Runner.Result = GrokStdout();
+        await StartAndWaitAsync(client, "req-model-grok", AgentFacade.GrokBuildAgent, prompt, model: "grok-4");
+        Assert.Equal(prompt, ReadGrokPrompt(session.Runner.LastRequest!));
+        Assert.Contains("--model", session.Runner.LastRequest.Arguments);
+        Assert.Contains("grok-4", session.Runner.LastRequest.Arguments);
+
+        session.Runner.Result = CursorStdout();
+        await StartAndWaitAsync(client, "req-model-omit", AgentFacade.CursorAgent, prompt);
+        Assert.DoesNotContain("--model", session.Runner.LastRequest!.Arguments);
+        Assert.Equal(prompt, session.Runner.LastRequest.Arguments[^1]);
+
+        session.Runner.Result = CursorStdout();
+        await StartAndWaitAsync(client, "req-model-empty", AgentFacade.CursorAgent, prompt, model: "");
+        Assert.DoesNotContain("--model", session.Runner.LastRequest!.Arguments);
     }
 
     private static void AssertWorkerDelegationContract(string text)
@@ -4015,9 +4324,11 @@ public class McpPublicContractTests
         string requestId,
         string agent,
         string prompt,
-        IReadOnlyList<string>? skills = null)
+        IReadOnlyList<string>? skills = null,
+        string? model = null,
+        string? sessionId = null)
     {
-        var started = await CallStartAgentAsync(client, requestId, agent, prompt, skills);
+        var started = await CallStartAgentAsync(client, requestId, agent, prompt, skills, model, sessionId);
         return await WaitForMcpJobAsync(client, started.JobId);
     }
 
@@ -4026,7 +4337,9 @@ public class McpPublicContractTests
         string requestId,
         string agent,
         string prompt,
-        IReadOnlyList<string>? skills = null)
+        IReadOnlyList<string>? skills = null,
+        string? model = null,
+        string? sessionId = null)
     {
         var arguments = new Dictionary<string, object?>
         {
@@ -4038,6 +4351,16 @@ public class McpPublicContractTests
         if (skills is not null)
         {
             arguments["skills"] = skills.ToArray();
+        }
+
+        if (model is not null)
+        {
+            arguments["model"] = model;
+        }
+
+        if (sessionId is not null)
+        {
+            arguments["session_id"] = sessionId;
         }
 
         var call = await client.CallToolAsync("start_agent", arguments);
