@@ -180,6 +180,32 @@ public class AgentFacadeTests
     }
 
     [Fact]
+    public async Task ModelValidationErrorIsTracedOnDirectRunAsync()
+    {
+        var capturing = new CapturingLoggerFactory();
+        using (FacadeLog.UseLoggerFactory(capturing))
+        {
+            var facade = CreateFacade(out var runner);
+            var ex = await Assert.ThrowsAsync<ArgumentException>(() => facade.RunAsync(
+                new AgentRunRequest(
+                    AgentFacade.CursorAgent,
+                    "hello",
+                    Path.GetTempPath(),
+                    null,
+                    null,
+                    Model: "a\nb"),
+                onStdoutLine: null,
+                CancellationToken.None));
+            Assert.Contains("line breaks", ex.Message, StringComparison.Ordinal);
+            Assert.Equal(0, runner.CallCount);
+            var trace = capturing.Logger.Buffer.ToString();
+            Assert.Contains(nameof(ArgumentException), trace, StringComparison.Ordinal);
+            Assert.Contains(ex.Message, trace, StringComparison.Ordinal);
+            Assert.Contains("AgentFacade.Validate", trace, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public async Task RoutesGitHubCopilot()
     {
         var facade = CreateFacade(out var runner);

@@ -2,7 +2,7 @@
 
 この一覧は、relay SKILL の `facade-options` ブロック内 `model:` 行、および MCP `start_agent` の `model` 引数へ渡す **CLI 識別子** を記録する。Codex App / Cursor IDE / GitHub Copilot App など UI 上のモデル名とは文字列が一致しない場合がある。Facade は識別子を変換せず、指定時だけ各 CLI の `--model` へそのまま渡す。
 
-**スナップショット取得日:** 2026-09-22
+**スナップショット取得日:** 2026-09-26
 
 ## 使い方
 
@@ -19,7 +19,7 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 
 - **CLI バージョン:** `2026.09.18-9a7762b`
 - **取得コマンド:** `cursor-agent models`
-- **件数:** 227
+- **件数:** 241
 
 `cursor-agent` の stream-json `init` イベントが返す `model` フィールドは UI 表示名である。例: 識別子 `composer-2.5-fast` に対し init では `Composer 2.5 Fast` が返る。
 
@@ -35,7 +35,7 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 | `gpt-5.3-codex-xhigh` | Codex 5.3 Extra High |
 | `gpt-5.3-codex-xhigh-fast` | Codex 5.3 Extra High Fast |
 | `gpt-5.2` | GPT-5.2 |
-| `composer-2.5` | Composer 2.5 (current) |
+| `composer-2.5` | Composer 2.5 |
 | `claude-opus-5-thinking-high` | Claude Opus 5 1M Thinking |
 | `claude-opus-5-thinking-high-fast` | Claude Opus 5 1M Thinking Fast |
 | `gpt-5.6-sol-high` | GPT-5.6 Sol 1M High |
@@ -44,25 +44,39 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 | `gpt-5.6-sol-xhigh-fast` | GPT-5.6 Sol 1M Extra High Fast |
 | `claude-fable-5-thinking-high` | Claude Fable 5 1M Thinking (NO ZDR) |
 | `claude-fable-5-thinking-xhigh` | Claude Fable 5 1M Extra High Thinking (NO ZDR) |
-| `cursor-grok-4.5-high` | Cursor Grok 4.5 |
-| `cursor-grok-4.5-high-fast` | Cursor Grok 4.5 Fast |
+| `cursor-grok-4.5-high` | Grok 4.5 |
+| `cursor-grok-4.5-high-fast` | Grok 4.5 Fast |
 | `gemini-3.7-flash-high` | Gemini 3.7 Flash |
 | `claude-sonnet-5-thinking-high` | Claude Sonnet 5 1M Thinking |
 | `claude-sonnet-5-thinking-xhigh` | Claude Sonnet 5 1M Extra High Thinking |
 | `gpt-5.6-luna-high` | GPT-5.6 Luna 1M High |
 | `grok-4.7-low` | Grok 4.7  Low |
-| `grok-4.7-low-fast` | Grok 4.7  Low Fast窶銀・grok-4.7-medium - Grok 4.7  Medium |
-| `grok-4.7-medium-fast` | Grok 4.7  Medium Fast窶銀・grok-4.7-high - Grok 4.7  High |
-| `grok-4.7-high-fast` | Grok 4.7  High Fast窶銀・grok-4.7-xhigh - Grok 4.7  Extra High |
-| `grok-4.7-xhigh-fast` | Grok 4.7  Extra High Fast窶銀・cursor-grok-4.6-low - Cursor Grok 4.6 Low |
-| `cursor-grok-4.6-low-fast` | Cursor Grok 4.6 Low Fast |
-| `cursor-grok-4.6-medium` | Cursor Grok 4.6 Medium |
-| `cursor-grok-4.6-medium-fast` | Cursor Grok 4.6 Medium Fast |
-| `cursor-grok-4.6-high` | Cursor Grok 4.6 |
-| `cursor-grok-4.6-high-fast` | Cursor Grok 4.6 Fast |
-| `cursor-grok-4.6-xhigh` | Cursor Grok 4.6 Extra High |
-| `cursor-grok-4.6-xhigh-fast` | Cursor Grok 4.6 Extra High Fast |
+| `grok-4.7-low-fast` | Grok 4.7  Low Fast |
+| `grok-4.7-medium` | Grok 4.7  Medium |
+| `grok-4.7-medium-fast` | Grok 4.7  Medium Fast |
+| `grok-4.7-high` | Grok 4.7  High |
+| `grok-4.7-high-fast` | Grok 4.7  High Fast |
+| `grok-4.7-xhigh` | Grok 4.7  Extra High |
+| `grok-4.7-xhigh-fast` | Grok 4.7  Extra High Fast |
+| `cursor-grok-4.6-low` | Grok 4.6 Low |
+| `cursor-grok-4.6-low-fast` | Grok 4.6 Low Fast |
+| `cursor-grok-4.6-medium` | Grok 4.6 Medium |
+| `cursor-grok-4.6-medium-fast` | Grok 4.6 Medium Fast |
+| `cursor-grok-4.6-high` | Grok 4.6 |
+| `cursor-grok-4.6-high-fast` | Grok 4.6 Fast |
+| `cursor-grok-4.6-xhigh` | Grok 4.6 Extra High |
+| `cursor-grok-4.6-xhigh-fast` | Grok 4.6 Extra High Fast |
 | `composer-2.5-fast` | Composer 2.5 Fast |
+| `claude-opus-5-5-low` | Claude Opus 5.5 1M Low |
+| `claude-opus-5-5-low-fast` | Claude Opus 5.5 1M Low Fast |
+| `claude-opus-5-5-medium` | Claude Opus 5.5 1M |
+| `claude-opus-5-5-medium-fast` | Claude Opus 5.5 1M Fast |
+| `claude-opus-5-5-high` | Claude Opus 5.5 1M High |
+| `claude-opus-5-5-high-fast` | Claude Opus 5.5 1M High Fast |
+| `claude-opus-5-5-xhigh` | Claude Opus 5.5 1M Extra High |
+| `claude-opus-5-5-xhigh-fast` | Claude Opus 5.5 1M Extra High Fast |
+| `claude-opus-5-5-max` | Claude Opus 5.5 1M Max |
+| `claude-opus-5-5-max-fast` | Claude Opus 5.5 1M Max Fast |
 | `claude-opus-5-low` | Claude Opus 5 1M Low |
 | `claude-opus-5-low-fast` | Claude Opus 5 1M Low Fast |
 | `claude-opus-5-medium` | Claude Opus 5 1M Medium |
@@ -133,10 +147,10 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 | `claude-fable-5-thinking-low` | Claude Fable 5 1M Low Thinking (NO ZDR) |
 | `claude-fable-5-thinking-medium` | Claude Fable 5 1M Medium Thinking (NO ZDR) |
 | `claude-fable-5-thinking-max` | Claude Fable 5 1M Max Thinking (NO ZDR) |
-| `cursor-grok-4.5-low` | Cursor Grok 4.5 Low |
-| `cursor-grok-4.5-low-fast` | Cursor Grok 4.5 Low Fast |
-| `cursor-grok-4.5-medium` | Cursor Grok 4.5 Medium |
-| `cursor-grok-4.5-medium-fast` | Cursor Grok 4.5 Medium Fast |
+| `cursor-grok-4.5-low` | Grok 4.5 Low |
+| `cursor-grok-4.5-low-fast` | Grok 4.5 Low Fast |
+| `cursor-grok-4.5-medium` | Grok 4.5 Medium |
+| `cursor-grok-4.5-medium-fast` | Grok 4.5 Medium Fast |
 | `gemini-3.8-flash-low` | Gemini 3.8 Flash Low |
 | `gemini-3.8-flash-medium` | Gemini 3.8 Flash Medium |
 | `gemini-3.8-flash-high` | Gemini 3.8 Flash High |
@@ -289,7 +303,7 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 
 ## 更新方法
 
-1. **Cursor:** `cursor-agent models` を実行し、`識別子 - 表示名` 形式の出力を反映する。
+1. **Cursor:** `cursor-agent models` を実行し、`識別子 - 表示名` 形式の出力を反映する。CLI は一部行を特殊な区切り文字で連結するため、連結された行は区切ってから表へ変換する。識別子は CLI 出力から得た値だけを使い、推測で補わない。
 2. **GitHub Copilot:** 対話 CLI で `/model` を実行するか、上記 headless stdio 経路で `models.list` を取得する。公式ドキュメント: [GitHub Copilot CLI programmatic reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference)
 3. このファイルのスナップショット日、CLI バージョン、表本体を更新する。
 

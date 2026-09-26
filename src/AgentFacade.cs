@@ -78,7 +78,16 @@ public sealed class AgentFacade
         CancellationToken cancellationToken,
         string? runId = null)
     {
-        Validate(request);
+        try
+        {
+            Validate(request);
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            throw;
+        }
+
         await using var log = string.IsNullOrWhiteSpace(runId)
             ? _runLogFactory.Start(request)
             : _runLogFactory.Start(request, runId);
