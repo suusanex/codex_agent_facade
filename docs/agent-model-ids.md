@@ -327,5 +327,5 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 
 ## 関連
 
-- relay SKILL の `model:` 仕様: [cursor](apm-packages/cursor/.apm/skills/cursor/SKILL.md), [github-copilot](apm-packages/github-copilot/.apm/skills/github-copilot/SKILL.md), [grok-build](apm-packages/grok-build/.apm/skills/grok-build/SKILL.md)
+- relay SKILL の `model:` 仕様: [cursor](../apm-packages/cursor/.apm/skills/cursor/SKILL.md), [github-copilot](../apm-packages/github-copilot/.apm/skills/github-copilot/SKILL.md), [grok-build](../apm-packages/grok-build/.apm/skills/grok-build/SKILL.md)
 - Facade の `model` 引数: [README](README.md) の `start_agent` 節
