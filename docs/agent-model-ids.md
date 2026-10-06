@@ -2,7 +2,7 @@
 
 この一覧は、relay SKILL の `facade-options` ブロック内 `model:` 行、および MCP `start_agent` の `model` 引数へ渡す **CLI 識別子** を記録する。Codex App / Cursor IDE / GitHub Copilot App など UI 上のモデル名とは文字列が一致しない場合がある。Facade は識別子を変換せず、指定時だけ各 CLI の `--model` へそのまま渡す。
 
-**スナップショット取得日:** 2026-09-26
+**スナップショット取得日:** 2026-10-06
 
 ## 使い方
 
@@ -17,9 +17,9 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 
 ## Cursor CLI
 
-- **CLI バージョン:** `2026.09.18-9a7762b`
+- **CLI バージョン:** `2026.10.01-e373342`
 - **取得コマンド:** `cursor-agent models`
-- **件数:** 241
+- **件数:** 246
 
 `cursor-agent` の stream-json `init` イベントが返す `model` フィールドは UI 表示名である。例: 識別子 `composer-2.5-fast` に対し init では `Composer 2.5 Fast` が返る。
 
@@ -174,6 +174,11 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 | `gpt-5.6-terra-xhigh-fast` | GPT-5.6 Terra 1M Extra High Fast |
 | `gpt-5.6-terra-max` | GPT-5.6 Terra 1M Max |
 | `gpt-5.6-terra-max-fast` | GPT-5.6 Terra 1M Max Fast |
+| `claude-sonnet-5-5-low` | Claude Sonnet 5.5  Low |
+| `claude-sonnet-5-5-medium` | Claude Sonnet 5.5  Medium |
+| `claude-sonnet-5-5-high` | Claude Sonnet 5.5  High |
+| `claude-sonnet-5-5-xhigh` | Claude Sonnet 5.5  Extra High |
+| `claude-sonnet-5-5-max` | Claude Sonnet 5.5  Max |
 | `claude-sonnet-5-low` | Claude Sonnet 5 1M Low |
 | `claude-sonnet-5-medium` | Claude Sonnet 5 1M Medium |
 | `claude-sonnet-5-high` | Claude Sonnet 5 1M |
@@ -269,7 +274,7 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 
 ## GitHub Copilot CLI
 
-- **CLI バージョン:** `1.0.87`
+- **CLI バージョン:** `1.0.87`（2026-10-06 の実機は `1.0.92`。この表は 2026-09-26 の `models.list` スナップショットのまま。再取得はしていない）
 - **取得方法:** ログイン済み CLI を `copilot --headless --no-auto-update --stdio` で起動し、JSON-RPC `models.list` を呼び出した
 - **件数:** 24
 - **注意:** 利用可能モデルは Copilot プラン、組織ポリシー、認証アカウントにより変わる。下表は **このスナップショット取得環境で `models.list` が返した一覧** である。CLI 組み込みカタログ (`models.getBuiltInCatalog`) には、現アカウントでは選択できない ID も含まれる。
@@ -301,13 +306,26 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 | `grok-4.6` | Grok 4.6 |
 | `grok-4.7` | Grok 4.7 |
 
+## Grok Build CLI
+
+- **CLI バージョン:** `grok 1.0.5 (5115b46bc9) [stable]`
+- **取得コマンド:** `grok models`
+- **件数:** 2
+- **注意:** 2026-10-06 のこの環境では CLI が未ログインで、`grok models` は `You are not authenticated.` と出しつつ次のカタログを返した。選択されたモデルの証拠ではない。アカウントで使える集合はログイン後に変わり得る。
+
+| CLI 識別子 (`model:` / `--model`) | 備考 |
+| --- | --- |
+| `grok-4.6` | `grok models` が default と表示 |
+| `grok-4.5` | `grok models` が一覧に含めた |
+
 ## 更新方法
 
 1. **Cursor:** `cursor-agent models` を実行し、`識別子 - 表示名` 形式の出力を反映する。CLI は一部行を特殊な区切り文字で連結するため、連結された行は区切ってから表へ変換する。識別子は CLI 出力から得た値だけを使い、推測で補わない。
 2. **GitHub Copilot:** 対話 CLI で `/model` を実行するか、上記 headless stdio 経路で `models.list` を取得する。公式ドキュメント: [GitHub Copilot CLI programmatic reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference)
-3. このファイルのスナップショット日、CLI バージョン、表本体を更新する。
+3. **Grok Build:** `grok models` を実行し、CLI が出した識別子だけを反映する。未ログイン時のカタログと、ログイン後に実際に選べる集合は分けて記録する。
+4. このファイルのスナップショット日、CLI バージョン、表本体を更新する。
 
 ## 関連
 
-- relay SKILL の `model:` 仕様: [cursor](apm-packages/cursor/.apm/skills/cursor/SKILL.md), [github-copilot](apm-packages/github-copilot/.apm/skills/github-copilot/SKILL.md)
+- relay SKILL の `model:` 仕様: [cursor](apm-packages/cursor/.apm/skills/cursor/SKILL.md), [github-copilot](apm-packages/github-copilot/.apm/skills/github-copilot/SKILL.md), [grok-build](apm-packages/grok-build/.apm/skills/grok-build/SKILL.md)
 - Facade の `model` 引数: [README](README.md) の `start_agent` 節
