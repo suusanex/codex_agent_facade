@@ -417,3 +417,49 @@ Cursor CLI `2026.09.18-9a7762b`。`CursorCliDriver` が `ProcessRunner` 経由�
 
 存在しないモデル `definitely-not-a-model` を同じ `--print` 経路で直接起動すると、CLI は exit 1 と `Cannot use this model` を返した。別モデルでの成功応答にはならなかった。この失敗確認は Facade の Driver 経由ではなく、CLI を直接起動した結果である。
 
+## モデル指定の配置後確認（issue #24 第1段階、2026-10-06）
+
+配置済み Facade `ProductVersion=1.0.0+7e1f8c8c0386f8f31da11730d5ba22b2a2163c09`（PR #27 merge、PID 63420、`127.0.0.1:18765` LISTEN）。自動テストは followup 作業コピーで 196/196 成功。引数伝達と CLI が報告した選択モデルは別の証拠である。
+
+### 配置後の公開 MCP schema
+
+`tools/list` を配置済み endpoint へ送った。`start_agent` の input schema に optional `model` があり、required ではない。description は指定時だけ `--model` へそのまま渡し、未指定では付けず、別モデルへ fallback しない、改行は起動前エラー、と書いてあった。dump: `C:\WindowsTemp\caf-live-mcp-schema\tools-list.txt`。
+
+### ユーザー環境の SKILL / MCP
+
+`%USERPROFILE%\.agents\skills\{cursor,github-copilot,grok-build}\SKILL.md` は改行コード以外、リポジトリの relay SKILL と同文だった（`facade-options` / `model` を含む）。`codex mcp list` は `codex_agent_facade` を enabled / Bearer token と報告した。
+
+### 配置済み MCP からの実 CLI（Driver ではなく公開 tool）
+
+作業 workspace は `C:\WindowsTemp\caf-model-ws-13ty3zup.32h\`。prompt 本文に `gpt-5` と書いたが、起動引数にはしていない。
+
+Cursor CLI `2026.10.01-e373342`:
+
+| 場面 | job/run | 引数伝達 | 選択モデル | 結果 |
+| --- | --- | --- | --- | --- |
+| 新規 | `20261006T113040Z-f277d29d` | `--model composer-2.5-fast`。prompt は別引数 | init `model=Composer 2.5 Fast` | `outputText=pong` exit 0 |
+| Exact retry | 同じ `requestId=72890f4e2de1477a9f1bc88e8f6dbde2` | 2回目の `start_agent` が同じ `jobId` を durationMs=1 で返した。新しい run は無い | （再実行していない） | `server.log` 20:30:40 |
+| 継続 | `20261006T113052Z-d60f29ad` | `--model composer-2.5-fast` と `--resume 6ddad571-b169-426d-a3f7-dee7a8f53798` | init `model=Composer 2.5 Fast` | `outputText=pingpong` exit 0 |
+| 未指定 | `20261006T113105Z-99ce8d77` | `--model` なし。started.model は空 | init `model=Composer 2.5 Fast`（CLI 既定。Facade が別モデルを選んだ証拠ではない） | `outputText=pong` exit 0 |
+| 無効 | `20261006T113115Z-0496f4db` | `--model definitely-not-a-model` | 選択モデルの成功報告なし | job `failed` exit 1。`Cannot use this model: definitely-not-a-model`。成功応答にはならなかった |
+
+GitHub Copilot CLI `1.0.92`:
+
+| 場面 | job/run | 引数伝達 | 選択モデル | 結果 |
+| --- | --- | --- | --- | --- |
+| 新規 | `20261006T113119Z-2a09ff73` | `--model gpt-5-mini`。prompt は stdin | `session.tools_updated` / `model.call_start` / `assistant.message` / `model.call_final_result` の `data.model=gpt-5-mini` | `outputText=pong` exit 0 session `2d0d251a-9f9e-471b-9af6-2c7f0feb315e` |
+| 継続 | `20261006T113134Z-470fe69a` | `--model gpt-5-mini` と `--resume 2d0d251a-9f9e-471b-9af6-2c7f0feb315e` | 同上 `gpt-5-mini` | `outputText=pingpong` exit 0 |
+
+Grok Build CLI `1.0.5`:
+
+- 引数伝達: run `20261006T113149Z-86ccea36` の launch に `--model grok-4.6` が入った。prompt 本文とは別引数
+- 選択モデル: 取得していない。CLI は exit 1、`Not signed in`。別モデルでの成功応答にはならなかった
+
+run log は `%USERPROFILE%\.codex-agent-facade\runs\<runId>.events.jsonl`。
+
+### relay SKILL 実呼び出し（Codex CLI `$cursor` + `facade-options`）
+
+`codex exec --ephemeral` に `$cursor` と `facade-options` の `model: composer-2.5-fast` を渡した。Codex の `start_agent` 引数は `model=composer-2.5-fast`、`prompt` は作業本文だけ（`facade-options` ブロックは含まれない）。job `20261006T113335Z-b1aaf828`。launch に `--model composer-2.5-fast`。init `model=Composer 2.5 Fast`。`outputText=pong`。Codex の最終中継も `pong`。
+
+未指定の SKILL 経路は、同じ日の Codex からの `start_agent` job `20261006T112207Z-aaa1c6be` でも観測した。`model` 引数は無く、Cursor init は `Grok 4.6 High Fast` だった。これは CLI 既定であり、Facade がモデルを選んだ証拠にはしない。
+
