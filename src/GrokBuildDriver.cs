@@ -30,7 +30,9 @@ public sealed class GrokBuildDriver
             Prompt: prompt,
             FileName: "grok",
             Arguments: arguments,
-            Model: request.Model));
+            Model: request.Model,
+            ReasoningEffort: request.ReasoningEffort,
+            Fast: request.Fast));
 
         var accumulator = new GrokStreamAccumulator(runLog);
         ProcessRunResult processResult;
@@ -82,6 +84,15 @@ public sealed class GrokBuildDriver
             throw failure;
         }
 
+        if (request.ReasoningEffort is not null
+            && processResult.StandardError.Contains("model does not support reasoning effort; ignoring", StringComparison.OrdinalIgnoreCase))
+        {
+            var failure = new InvalidOperationException("Grok Build CLI did not apply the requested reasoning_effort.");
+            CliJson.MarkFailure(failure, "option_not_applied", "Grok Build CLI reported that the selected model does not support the requested reasoning effort.", processResult.ExitCode);
+            CliJson.TraceException(failure);
+            throw failure;
+        }
+
         ParsedCliOutput parsed;
         try
         {
@@ -125,6 +136,11 @@ public sealed class GrokBuildDriver
         }
 
         AppendModelArgument(arguments, request.Model);
+        if (request.ReasoningEffort is not null)
+        {
+            arguments.Add("--reasoning-effort");
+            arguments.Add(request.ReasoningEffort);
+        }
 
         if (!string.IsNullOrWhiteSpace(request.SessionId))
         {

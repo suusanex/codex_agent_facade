@@ -334,7 +334,9 @@ public sealed class AgentJobService
 
         try
         {
-            var record = JsonSerializer.Deserialize<AgentJobRecord>(File.ReadAllText(path), AgentJson.Options);
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+            var record = JsonSerializer.Deserialize<AgentJobRecord>(reader.ReadToEnd(), AgentJson.Options);
             if (record is null || string.IsNullOrWhiteSpace(record.JobId) || string.IsNullOrWhiteSpace(record.RequestId))
             {
                 throw new InvalidOperationException("Job record is invalid.");
@@ -410,6 +412,21 @@ public sealed class AgentJobService
 
     internal static string ComputeRequestFingerprint(AgentRunRequest request)
     {
+        if (request.ReasoningEffort is not null || request.Fast is not null)
+        {
+            var versionedRequest = new RequestFingerprintV2(
+                request.Agent,
+                request.Prompt,
+                request.WorkingDirectory,
+                request.SessionId ?? string.Empty,
+                request.AutoApprove,
+                request.Skills ?? Array.Empty<string>(),
+                string.IsNullOrWhiteSpace(request.Model) ? null : request.Model,
+                request.ReasoningEffort,
+                request.Fast);
+            return HashText("request-v2\0" + JsonSerializer.Serialize(versionedRequest, AgentJson.Options));
+        }
+
         var builder = new StringBuilder();
         builder.Append(request.Agent).Append('\n');
         builder.Append(request.Prompt).Append('\n');
@@ -424,6 +441,7 @@ public sealed class AgentJobService
             }
         }
 
+        // ReasoningEffort/Fast が未指定のときは既存形式の hash を使い、既存requestとの互換性を維持する。
         // 未指定は何も足さない。モデル導入前に保存した request の fingerprint と一致させる。
         // skill は末尾改行付きで連結する。model は改行で終わらない接尾辞にし、
         // skill 名が model=... でも同一 request と誤認しない。model 自体の改行は Validate で拒否する。
@@ -434,6 +452,17 @@ public sealed class AgentJobService
 
         return HashText(builder.ToString());
     }
+
+    private sealed record RequestFingerprintV2(
+        string Agent,
+        string Prompt,
+        string WorkingDirectory,
+        string? SessionId,
+        bool AutoApprove,
+        IReadOnlyList<string>? Skills,
+        string? Model,
+        string? ReasoningEffort,
+        bool? Fast);
 
     private static string HashText(string value)
     {

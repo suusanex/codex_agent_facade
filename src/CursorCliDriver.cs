@@ -35,7 +35,9 @@ public sealed class CursorCliDriver
             Prompt: request.Prompt,
             FileName: FileName,
             Arguments: arguments,
-            Model: request.Model));
+            Model: request.Model,
+            ReasoningEffort: request.ReasoningEffort,
+            Fast: request.Fast));
 
         var accumulator = new CursorStreamAccumulator(runLog);
         ProcessRunResult processResult;
@@ -115,7 +117,9 @@ public sealed class CursorCliDriver
     /// <c>-p/--print</c> が非対話。<c>--output-format stream-json</c> が NDJSON。
     /// <c>--trust</c> は workspace 信頼ダイアログ回避のため常に付ける。
     /// <c>--force</c> だけが <c>auto_approve</c> に対応する。Skill は prompt 変換しない。
-    /// <c>--model</c> は空白以外の <c>Model</c> のときだけ、caller の文字列のまま付ける。
+    /// <c>reasoning_effort</c> / <c>fast</c> が未指定なら非空白 <c>Model</c> をそのまま渡す。
+    /// いずれかが指定されたときは <see cref="ValidateAndBuildModelArgument"/> で値を検証してmodel parameterへ合成する。
+    /// base modelは選択・置換しない。
     /// </summary>
     internal static List<string> BuildArguments(AgentRunRequest request)
     {
@@ -134,7 +138,7 @@ public sealed class CursorCliDriver
             arguments.Add("--force");
         }
 
-        AppendModelArgument(arguments, request.Model);
+        AppendModelArgument(arguments, request.Model, request.ReasoningEffort, request.Fast);
 
         if (!string.IsNullOrWhiteSpace(request.SessionId))
         {
@@ -146,15 +150,120 @@ public sealed class CursorCliDriver
         return arguments;
     }
 
-    private static void AppendModelArgument(List<string> arguments, string? model)
+    internal static string? ValidateAndBuildModelArgument(string? model, string? reasoningEffort, bool? fast)
     {
         if (string.IsNullOrWhiteSpace(model))
+        {
+            if (reasoningEffort is not null || fast is not null)
+            {
+                throw new ArgumentException("Cursor requires an explicit model when reasoning_effort or fast is specified.");
+            }
+
+            return null;
+        }
+
+        if (reasoningEffort is null && fast is null)
+        {
+            return model;
+        }
+
+        var modelId = model;
+        var parameters = new List<string>();
+        var openBracket = model.LastIndexOf('[');
+        var closeBracket = model.EndsWith(']') ? model.Length - 1 : -1;
+        if (openBracket >= 0 || model.Contains(']'))
+        {
+            if (openBracket < 0
+                || closeBracket < openBracket
+                || model.IndexOf('[') != openBracket
+                || model.IndexOf(']') != closeBracket)
+            {
+                throw new ArgumentException("Cursor model parameter syntax is invalid.");
+            }
+
+            modelId = model[..openBracket];
+            var parameterText = model[(openBracket + 1)..closeBracket];
+            if (string.IsNullOrWhiteSpace(modelId))
+            {
+                throw new ArgumentException("Cursor model id must not be empty.");
+            }
+
+            if (parameterText.Length > 0)
+            {
+                parameters.AddRange(parameterText.Split(','));
+            }
+        }
+
+        var specifiedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var parameter in parameters)
+        {
+            var separator = parameter.IndexOf('=');
+            if (separator <= 0)
+            {
+                throw new ArgumentException("Cursor model parameters must use key=value syntax.");
+            }
+
+            var key = parameter[..separator];
+            var value = parameter[(separator + 1)..];
+            if (!IsSafeParameterToken(key) || !IsSafeParameterToken(value))
+            {
+                throw new ArgumentException("Cursor model parameter keys and values must be non-empty ASCII tokens.");
+            }
+
+            if (!specifiedKeys.Add(key))
+            {
+                throw new ArgumentException($"Cursor model parameter '{key}' is specified more than once.");
+            }
+        }
+
+        if (reasoningEffort is not null)
+        {
+            if (specifiedKeys.Contains("effort") || HasEffortVariant(modelId))
+            {
+                throw new ArgumentException("reasoning_effort is specified both in the Cursor model and as an independent field.");
+            }
+
+            parameters.Add("effort=" + reasoningEffort);
+        }
+
+        if (fast is not null)
+        {
+            if (specifiedKeys.Contains("fast") || modelId.EndsWith("-fast", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ArgumentException("fast is specified both in the Cursor model and as an independent field.");
+            }
+
+            parameters.Add("fast=" + (fast.Value ? "true" : "false"));
+        }
+
+        return modelId + "[" + string.Join(',', parameters) + "]";
+    }
+
+    private static bool IsSafeParameterToken(string value)
+    {
+        return value.Length > 0
+            && value.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_');
+    }
+
+    private static bool HasEffortVariant(string modelId)
+    {
+        var baseId = modelId.EndsWith("-fast", StringComparison.OrdinalIgnoreCase)
+            ? modelId[..^5]
+            : modelId;
+        return new[] { "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra" }
+            .Any(level => baseId.EndsWith("-" + level, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static void AppendModelArgument(List<string> arguments, string? model, string? reasoningEffort, bool? fast)
+    {
+        var selectedModel = ValidateAndBuildModelArgument(model, reasoningEffort, fast);
+        if (selectedModel is null)
         {
             return;
         }
 
         arguments.Add("--model");
-        arguments.Add(model);
+        arguments.Add(selectedModel);
     }
 }
 

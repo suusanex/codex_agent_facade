@@ -7,6 +7,7 @@ using System.Text.RegularExpressions;
 /// skills 等の structured option は、対応 Driver が agent 固有形式へ変換する場合がある。
 /// Model は agent 固有のモデル識別子である。null、空、空白のみは未指定で、Driver はモデル引数を付けない。
 /// Facade はモデル名の対応表、自動選択、別モデルへの置換を持たない。
+/// ReasoningEffort と Fast は起動設定であり、prompt 本文からは推測しない。
 /// </summary>
 public sealed record AgentRunRequest(
     string Agent,
@@ -15,7 +16,9 @@ public sealed record AgentRunRequest(
     string? SessionId,
     IReadOnlyList<string>? Skills,
     bool AutoApprove = true,
-    string? Model = null);
+    string? Model = null,
+    string? ReasoningEffort = null,
+    bool? Fast = null);
 
 /// <summary>
 /// CLI から得た結果。独自セマンティクスは持たせず、Driver が読めた範囲だけを返す。
@@ -54,21 +57,25 @@ public sealed class AgentFacade
     public const string GitHubCopilotAgent = "github-copilot";
     public const string GrokBuildAgent = "grok-build";
     public const string CursorAgent = "cursor";
+    public const string CodexAgent = "codex";
 
     private readonly GitHubCopilotDriver _gitHubCopilot;
     private readonly GrokBuildDriver _grokBuild;
     private readonly CursorCliDriver _cursorCli;
+    private readonly CodexCliDriver _codexCli;
     private readonly IAgentRunLogFactory _runLogFactory;
 
     public AgentFacade(
         GitHubCopilotDriver gitHubCopilot,
         GrokBuildDriver grokBuild,
         CursorCliDriver cursorCli,
+        CodexCliDriver codexCli,
         IAgentRunLogFactory runLogFactory)
     {
         _gitHubCopilot = gitHubCopilot;
         _grokBuild = grokBuild;
         _cursorCli = cursorCli;
+        _codexCli = codexCli;
         _runLogFactory = runLogFactory;
     }
 
@@ -101,7 +108,9 @@ public sealed class AgentFacade
                     .ConfigureAwait(false),
                 CursorAgent => await _cursorCli.RunAsync(request, log, onStdoutLine, cancellationToken)
                     .ConfigureAwait(false),
-                _ => throw new ArgumentException($"Unknown agent '{request.Agent}'. Supported agents: {GitHubCopilotAgent}, {GrokBuildAgent}, {CursorAgent}."),
+                CodexAgent => await _codexCli.RunAsync(request, log, onStdoutLine, cancellationToken)
+                    .ConfigureAwait(false),
+                _ => throw new ArgumentException($"Unknown agent '{request.Agent}'. Supported agents: {GitHubCopilotAgent}, {GrokBuildAgent}, {CursorAgent}, {CodexAgent}."),
             };
 
             var withLogs = result with
@@ -147,9 +156,42 @@ public sealed class AgentFacade
 
         // fingerprint は行単位である。改行を含む model は別フィールドと衝突し、CLI の1引数としても渡せない。
         if (request.Model is not null
-            && (request.Model.Contains('\r') || request.Model.Contains('\n')))
+            && (request.Model.Contains('\r')
+                || request.Model.Contains('\n')
+                || (!string.IsNullOrWhiteSpace(request.Model) && request.Model.Any(char.IsControl))))
         {
-            throw new ArgumentException("model must not contain line breaks.");
+            throw new ArgumentException("model must not contain control characters.");
+        }
+
+        if (request.ReasoningEffort is not null
+            && (string.IsNullOrWhiteSpace(request.ReasoningEffort)
+                || request.ReasoningEffort.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not '-' and not '_')))
+        {
+            throw new ArgumentException("reasoning_effort must be a non-empty token containing only ASCII letters, digits, hyphens, or underscores.");
+        }
+
+        if ((request.Agent.Trim() is GitHubCopilotAgent or GrokBuildAgent)
+            && request.Fast is not null)
+        {
+            throw new ArgumentException($"The {request.Agent.Trim()} CLI does not support an independent fast option.");
+        }
+
+        if (request.Agent.Trim() == CursorAgent
+            && (request.ReasoningEffort is not null || request.Fast is not null))
+        {
+            if (string.IsNullOrWhiteSpace(request.Model))
+            {
+                throw new ArgumentException("Cursor requires an explicit model when reasoning_effort or fast is specified.");
+            }
+
+            CursorCliDriver.ValidateAndBuildModelArgument(request.Model, request.ReasoningEffort, request.Fast);
+        }
+
+        if (request.Agent.Trim() == GitHubCopilotAgent
+            && request.ReasoningEffort is not null
+            && !GitHubCopilotDriver.SupportedReasoningEfforts.Contains(request.ReasoningEffort, StringComparer.Ordinal))
+        {
+            throw new ArgumentException("GitHub Copilot reasoning_effort must be one of: none, minimal, low, medium, high, xhigh, max.");
         }
     }
 }

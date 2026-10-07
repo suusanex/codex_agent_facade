@@ -463,3 +463,44 @@ run log は `%USERPROFILE%\.codex-agent-facade\runs\<runId>.events.jsonl`。
 
 未指定の SKILL 経路は、同じ日の Codex からの `start_agent` job `20261006T112207Z-aaa1c6be` でも観測した。`model` 引数は無く、Cursor init は `Grok 4.6 High Fast` だった。これは CLI 既定であり、Facade がモデルを選んだ証拠にはしない。
 
+## Reasoning Effort と Fast（issue #24 第2段階、2026-10-07）
+
+### 実装と静的検証
+
+- `AgentRunRequest` / MCP `start_agent` に `reasoning_effort` と nullable boolean の `fast` を追加した。未指定はCLIの既定動作を保ち、`fast: false` は非Fast/default tierを明示する。prompt本文からはどちらも推測しない
+- Cursor は明示された実行optionを `--model <base-id[parameters]>` に合成する。Copilot / Grok Build の独立 `fast` 指定は起動前に拒否する。Codex CLI は `model_reasoning_effort` と `service_tier` を `-c` で指定する
+- option未指定requestは従来 fingerprint と一致させ、新option指定requestはoption値を含むversioned fingerprintにする。保存jobのexact retry、変更option拒否、CLI argument、Codex JSONLのfail-closed、relay Skillの実payload境界と失敗時停止を含むテストは `dotnet run --file tests/CodexAgentFacade.Tests.cs` で 222/222 成功
+- MCP検証用hostは本番の18765と分離したloopback `127.0.0.1:18766` で起動した。job/run/server logは `artifacts/phase2/artifacts/phase2/host/` 以下に隔離した
+
+### 隔離MCP経路での実行
+
+作業promptはツール使用・ファイル調査を禁止し、`phase2-ok` のみを返す短いものにした。4件とも公開MCP `start_agent` 経由で開始し、`wait_agent_job` は `completed`、exit code 0を返した。Cursorの `outputText` は `phase2-ok`、Codexの `outputText` は `phase2-ok.` だった。
+
+| agent / option | new job / run | exact retry | resume job / run | CLIへ渡した設定と結果 |
+| --- | --- | --- | --- | --- |
+| Cursor `composer-2.5`, `fast=false` | `20261007T101407Z-24258aff` | 同じrequest IDで同じjob ID | `20261007T101427Z-7d136978` | 両方 `--model composer-2.5[fast=false]`。resumeは同一session `2c8cec5c-cf12-40d8-afda-08b8ff21bce6` を使い、成功 |
+| Codex `gpt-6-luna`, `reasoning_effort=low`, `fast=false` | `20261007T101437Z-3f8d5987` | 同じrequest IDで同じjob ID | `20261007T101449Z-5bf5dd9e` | new/resumeとも `--model gpt-6-luna -c model_reasoning_effort="low" -c service_tier="default"`。resumeは同一session `01a115db-a2da-7d90-806b-e204a113aad5` を使い、成功 |
+
+保存jobのexact retryと変更option拒否を、同じ二つのrequest IDを使った追加MCP呼び出しで再確認した。Cursor/Codexのどちらも元のjob IDを返し、同じIDのまま `fast=true` に変更した呼び出しは同期的に拒否された。新しいjobや推論は発生していない。GitHub CopilotとGrok Buildへの `fast=false` も同期的に拒否され、各CLIは起動していない。結果は `artifacts/phase2/existing-retry-verification.log` に保存した。
+
+### CLIの観測値と未確認範囲
+
+- Cursor CLIのsystem initは `model=Composer 2.5` を報告したが、initイベントにfastのbooleanは無かった。したがって `fast=false` をCLI引数へ渡したこと、CLIが成功したことは確認できるが、Cursor内部で選択されたFast状態を別途観測したわけではない
+- Codex CLIのstderrにある `SessionConfiguredEvent` は、new/resume両方で `model="gpt-6-luna"`, `service_tier=Some("default")`, `reasoning_effort=Some(Low)` を報告した。これはCLIがその設定を読み込んだ証拠であり、backendがそのtierを実際に提供した証拠ではない
+- `fast=true` の推論は行っていない。`fast=true` を使ったのは保存済みrequestとのoption不一致を検証する同期拒否呼び出しだけである
+- この実測はCLI引数、CLI初期化設定、MCP job lifecycleの確認である。backendが要求tierを提供したか、Codex Fastの実応答性能や利用枠がどうだったかは確認していない
+
+実行記録は `artifacts/phase2/artifacts/phase2/host/jobs/` と `artifacts/phase2/artifacts/phase2/host/runs/` にある。最初のprobeは4 jobの完了後にreflection無効なJsonSerializer出力で終了した。MCP上のjob結果とevent logは保存されており、probe出力を `JsonNode` に修正した後、既存requestだけを用いてexact retryとoption不一致拒否を記録した。
+
+### 配置済みMCP経由のrelay受入確認（2026-10-07）
+
+設定済みFacade `127.0.0.1:18765` の公開schemaはHTTP 200で取得し、`model`, `reasoning_effort`, `fast` と `codex` agentを確認した。配置先の4 Skill hashはworkspaceの4 Skillと一致した。Scheduler `\CodexAgentFacade` はPID 80760で稼働し、確認時刻は19:21:38。配置backupは `D:\Tools\Development\CodexAgentFacade.backup-20261007-192135`。
+
+最初のrelay失敗では、旧Codex Skillにある例文が実際のpayloadと混同され、`start_agent` にユーザー本文でなくSkill内の「このworkspaceを読み取り専用で調査し、結果を簡潔に返して。」が渡った。MCP toolはapproval拒否でjobを作らず失敗したが、呼び出し側Codexはその後に `phase2-relay-ok` と成功回答を返した。記録は `artifacts/phase2/deployed-relay-probe.jsonl`。これは旧Skill境界の不足と、tool失敗後の呼び出し側のrelay逸脱を示す。
+
+本文境界を明記したSkillへ配置先を更新した後の2回目も、Lunaを親relayとして使った場合はMCPを呼ばず、ユーザーpayloadをそのまま返し、jobは作られなかった。記録は `artifacts/phase2/deployed-relay-verified.jsonl`。Skillの修正だけでは、Lunaがrelay tool呼び出しを実行することを保証できなかった。
+
+成功したrelay確認では、親にCodex CLI `gpt-6.1-sol` / medium / defaultを使い、検証プロセス内だけで `start_agent` と `wait_agent_job` のapproval modeを `approve` に上書きした。global configは変更していない。`$codex` の後に続く実際のユーザー本文は先頭改行を含めてpromptへ渡り、`model=gpt-6-luna`, `reasoning_effort=medium`, `fast=false`, `auto_approve=false` が配置済みMCPへ渡った。job `20261007T102942Z-7ef66cae` は `completed`、子session `01a115e9-70c1-7ab1-b267-8e3119a26dac`、`outputText=phase2-relay-verified` で、親Codexの中継結果も一致した。CLIのlaunch設定は `%USERPROFILE%\.codex-agent-facade\runs\20261007T102942Z-7ef66cae.events.jsonl` に記録されている。
+
+この成功はGPT-6.1 Solを親relayにした1回の受入確認であり、すべてのモデルで同じ動作になる保証ではない。今回の結果からLunaを親relayとして推奨しない。Lunaをchild implementation agentとして使った結果とは区別する。`fast=true` の推論はこの確認でも行っていない。
+

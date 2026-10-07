@@ -1,13 +1,13 @@
 # codex_agent_facade
 
-Codex App から GitHub Copilot、Grok Build、Cursor CLI へ作業を中継する feasibility PoC。
+Codex App から GitHub Copilot、Grok Build、Cursor CLI、または別のCodex CLI processへ作業を中継する Facade。
 
-Facade 自身は planner や orchestrator にならない薄い execution transport である。呼び出し側（Codex の親エージェントなど）は作業の計画・分割・委譲方針を決め、自己完結した worker prompt を `start_agent` に渡せる。元の user prompt 全体を転送する必要はない。Facade はその worker task を計画・分割・意味的に書き換えない。caller が明示した `skills` などの structured option は、対応 Driver が agent 固有の呼び出し表現へ変換する場合がある。任意の `model` は agent 固有のモデル識別子として、指定されたときだけ各 CLI の `--model` へそのまま渡す。未指定時はモデル引数を付けず、モデル名の対応表・自動選択・別モデルへの fallback は行わない。選択した agent の CLI へ変換して実行し、完了結果を返す。
+Facade 自身は planner や orchestrator にならない薄い execution transport である。呼び出し側（Codex の親エージェントなど）は作業の計画・分割・委譲方針を決め、自己完結した worker prompt を `start_agent` に渡せる。元の user prompt 全体を転送する必要はない。Facade はその worker task を計画・分割・意味的に書き換えない。caller が明示した `skills` などの structured option は、対応 Driver が agent 固有の呼び出し表現へ変換する場合がある。`model` は agent 固有の識別子、`reasoning_effort` と `fast` は独立した実行設定として各 CLI へ変換する。Facade はモデル名の対応表・自動選択・別モデルへの fallback を行わない。選択した agent の CLI へ変換して実行し、完了結果を返す。
 
 ## 必要環境
 
 - .NET 11 SDK（Preview 可）。`#:include` で複数ファイルをコンパイルする
-- PATH 上の `copilot`（GitHub Copilot CLI）、`grok`（Grok Build CLI）、および / または `cursor-agent`（Cursor CLI）
+- PATH 上で利用するCLI: `copilot`（GitHub Copilot CLI）、`grok`（Grok Build CLI）、`cursor-agent`（Cursor CLI）、`codex`（Codex CLI）。利用するagentのCLIのみ必要
 - Windows で Cursor CLI を使う場合は PowerShell 7（`pwsh.exe`）を PATH 上に配置する。Facade の `.ps1` 起動経路は PowerShell 7 を使用する
 - 実作業には各 CLI へのログインが必要
 
@@ -136,13 +136,17 @@ distinct な agent job / distinct な `start_agent` ごとに、呼び出し側�
 | フィールド | 必須 | 内容 |
 | --- | --- | --- |
 | `request_id` | はい | この distinct な agent job 用の冪等キー。呼び出し側が job ごとに新しく生成する。同じ Codex thread / 同じ外部 session でも新しい payload なら新しい値。同じ値の再呼び出しは、引数が完全一致する lost-result retry のときだけ既存 job を返す |
-| `agent` | はい | `github-copilot`、`grok-build`、または `cursor` |
+| `agent` | はい | `github-copilot`、`grok-build`、`cursor`、または `codex` |
 | `prompt` | はい | 呼び出し側が構成した自己完結の worker prompt。元の user prompt 全体である必要はない。Facade はこの task payload を再解釈しない。完全一致の転送は保証せず、`skills` 指定時は対応 Driver が agent 固有の skill 指示を付加する場合がある |
 | `working_directory` | はい | 対象 workspace / worktree。continuation でも毎回指定する。前回値は暗黙継承されない |
 | `session_id` | いいえ | 同一外部 session の継続。省略時は新規 |
-| `skills` | いいえ | Codex 形式の Skill 名（任意）。GitHub Copilot と Grok Build は agent 固有の prompt 指示へ変換する。Cursor は現在このフィールドを変換しない。Cursor で Skill を明示 invoke する場合は worker prompt 本文へ含める |
-| `auto_approve` | いいえ | 既定 true。各 CLI の non-interactive 承認フラグを付ける。質問待ちの観測では false |
-| `model` | いいえ | agent 固有のモデル識別子。指定時は各 CLI の `--model` へそのまま渡す。省略、空、空白のみではモデル引数を付けない。prompt 本文中のモデル名は起動設定にしない。改行を含む値は起動前エラー。session 継続時も前回のモデルは継承しない |
+| `skills` | いいえ | Codex 形式の Skill 名（任意）。GitHub Copilot と Grok Build は agent 固有の prompt 指示へ変換する。Cursor は現在このフィールドを変換しない。Codex CLIも現在このfieldをpromptへ変換しない。Cursorではworker prompt本文にCursor native `/skill-name` を含める |
+| `auto_approve` | いいえ | 既定 true。各CLIのnon-interactive許可設定。false時の制限はCLIごとに異なる。Codexは`workspace-write`/`read-only` sandboxを選び、どちらも`approval_policy=never`のため承認質問を表示しない |
+| `model` | いいえ | agent固有のmodel ID。指定時に各CLIのmodel選択へ渡す。省略、空、空白のみではCLI model optionを付けない。Cursorは独立した`reasoning_effort` / `fast`を指定された場合に既存parameter形式のmodel IDを合成する。prompt本文中のモデル名は起動設定にしない。改行を含む値は起動前エラー。空白以外のmodelに含まれるその他の制御文字も拒否する。session継続時も前回のmodelは継承しない |
+| `reasoning_effort` | いいえ | provider native な effort token。未指定はCLI既定を保つ。Cursorは`model`必須、Copilotは`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`、Grok BuildはCLIが認識するcanonicalまたはmodel固有token、CodexはCLI設定へ渡す。空や安全でないtokenは起動前エラー。Grokが無視したと警告した場合も失敗 |
+| `fast` | いいえ | nullable boolean。未指定はCLIの現状を保ち、`true`はfast、`false`は明示的な非-fast/default tier。CodexとCursorは独立設定を持つ。CopilotとGrok Buildは独立設定を持たず、`true`/`false`とも起動前エラー。モデルID自体の`-fast` variantは引き続き`model`で指定できる |
+
+`reasoning_effort` と `fast` は `model` と独立した実行オプションで、prompt本文から推測しない。Codexは `model_reasoning_effort` と `service_tier` を明示し、`fast=false` は `service_tier=default` を渡す。`auto_approve=false` はCodexで `read-only` sandboxと `approval_policy=never` を使うため、承認質問は表示されない。Cursorは `model[context=...,effort=...,fast=...]` 形式で既存model parametersを保ち、独立fieldとmodel内指定の重複は同値でも拒否する。各fieldはsession継続とexact retryでも毎回指定する。`null/null` は既存request fingerprintを維持し、新たに指定したfieldはrequest fingerprintへ含める。
 
 戻り JSON:
 
@@ -251,6 +255,7 @@ Skill は **編集する work repository** の root で APM から入れる。�
 apm install suusanex/codex_agent_facade/apm-packages/github-copilot --target codex,agent-skills
 apm install suusanex/codex_agent_facade/apm-packages/grok-build --target codex,agent-skills
 apm install suusanex/codex_agent_facade/apm-packages/cursor --target codex,agent-skills
+apm install suusanex/codex_agent_facade/apm-packages/codex --target codex,agent-skills
 ```
 
 ローカル checkout から入れる場合:
@@ -259,9 +264,10 @@ apm install suusanex/codex_agent_facade/apm-packages/cursor --target codex,agent
 apm install "C:\path\to\codex_agent_facade\apm-packages\github-copilot" --target codex,agent-skills
 apm install "C:\path\to\codex_agent_facade\apm-packages\grok-build" --target codex,agent-skills
 apm install "C:\path\to\codex_agent_facade\apm-packages\cursor" --target codex,agent-skills
+apm install "C:\path\to\codex_agent_facade\apm-packages\codex" --target codex,agent-skills
 ```
 
-展開先は `.agents/skills/github-copilot/`、`.agents/skills/grok-build/`、`.agents/skills/cursor/`。Codex 上では `$github-copilot` / `$grok-build` / `$cursor` で本文を外部 agent へ渡す。これらの Skill を指定した turn では、その Skill の契約どおり Codex 自身は対象作業を実行せず、Skill より後のユーザー本文を worker prompt として外部 agent へ委譲し、結果を中継する。モデルを起動時に指定するときは、作業本文の前に実行オプションを置く。先頭の空行を除いた最初の行が開始フェンス（バッククォート3つ + `facade-options`）のときだけ、閉じるフェンス（バッククォート3つだけの行）までを実行オプションとして読み、その直後からを作業 prompt として変更せず渡す。有効な行は `model: <識別子>` の1行だけである。実行オプションが無い本文はすべて作業 prompt であり、`model` は渡さない。prompt 本文に現れたモデル名から起動設定を推測しない。`model:` に指定する CLI 識別子の一覧（UI 表示名との対応を含む）は [Agent モデル識別子一覧](docs/agent-model-ids.md) を参照。Skill 無しで `start_agent` / `wait_agent_job` を直接呼ぶ場合、呼び出し側は元の user prompt 全体を転送する必要はなく、限定した worker 専用 prompt を構成して渡してよい。モデルは `model` 引数で渡す。`get_agent_job` は明示照会・復旧・診断用である。
+展開先は `.agents/skills/github-copilot/`、`.agents/skills/grok-build/`、`.agents/skills/cursor/`、`.agents/skills/codex/`。Codex 上では対応する `$github-copilot` / `$grok-build` / `$cursor` / `$codex` Skill から本文をFacadeへ渡し、結果を中継する。作業本文の前に実行オプションを置く場合は、先頭の空行を除く最初の行を `facade-options` 開始フェンスとし、閉じるフェンスまでに `model`, `reasoning_effort`, `fast` を各1行まで記述する。フェンス後の本文だけがworker promptで、内容を変更しない。実行オプションが無ければ全本文をpromptとして渡し、設定をpromptから推測しない。prompt 本文に現れたモデル名から起動設定を推測しない。`fast: false` は明示値である。agent別の対応値・重複・エラー条件は各Skillおよび上記 `start_agent` 表を参照。`model:` に指定するCLI識別子一覧は [Agent モデル識別子一覧](docs/agent-model-ids.md) を参照。Skill 無しで `start_agent` / `wait_agent_job` を直接呼ぶ場合、呼び出し側は限定したworker promptを作り、設定を各引数で渡してよい。`get_agent_job` は明示照会・復旧・診断用である。
 
 更新・削除:
 
@@ -270,6 +276,7 @@ apm update
 apm uninstall github-copilot
 apm uninstall grok-build
 apm uninstall cursor
+apm uninstall codex
 ```
 
 ## CLI 変換
@@ -289,16 +296,24 @@ grok --no-auto-update -p <prompt> --cwd <working_directory> --output-format stre
 Cursor CLI（プロセス cwd = `working_directory`。実行ファイル名は Unix では `cursor-agent`、Windows では `cursor-agent.ps1`）:
 
 ```text
-cursor-agent --print --output-format stream-json --trust --workspace <working_directory> [--force] [--model <model>] [--resume <session_id>] <prompt>
+cursor-agent --print --output-format stream-json --trust --workspace <working_directory> [--force] [--model <model[parameters]>] [--resume <session_id>] <prompt>
 ```
+
+Codex CLI（process cwd = `working_directory`。promptはstdinへ渡す）:
+
+```text
+codex exec [resume] --json --skip-git-repo-check -c approval_policy="never" -c sandbox_mode="workspace-write|read-only" [--model <model>] [-c model_reasoning_effort="<effort>"] [-c service_tier="priority|default"] -
+```
+
+GitHub Copilotは指定時に `--reasoning-effort <token>`、Grok Buildは `--reasoning-effort <token>`、Codexは `codex exec [resume] --json -c model_reasoning_effort="<token>" -c service_tier="priority|default"` を使う。Codexへのpromptはstdinから渡し、resumeでもworking directoryはprocess cwdで指定する。未指定のoptionはCLIへ渡さない。Codex CLIを含む実推論で `fast=true` の有効性や提供tierはこの変更では実測していない。`fast=false` のCLI設定値はテストとCodex CLI初期化ログで確認するが、backendが実際に提供したtierの証明ではない。Fast tierはモデル/プランごとに料金・利用条件が異なりうるため、指定モデルのprovider表示を確認する。
 
 `--allow-all` / `--always-approve` / `--force` は `auto_approve=true` のときだけ付ける。Copilot は全OSで PATH 上の `copilot` を選び、`--prompt` は使わず、Skill付き完全promptをUTF-8 stdinへ渡す。GitHub公式の [programmatic usage](https://docs.github.com/en/copilot/how-tos/copilot-cli/automate-copilot-cli/run-cli-programmatically) に従う。Windowsの`copilot.CMD`は汎用cmd経路でstdin handleをchildへ継承し、PATH上で`copilot.exe`が先に解決される環境では通常のnative経路を使う。npm shim内容やnpm loaderの解析は行わない。Cursor は PATH 上の `cursor-agent` を使う。同梱の `agent` は Grok Build の `agent` と衝突するため使わない。Windows では公式の `cursor-agent.ps1` を `pwsh -File` で起動する。`cursor-agent.cmd` は cmd が CR/LF を引数へ渡せないため使わない。
 
-Skill 変換は共通化しない。Copilot は `Use the /name skill.`、Grok は `/name` 行。Cursor は Codex / `.codex/skills` を native discovery するため、`skills` 配列を prompt へ変換しない。prompt 本文で `/skill-name` と書けば headless でも invoke できる。詳細は `docs/poc-observations.md`。
+Skill 変換は共通化しない。Copilot は `Use the /name skill.`、Grok は `/name` 行。Cursor は Codex / `.codex/skills` を native discovery するため、`skills` 配列を prompt へ変換しない。Codexもこのfieldをpromptへ変換しない。Cursorではpromptに `/skill-name` と書けばheadlessでもinvokeできる。詳細は `docs/poc-observations.md`。
 
 ## テスト
 
-CI / 通常テストは実 `copilot` / `grok` / `cursor-agent` を呼ばない（`dotnet --version` の収集確認だけ実プロセスを使う）。
+CI / 通常テストは実 `copilot` / `grok` / `cursor-agent` / `codex` を呼ばない。各CLI変換とMCP job lifecycleはstub process runnerで検証する。
 Windows の `.cmd` / `.bat` は `ProcessStartInfo.Arguments` の raw command string として `cmd.exe /d /v:off /s /c` で起動する。`.NET` の `ArgumentList` は使わず、引用符は二重化し、`%` はプロセス限定環境変数の置換結果で保護してから cmd に渡す。`&`、`|`、`^`、空白、日本語、`!`、括弧、`<`、`>`、引用符を含む値は実プロセス fixture で検証している。NUL と CR/LF は cmd のバッチ引数 ABI で忠実かつ安全に表現できないため、`.cmd` / `.bat` 経路では実行前エラーになる。Copilotの複数行promptは公式stdin経路で渡し、`--prompt`と併用しない。stdin指定時はUTF-8 BOMなしで本文をそのままwrite/flush/closeし、launch logには本文を記録せず、指定有無とbyte countだけを記録する。通常の`.ps1`は汎用`pwsh.exe -NoLogo -NoProfile -NonInteractive -File <script>`の`ArgumentList`、通常の`.exe`は従来どおり`ArgumentList`を使う。stdout は UTF-8 JSONL のまま、Windows の `.cmd` / `.bat` wrapper の stderr は OS の OEM encoding、wrapperなし（native executable と PowerShell host）は UTF-8として厳密にデコードする。選択した encoding で解釈できなければ実行を失敗させる。
 
 ```powershell
@@ -349,7 +364,9 @@ Cursor 固有の対応:
 | 新規 `sessionId` | stream-json の明示フィールド `session_id` だけを返す。`request_id` や任意 UUID は使わない |
 | `auto_approve=true` | `--force`（コマンド / ファイル変更の承認を省略。denied なものは通さない） |
 | `auto_approve=false` | `--force` を付けない。workspace 信頼ダイアログだけ `--trust` で避ける |
-| `model` | 空白以外のとき `--model <model>`。値は変換しない。未指定時は付けない |
+| `model` | 空白以外のとき `--model <model>`。ただし独立`reasoning_effort` / `fast`指定時はCursorのparameterized-model syntaxへ合成する。重複指定は拒否する |
+| `reasoning_effort` | 指定時は`model`必須。model内に`effort`またはeffort suffix variantがあれば独立fieldと重複するため拒否 |
+| `fast` | 指定時は`model`必須。`true` / `false`をmodel内parameterとして合成し、`-fast` model suffixやmodel内の`fast`指定と重複すれば拒否 |
 | Skills | 変換しない。Cursor は `.codex/skills` 等を native discovery する。明示 invoke は prompt の `/skill-name` |
 
 `--force` は Copilot の `--allow-all` や Grok の `--always-approve` と完全同義ではない。Cursor の permission model では「明示 deny 以外を通す」フラグであり、MCP server 承認（`--approve-mcps`）や sandbox は別スイッチである。Facade はそれらを勝手に付けない。

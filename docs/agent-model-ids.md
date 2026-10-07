@@ -329,3 +329,30 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 
 - relay SKILL の `model:` 仕様: [cursor](../apm-packages/cursor/.apm/skills/cursor/SKILL.md), [github-copilot](../apm-packages/github-copilot/.apm/skills/github-copilot/SKILL.md), [grok-build](../apm-packages/grok-build/.apm/skills/grok-build/SKILL.md)
 - Facade の `model` 引数: [README](README.md) の `start_agent` 節
+
+## Reasoning Effort と fast（issue #24 第2段階）
+
+`model`, `reasoning_effort`, `fast` は独立した実行設定である。relay Skillでは作業本文の先頭に `facade-options` blockを置き、MCPでは `start_agent` の同名引数で指定する。設定はprompt本文から推測せず、session継続とexact retryでも毎回必要な値を渡す。設定なしは既存CLI既定を保ち、`fast: false` は明示的な非-fast/default指定である。
+
+| Agent | Reasoning Effort | Independent fast | CLI変換 |
+| --- | --- | --- | --- |
+| Cursor | 選択modelが許すtoken | `true` / `false` | `--model <id[existing...,effort=...,fast=...]>` |
+| GitHub Copilot | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | 非対応。両booleanを拒否 | `--reasoning-effort <token>` |
+| Grok Build | CLI canonicalまたはmodel固有token | 非対応。両booleanを拒否 | `--reasoning-effort <token>`。CLIがeffortを無視したwarningを出せばexit 0でも失敗 |
+| Codex CLI | CLIが許すeffort token | `true` / `false` | `-c model_reasoning_effort="<token>"`; fastは `-c service_tier="priority"` / `"default"` |
+
+Cursor optionはmodel内の既存parameterを保って末尾へ追加する。model内に `effort` / `fast` がある場合、effort suffix variantまたは`-fast` model variantを使う場合は独立fieldとの重複として拒否する。値が一致しても二重指定はエラーとなる。
+
+`auto_approve=false` のCodexは `sandbox_mode=read-only` と `approval_policy=never` を使用する。そのためapproval promptは出ない。Codexのmodel/effort/tierをCLI引数へ渡したこと、CLI初期化ログが `service_tier=default` を記録したことはbackendがtierを提供した証拠ではない。今回 `fast=true` のCodex推論は実施していない。
+
+Fastの利用条件と費用はproviderとmodelに依存する。OpenAIの現行Codex資料では、対応modelのFast modeはsubscription included usage limitをStandardの2.5倍で消費し、購入creditsおよびEnterprise pay-as-you-goはStandardの2倍で請求される。API key利用はChatGPT credit multiplierの対象外。Cursorはmodelごとに価格が異なり、掲載例のCursor内Grok 4.7 Fastは通常tierのinput/output価格が各2倍、Cursor内Composer 2.5 Fastはinputが6倍・outputが6倍となっている。これはCursor内の価格例であり、Grok Build CLIの価格ではない。価格とplan eligibilityは変わりうるため実行前にproviderの現行ページを確認する。
+
+- [Codex Fast mode](https://learn.chatgpt.com/docs/agent-configuration/speed)
+- [Codex config reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+- [Cursor Models and Pricing](https://cursor.com/docs/models-and-pricing)
+- [Cursor CLI parameters](https://cursor.com/docs/cli/reference/parameters)
+- [Cursor SDK model parameters](https://cursor.com/docs/sdk/typescript)
+- [GitHub Copilot CLI reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference)
+- [Grok Build CLI option handling](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/src/headless.rs)
+
+コード上の引数生成、MCP schema、mock runnerによるnew/resume/result/failure検証と、実CLIの実推論・backend tier提供確認は別の証拠である。実推論は明示的な承認後に実施する。

@@ -30,10 +30,12 @@ Codex 上で対象リポジトリを開いた状態で、Skill を指定して�
 $github-copilot このリポジトリの README に使い方を追記して。
 ```
 
-モデルを指定するときは、作業本文の前に実行オプションを置く。先頭の空行を除いた最初の行が開始フェンス（バッククォート3つ + `facade-options`）のときだけ、閉じるフェンスまでを実行オプションとして読み、直後からを作業 prompt として変更せず渡す。有効な行は `model: <識別子>` の1行だけである。実行オプションが無い本文はすべて作業 prompt であり、本文中のモデル名は起動設定にしない。
+実行オプションは作業本文の前にある先頭 `facade-options` blockで指定する。先頭空行の後の最初の行が開始fenceである場合だけ、閉じるfenceまでをoptionとして読み、直後から末尾までをworker promptとして変更せず渡す。有効な行は `model: <識別子>`, `reasoning_effort: <token>`, `fast: true|false` の各1行まで。実行オプションが無い本文はすべて作業 prompt であり、本文中のモデル名は起動設定にしない。未知key、重複、空値、不正なboolean、未閉鎖fenceはtoolを呼ばずエラーとして扱う。`fast: false` は未指定と異なる明示値。Cursorはmodel必須かつmodel parameter重複を拒否し、Copilot/Grok Buildは独立fast指定をtrue/falseとも拒否する。agentごとのtokenとCLI mappingはrepository READMEを参照。
 
     ```facade-options
     model: <model-id>
+    reasoning_effort: <token>
+    fast: false
     ```
     このリポジトリの README に使い方を追記して。
 

@@ -11,6 +11,7 @@
 #:include GitHubCopilotDriver.cs
 #:include GrokBuildDriver.cs
 #:include CursorCliDriver.cs
+#:include CodexCliDriver.cs
 
 var workspace = Directory.CreateTempSubdirectory("codex-agent-facade-poc-");
 File.WriteAllText(Path.Combine(workspace.FullName, "NOTE.txt"), "poc observation workspace. do not keep.");
@@ -20,6 +21,7 @@ var facade = new AgentFacade(
     new GitHubCopilotDriver(new ProcessRunner()),
     new GrokBuildDriver(new ProcessRunner()),
     new CursorCliDriver(new ProcessRunner()),
+    new CodexCliDriver(new ProcessRunner()),
     new AgentRunLogFactory());
 const string prompt = "Reply with only the word pong. Do not create, edit, or delete any files.";
 const string followUp = "Reply with only the word pingpong. Do not create, edit, or delete any files.";

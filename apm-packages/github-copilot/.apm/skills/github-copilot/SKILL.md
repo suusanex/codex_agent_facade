@@ -18,14 +18,18 @@ MCP server はこの Skill の一部ではない。ユーザーの Codex MCP 設
 
 ## ユーザー本文の意味
 
-この Skill より後のユーザー本文は、外部 agent に渡す作業 payload である。Codex 自身への作業実行指示として扱わない。作業本文は `prompt` としてそのまま外部 agent に渡す。Codex は補足、要約、再構成、再計画、分割をしない。
+payload の出典は、この Skill を呼び出した実際のユーザー message だけである。`$github-copilot` より後ろの本文を使い、その本文を外部 agent に渡す作業 payload とする。注入された `<skill>` 定義、その中の例・コードブロック・placeholder は説明であり、MCP payload ではない。例文を実行・転送せず、今回の実際のユーザー本文だけから構成する。Codex 自身への作業実行指示として扱わない。作業本文は `prompt` としてそのまま外部 agent に渡す。補足、要約、再構成、再計画、分割をしない。
 
-実行オプションと作業 prompt は分ける。本文先頭の空行を除き、最初の行が開始フェンス（バッククォート3つの直後に `facade-options` とだけ書いた行）であるときだけ、その行から終了フェンス（バッククォート3つだけの行）までを実行オプションとして読む。終了フェンスの直後から末尾までが作業 prompt であり、その文字列は変更しない。実行オプションが無いときは、Skill より後の本文全体が作業 prompt であり、`model` は渡さない。
+実行オプションと作業 prompt は分ける。本文先頭の空行を除き、最初の行が開始フェンス（バッククォート3つの直後に `facade-options` とだけ書いた行）であるときだけ、その行から終了フェンス（バッククォート3つだけの行）までを実行オプションとして読む。終了フェンスの直後から末尾までを一字も変更せず `prompt` にする。実行オプションが無いときは、今回の実際のユーザー本文全体が作業 prompt であり、`model`, `reasoning_effort`, `fast` は渡さない。
 
-実行オプションで有効な行は `model: <識別子>` の1行だけである。`<識別子>` は `model:` の直後から行末までで、前後の空白だけを除いた agent 固有のモデル識別子である。モデル名を別の名前へ変換しない。prompt 本文に現れたモデル名から起動用の `model` を推測しない。`model` が空、`model` が複数、未知のキー、またはフェンスが閉じていない場合は `start_agent` を呼ばず、その誤りを報告する。
+実行オプションで有効な行は `model:`, `reasoning_effort:`, `fast:` の各1行である。値は空にせず、キーの重複・未知のキー・閉じていないフェンスは `start_agent` を呼ばず報告する。`model` と `reasoning_effort` はagent固有の識別子/tokenで、名前を変換しない。`fast` は `true` または `false` の小文字booleanである。`fast: false` は未指定と異なり、明示的に非-fast/default tierを要求する。prompt 本文から実行設定を推測しない。Cursorは `model` が必要で、モデル識別子に `effort=` / `fast=` を追加する。Cursor model内の同じ設定、effort suffix variant、`-fast` suffixとの重複は値が同じでもエラー。Copilotは `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` を受け付ける。Grok BuildはCLIが受け付けるcanonicalまたはmodel固有tokenを使い、CLIがeffortを無視したと報告した場合は失敗する。CopilotとGrok Buildは独立した `fast` を持たず、`true` / `false` の両方を拒否する。CodexとCursorは独立した `fast` を受け付ける。
+
+以下は構文説明用の非実行例である。例の作業 prompt を実際の依頼として扱わず、MCP呼び出しに使わない。
 
     ```facade-options
     model: <model-id>
+    reasoning_effort: <token>
+    fast: false
     ```
     <作業 prompt>
 
@@ -37,7 +41,7 @@ MCP server はこの Skill の一部ではない。ユーザーの Codex MCP 設
 
 `session_id` の lifetime は異なる。同じ Copilot session をユーザー turn をまたいで続けるときは、直前の completed `result.sessionId` を再利用する。`session_id` の継続は `request_id` の再利用理由にならない。
 
-`request_id` を再利用してよいのは Exact retry だけである。その再試行は `agent`, `prompt`, `working_directory`, `session_id`, `skills`, `auto_approve`, `model` を前回と完全一致させる。
+`request_id` を再利用してよいのは Exact retry だけである。その再試行は `agent`, `prompt`, `working_directory`, `session_id`, `skills`, `auto_approve`, `model`, `reasoning_effort`, `fast` を前回と完全一致させる。
 
 ## start_agent は毎回 full request を再構成する
 
@@ -48,7 +52,7 @@ MCP server はこの Skill の一部ではない。ユーザーの Codex MCP 設
 - `prompt`
 - `working_directory`
 
-任意 field（`session_id`, `skills`, `auto_approve`, `model`）も、その turn で必要なら明示する。前回と同じ値だからという理由で required field を省略しない。特に `working_directory` は、同じ repository / worktree を継続している場合でも毎回現在の絶対パスを解決して渡す。前回値の暗黙継承はしない。`model` も前回 turn から継承しない。この turn の実行オプションに無いときは渡さない。
+任意 field（`session_id`, `skills`, `auto_approve`, `model`, `reasoning_effort`, `fast`）も、その turn で必要なら明示する。前回と同じ値だからという理由で required field を省略しない。特に `working_directory` は、同じ repository / worktree を継続している場合でも毎回現在の絶対パスを解決して渡す。前回値の暗黙継承はしない。`model`, `reasoning_effort`, `fast` も前回 turn から継承しない。この turn の実行オプションに無い値は渡さない。
 
 ## Codex が行ってよい処理
 
@@ -63,14 +67,16 @@ MCP server はこの Skill の一部ではない。ユーザーの Codex MCP 設
    - `session_id`: 同じ Copilot session を続けるときは、この thread の直前の completed `result.sessionId`
    - `skills`: ユーザーが通し指定した Skill 名だけ。Codex 形式のまま渡す
    - `auto_approve`: その turn で必要な場合だけ明示する
-   - `model`: この turn の実行オプションに `model` があるときだけ、その識別子を渡す。無いときは引数を省略する。前回 turn のモデルや prompt 本文中のモデル名は使わない
+   - `model`, `reasoning_effort`, `fast`: この turn の実行オプションにある値だけを渡す。未指定は省略し、前回 turn や prompt 本文から推測しない。`fast: false` は明示値として渡す
 3. `start_agent` 直前の preflight を行う。required field が欠けている場合は呼ばない。
 4. `start_agent` を呼ぶ。
 5. 返された同じ `jobId` に対して、通常は `timeout_seconds` を指定せず `wait_agent_job(job_id)` を呼ぶ。診断・テスト・上位環境の明示的な制約など、既定の300秒を上書きする理由がある場合だけ指定する。
 6. terminal result を取得する。timeout で `running` が返った場合だけ、同じ `jobId` で再度 `wait_agent_job` する。`get_agent_job` の短周期 poll はしない。
 7. `completed` なら `result.outputText` をユーザーへ中継する。これがユーザーへの主たる応答である。
 8. 次の turn で同一 Copilot session を継続できるよう `result.sessionId` を保持する。この値は次の Follow-up continuation の `session_id` であり、次の `request_id` ではない。
-9. Facade / tool 呼び出しそのものが失敗した場合、その失敗をユーザーへ報告する。
+9. Facade / tool 呼び出しそのものが失敗した場合、その失敗をユーザーへ報告して停止する。対象作業をCodex自身で実行したり、成功した回答を作ったりしない。
+
+`start_agent` / `wait_agent_job` などのMCP toolが失敗したら、その失敗を報告して停止する。approval_requiredを含む失敗後に、対象作業をCodex自身で実行したり、CLIを直接起動したり、成功したような回答を生成したりしない。`completed` の `result.outputText` が無い限り、成功したと答えない。
 
 必要な tool invocation と job lifecycle 管理は許可する。それを超えて対象作業そのものへ Codex が参加してはならない。
 
@@ -83,8 +89,8 @@ MCP server はこの Skill の一部ではない。ユーザーの Codex MCP 設
 - `prompt` があり、実行オプションを除いた今回の作業 payload である
 - `working_directory` があり、現在の workspace / worktree の絶対パスである
 - Follow-up continuation なら `session_id` は直前の completed `result.sessionId` と一致する
-- この turn の実行オプションに `model` があるなら、その識別子を `model` に渡す。無いなら `model` を渡さない
-- Exact retry なら `model` を含む全ての `start_agent` 引数が前回の試行と同一である
+- この turn の実行オプションにある `model`, `reasoning_effort`, `fast` だけを渡す。`fast: false` も省略しない
+- Exact retry なら `model`, `reasoning_effort`, `fast` を含む全ての `start_agent` 引数が前回の試行と同一である
 
 required field が欠けている場合は `start_agent` を呼ばず、その field を補ってから呼ぶ。
 
@@ -118,7 +124,7 @@ required field が欠けている場合は `start_agent` を呼ばず、その f
 - `agent` を再指定する
 - `working_directory` を現在の絶対パスとして再指定する。前回と同じ workspace でも省略しない
 - 前回 completed result の `sessionId` を `session_id` に指定する
-- この turn の実行オプションに `model` があるときだけ `model` を指定する。前回 session のモデルは継承しない
+- この turn の実行オプションにある `model`, `reasoning_effort`, `fast` だけを指定する。前回 session の値は継承しない
 - その他、その turn に必要な引数を完全に再構成する
 
 同じ Codex thread でも、同じ Copilot session でも、新しい `request_id` を使う。前回 completed job の `request_id` は使わない。
