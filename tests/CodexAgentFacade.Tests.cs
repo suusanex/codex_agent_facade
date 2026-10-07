@@ -349,6 +349,43 @@ public class CodexCliDriverTests
         Assert.Equal("resume", runner.LastRequest.Arguments[1]);
     }
 
+    [Fact]
+    public async Task NewCodexSessionUsesReturnedThreadId()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(0,
+                "{\"type\":\"thread.started\",\"thread_id\":\"thread-new\"}\n"
+                + "{\"type\":\"turn.completed\"}", ""),
+        };
+        await using var log = TestRunLogs.CreateLog();
+        var result = await new CodexCliDriver(runner).RunAsync(
+            new AgentRunRequest(AgentFacade.CodexAgent, "hello", @"C:\repo", null, null),
+            log, onStdoutLine: null, CancellationToken.None);
+        Assert.Equal("thread-new", result.SessionId);
+        Assert.DoesNotContain("resume", runner.LastRequest!.Arguments);
+    }
+
+    [Fact]
+    public async Task ResumeWithDifferentReturnedThreadIdFailsWithSessionMismatch()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(0,
+                "{\"type\":\"thread.started\",\"thread_id\":\"thread-other\"}\n"
+                + "{\"type\":\"turn.completed\"}", ""),
+        };
+        await using var log = TestRunLogs.CreateLog();
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => new CodexCliDriver(runner).RunAsync(
+            new AgentRunRequest(AgentFacade.CodexAgent, "continue", @"C:\repo", "thread-requested", null),
+            log, onStdoutLine: null, CancellationToken.None));
+
+        Assert.Equal("session_mismatch", failure.Data[CliJson.FailureKindKey]);
+        Assert.Contains("different session id", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("resume", runner.LastRequest!.Arguments);
+        Assert.Contains("thread-requested", runner.LastRequest.Arguments);
+    }
+
     [Theory]
     [InlineData("not-json")]
     [InlineData("not-json\n{\"type\":\"thread.started\",\"thread_id\":\"thread-2\"}\n{\"type\":\"turn.completed\"}")]

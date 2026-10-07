@@ -494,7 +494,7 @@ run log は `%USERPROFILE%\.codex-agent-facade\runs\<runId>.events.jsonl`。
 
 ### 配置済みMCP経由のrelay受入確認（2026-10-07）
 
-設定済みFacade `127.0.0.1:18765` の公開schemaはHTTP 200で取得し、`model`, `reasoning_effort`, `fast` と `codex` agentを確認した。配置先の4 Skill hashはworkspaceの4 Skillと一致した。Scheduler `\CodexAgentFacade` はPID 80760で稼働し、確認時刻は19:21:38。配置backupは `D:\Tools\Development\CodexAgentFacade.backup-20261007-192135`。
+設定済みFacade `127.0.0.1:18765` の公開schemaはHTTP 200で取得し、`model`, `reasoning_effort`, `fast` と `codex` agentを確認した。配置先の4 Skill hashはworkspaceの4 Skillと一致した。Scheduler `\CodexAgentFacade` はPID 80760で稼働し、プロセス起動時刻は19:21:38。配置backupは `D:\Tools\Development\CodexAgentFacade.backup-20261007-192135`。
 
 最初のrelay失敗では、旧Codex Skillにある例文が実際のpayloadと混同され、`start_agent` にユーザー本文でなくSkill内の「このworkspaceを読み取り専用で調査し、結果を簡潔に返して。」が渡った。MCP toolはapproval拒否でjobを作らず失敗したが、呼び出し側Codexはその後に `phase2-relay-ok` と成功回答を返した。記録は `artifacts/phase2/deployed-relay-probe.jsonl`。これは旧Skill境界の不足と、tool失敗後の呼び出し側のrelay逸脱を示す。
 
@@ -503,4 +503,10 @@ run log は `%USERPROFILE%\.codex-agent-facade\runs\<runId>.events.jsonl`。
 成功したrelay確認では、親にCodex CLI `gpt-6.1-sol` / medium / defaultを使い、検証プロセス内だけで `start_agent` と `wait_agent_job` のapproval modeを `approve` に上書きした。global configは変更していない。`$codex` の後に続く実際のユーザー本文は先頭改行を含めてpromptへ渡り、`model=gpt-6-luna`, `reasoning_effort=medium`, `fast=false`, `auto_approve=false` が配置済みMCPへ渡った。job `20261007T102942Z-7ef66cae` は `completed`、子session `01a115e9-70c1-7ab1-b267-8e3119a26dac`、`outputText=phase2-relay-verified` で、親Codexの中継結果も一致した。CLIのlaunch設定は `%USERPROFILE%\.codex-agent-facade\runs\20261007T102942Z-7ef66cae.events.jsonl` に記録されている。
 
 この成功はGPT-6.1 Solを親relayにした1回の受入確認であり、すべてのモデルで同じ動作になる保証ではない。今回の結果からLunaを親relayとして推奨しない。Lunaをchild implementation agentとして使った結果とは区別する。`fast=true` の推論はこの確認でも行っていない。
+
+### Remote review対応（2026-10-07）
+
+Codex CLIのresumeで、要求したsession IDとCLIが返したIDが異なる場合に成功扱いされる問題を修正した。現在は `session_mismatch` で失敗し、新規sessionの成功へfallbackしない。新規sessionと一致するresumeの成功動作も回帰テストで維持し、最終テストは224/224件成功した（`artifacts/phase2/full-test-final.log`）。
+
+Copilotの `none` / `minimal` effortをCLI対応値から削る提案は採用しなかった。必須reviewの7 inline commentは同じ提案であり、現在のCopilot CLI `--help` が両値を対応値として列挙している（`artifacts/phase2/copilot-effort-help-current.txt`）。
 

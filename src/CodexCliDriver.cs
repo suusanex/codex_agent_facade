@@ -96,6 +96,15 @@ public sealed class CodexCliDriver
             throw;
         }
 
+        if (!string.IsNullOrWhiteSpace(request.SessionId)
+            && !string.Equals(request.SessionId, parsed.SessionId, StringComparison.Ordinal))
+        {
+            var failure = new InvalidOperationException("Codex CLI resumed with a different session id than requested.");
+            CliJson.MarkFailure(failure, "session_mismatch");
+            CliJson.TraceException(failure);
+            throw failure;
+        }
+
         return new AgentRunResult(
             Agent: AgentFacade.CodexAgent,
             SessionId: parsed.SessionId,
