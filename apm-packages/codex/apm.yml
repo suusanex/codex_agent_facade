@@ -1,0 +1,11 @@
+name: codex
+version: 0.1.0
+description: Codex CLIへCodex Agent Facade経由で作業を委譲し、このCodex threadは結果を中継するSkill。
+type: hybrid
+targets:
+  - codex
+  - agent-skills
+includes: auto
+
+dependencies:
+  apm: []

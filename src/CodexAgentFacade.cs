@@ -16,6 +16,7 @@
 #:include GitHubCopilotDriver.cs
 #:include GrokBuildDriver.cs
 #:include CursorCliDriver.cs
+#:include CodexCliDriver.cs
 #:include AgentTools.cs
 #:include McpPublicContract.cs
 #:include AgentJob.cs

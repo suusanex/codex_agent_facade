@@ -5,15 +5,18 @@
 public static class McpPublicContract
 {
     public const string ServerInstructions =
-        "Thin execution transport from Codex to GitHub Copilot, Grok Build, or Cursor CLI. "
+        "Thin execution transport from Codex to GitHub Copilot, Grok Build, Cursor CLI, or Codex CLI. "
         + "The caller is responsible for deciding whether and how to delegate work and for constructing a self-contained prompt for the selected external agent. "
         + "The Facade itself does not plan, split, or semantically rewrite the worker prompt supplied to start_agent. "
         + "Do not interpret this as requiring the caller to forward the original user prompt. "
         + "The caller may derive a narrower worker-specific prompt from its own instructions and context. "
         + "Caller-supplied structured options such as skills may be translated by the selected driver into that agent's native invocation form. "
-        + "Optional model is an agent-native model id supplied by the caller. "
+        + "Optional model is an agent-native base model id supplied by the caller. Its identity is never renamed or replaced by the Facade. "
         + "When it is omitted, empty, or whitespace, the Facade does not pass a model argument and does not select, rename, or fall back to another model. "
         + "Model names inside the worker prompt are not launch settings. "
+        + "Optional reasoning_effort and fast are independent execution options, never inferred from the prompt. "
+        + "When omitted, they leave the CLI's current behavior unchanged. "
+        + "Cursor requires an explicit model for either option; independent fast is unsupported by GitHub Copilot and Grok Build and is rejected. "
         + "Call start_agent with request_id, agent, prompt, and working_directory. "
         + "Each start_agent call is a complete RPC; previous arguments are not retained. "
         + "Generate a new request_id for each distinct agent job. "
@@ -30,7 +33,7 @@ public static class McpPublicContract
         + "Reuse session_id from a completed result to continue the same external agent session.";
 
     public const string StartAgentDescription =
-        "Start a coding agent job (github-copilot, grok-build, or cursor) and return a jobId immediately. "
+        "Start a coding agent job (github-copilot, grok-build, cursor, or codex) and return a jobId immediately. "
         + "The caller constructs a self-contained worker prompt and a request_id for this distinct job. "
         + "Pass request_id, agent, prompt, and working_directory on every call. "
         + "Reuse that request_id only if this start_agent result is lost. "
@@ -41,9 +44,13 @@ public static class McpPublicContract
         + "Successful results expose outputKind as final_response or assistant_transcript; raw streams are not returned by MCP. "
         + "The Facade does not plan, split, or semantically rewrite the supplied worker task. "
         + "Structured options such as skills may be translated by the selected driver. "
-        + "Optional model is forwarded unchanged to the selected CLI when the caller sets it. "
+        + "When reasoning_effort and fast are omitted, the selected CLI receives the model id as supplied. Cursor encodes explicit execution options in its model parameter syntax without selecting another base model. "
         + "When model is omitted, the Facade does not pass a model argument and does not choose another model. "
-        + "Model names inside the worker prompt are not launch settings.";
+        + "Model names inside the worker prompt are not launch settings. "
+        + "Optional reasoning_effort is passed as a separate CLI setting; empty or unsafe values are rejected. "
+        + "Optional fast is a tri-state boolean: omitted preserves existing behavior, true requests fast, and false requests the provider's explicit non-fast/default tier. "
+        + "Cursor requires an explicit model to use reasoning_effort or fast. GitHub Copilot and Grok Build reject either explicit fast value because their CLIs provide no independent fast switch. "
+        + "All settings must be specified again when continuing a session or retrying a start_agent request.";
 
     public const string GetAgentJobDescription =
         "Get the current status or terminal result of a previously started agent job. "
@@ -84,12 +91,27 @@ public static class McpPublicContract
 
     public const string SkillsDescription =
         "Optional Codex-format skill names. GitHub Copilot and Grok Build translate them to agent-native prompt directives. "
-        + "Cursor currently does not translate this field; explicit Cursor skill invocation must be included in the worker prompt.";
+        + "Cursor and Codex currently do not translate this field; explicit skill invocation must be included in the worker prompt.";
+
+    public const string AutoApproveDescription =
+        "When true (default), allow the selected CLI to make its normal workspace changes without interactive approval. "
+        + "When false, use the CLI's non-interactive restricted mode. For Codex this means read-only sandbox with approval_policy=never, so approval questions are not shown.";
 
     public const string ModelDescription =
         "Optional agent-native model id. When omitted, empty, or whitespace, the Facade does not pass a model argument and does not choose, rename, or fall back to another model. "
-        + "When set, the value is forwarded unchanged to the selected CLI as --model. "
+        + "When set, the value is forwarded unchanged as the selected CLI model. Cursor appends explicitly requested reasoning_effort/fast parameters using its documented parameterized-model syntax; it does not choose a different model. "
         + "Model names that appear only inside the worker prompt are not launch settings. "
-        + "A value containing a line break is rejected before launch. "
+        + "Line breaks are rejected before launch; other control characters are rejected for a non-blank model value. Blank values retain the existing omitted-model behavior. "
         + "Pass the same value again on an exact retry. Continuing a session does not inherit a previous model.";
+
+    public const string ReasoningEffortDescription =
+        "Optional provider-native reasoning effort token, separate from the worker prompt. Omit it to preserve the CLI default. "
+        + "GitHub Copilot accepts none, minimal, low, medium, high, xhigh, or max; Grok Build accepts its CLI canonical or model-specific effort tokens; Cursor accepts only values supported by the selected model. "
+        + "Cursor requires model. Copilot values are none, minimal, low, medium, high, xhigh, or max; Grok Build may accept model-specific tokens. Unsupported values or model combinations must fail rather than silently change effort. "
+        + "Specify it again when continuing a session or retrying the exact request.";
+
+    public const string FastDescription =
+        "Optional explicit fast tier. Omit to preserve the CLI's existing behavior; true requests fast; false explicitly requests the provider's default/non-fast tier. "
+        + "Cursor and Codex support this independent option. GitHub Copilot and Grok Build reject either explicit value because their CLIs expose no independent fast switch. "
+        + "Cursor requires model. A fast model id may still be selected through model alone. Do not infer fast from model text or substitute another model. Specify the same value on an exact retry.";
 }
