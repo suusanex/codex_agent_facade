@@ -596,14 +596,14 @@ internal sealed class AgentRunLog : IAgentRunLog
                 if (!string.IsNullOrWhiteSpace(humanSummary))
                 {
                     FlushHumanFragmentsLocked();
+                    // terminal 行を含む人間向け行を、events 行より先に flush する。
+                    // viewer は events の terminal 行を見たら終了するため、
+                    // その時点で最終行がすでに読める必要がある。
+                    WriteHumanLineLocked(_timeProvider.GetUtcNow(), TruncateHuman(humanSummary));
                 }
 
                 _eventsWriter.WriteLine(json);
                 _eventsWriter.Flush();
-                if (!string.IsNullOrWhiteSpace(humanSummary))
-                {
-                    WriteHumanLineLocked(_timeProvider.GetUtcNow(), TruncateHuman(humanSummary));
-                }
             }
             catch (Exception ex)
             {

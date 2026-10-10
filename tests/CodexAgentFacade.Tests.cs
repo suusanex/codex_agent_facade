@@ -21,6 +21,8 @@
 #:include ../src/McpPublicContract.cs
 #:include ../src/AgentJob.cs
 #:include ../src/AgentJobService.cs
+#:include ../src/RunLogViewerLauncher.cs
+#:include ../src/RunLogViewerSession.cs
 #:include ../src/McpHttpHost.cs
 
 using System.Diagnostics;
@@ -5258,5 +5260,783 @@ public class ServerLogTests
         factory.CreateLogger(FacadeLogging.LoggerCategory).LogInformation("startup-without-console");
         session.App.Services.GetRequiredService<NLog.LogFactory>().Flush();
         Assert.True(File.Exists(FacadeLogging.GetLogFilePath(session.ServerLogDirectory)));
+    }
+}
+
+public class RunLogViewerTests
+{
+    [Fact]
+    public void DefaultConfigPathIsUserProfile()
+    {
+        Assert.Equal(
+            Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".codex-agent-facade",
+                "config.json"),
+            FacadeUserConfig.GetDefaultPath());
+    }
+
+    [Fact]
+    public void MissingConfigStaysDisabled()
+    {
+        var path = Path.Combine(Directory.CreateTempSubdirectory("caf-viewer-cfg-").FullName, "config.json");
+        var settings = new FileRunLogViewerSettingsSource(path).Load();
+        Assert.False(settings.Enabled);
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"runLogViewer\":{}}")]
+    public void UnspecifiedEnabledStaysDisabled(string json)
+    {
+        var settings = Load(json);
+        Assert.False(settings.Enabled);
+    }
+
+    [Fact]
+    public void EnabledFlagPersistsAcrossReaders()
+    {
+        var path = WriteConfig("{\"runLogViewer\":{\"enabled\":true,\"closeOnCompletion\":false}}");
+        Assert.True(new FileRunLogViewerSettingsSource(path).Load().Enabled);
+        Assert.True(new FileRunLogViewerSettingsSource(path).Load().Enabled);
+        File.WriteAllText(path, "{\"runLogViewer\":{\"enabled\":false}}");
+        Assert.False(new FileRunLogViewerSettingsSource(path).Load().Enabled);
+    }
+
+    [Fact]
+    public void InvalidJsonStaysDisabledAndIsTraced()
+    {
+        var capturing = new CapturingLogger();
+        var settings = Load("{", capturing);
+        Assert.False(settings.Enabled);
+        var text = capturing.Buffer.ToString();
+        Assert.Contains("JsonReaderException", text, StringComparison.Ordinal);
+        Assert.Contains("Failed to read run log viewer settings", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NonBooleanEnabledStaysDisabled()
+    {
+        var capturing = new CapturingLogger();
+        Assert.False(Load("{\"runLogViewer\":{\"enabled\":\"true\"}}", capturing).Enabled);
+        Assert.Contains("must be a boolean", capturing.Buffer.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void UnreadableConfigStaysDisabledAndIsTraced()
+    {
+        var capturing = new CapturingLogger();
+        var path = Path.Combine(Directory.CreateTempSubdirectory("caf-viewer-lock-").FullName, "config.json");
+        using var locked = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
+        Assert.False(new FileRunLogViewerSettingsSource(path, capturing).Load().Enabled);
+        var text = capturing.Buffer.ToString();
+        Assert.Contains("Exception", text, StringComparison.Ordinal);
+        Assert.Contains("Failed to read run log viewer settings", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DedicatedWindowCommandTargetsNewWindow()
+    {
+        var command = WindowsTerminalCommandBuilder.Build(
+            "wt.exe",
+            "job-1",
+            new RunLogViewerCommand(
+                @"C:\tools\RunLogViewer.exe",
+                [@"C:\runs\job-1.log", @"C:\runs\job-1.events.jsonl"]));
+        Assert.Equal(
+            [
+                "-w",
+                "new",
+                "new-tab",
+                "--suppressApplicationTitle",
+                "--title",
+                "codex-agent-facade job-1",
+                @"C:\tools\RunLogViewer.exe",
+                @"C:\runs\job-1.log",
+                @"C:\runs\job-1.events.jsonl",
+            ],
+            command.Arguments);
+        Assert.Equal("wt.exe", command.FileName);
+        Assert.DoesNotContain("last", command.Arguments);
+        Assert.Equal("-w", command.Arguments[0]);
+        Assert.Equal("new", command.Arguments[1]);
+    }
+
+    [Fact]
+    public void CommandLineQuotesWindowTitleAndSemicolons()
+    {
+        var joined = WindowsCommandLine.Join(
+        [
+            "-w",
+            "new",
+            "--title",
+            "codex-agent-facade job-1",
+            @"C:\Program Files\RunLogViewer.exe",
+            @"C:\runs\a;b.log",
+        ]);
+        Assert.Contains("-w new ", joined, StringComparison.Ordinal);
+        Assert.Contains("\"codex-agent-facade job-1\"", joined, StringComparison.Ordinal);
+        Assert.Contains("\"C:\\Program Files\\RunLogViewer.exe\"", joined, StringComparison.Ordinal);
+        Assert.Contains("\"C:\\runs\\a;b.log\"", joined, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PublishedViewerWinsOverSource()
+    {
+        var root = Directory.CreateTempSubdirectory("caf-viewer-resolve-").FullName;
+        var processDir = Path.Combine(root, "publish");
+        Directory.CreateDirectory(processDir);
+        var exe = Path.Combine(processDir, "RunLogViewer.exe");
+        File.WriteAllText(exe, string.Empty);
+        Directory.CreateDirectory(Path.Combine(root, "src"));
+        File.WriteAllText(Path.Combine(root, "src", "RunLogViewer.cs"), string.Empty);
+        var resolver = new RunLogViewerCommandResolver(processDir, [Path.Combine(root, "nested")]);
+        var command = resolver.TryResolve(@"C:\runs\j.log", @"C:\runs\j.events.jsonl");
+        Assert.NotNull(command);
+        Assert.Equal(Path.GetFullPath(exe), command.FileName);
+        Assert.Equal([@"C:\runs\j.log", @"C:\runs\j.events.jsonl"], command.Arguments);
+    }
+
+    [Fact]
+    public void SourceViewerIsUsedWhenPublishIsMissing()
+    {
+        var root = Directory.CreateTempSubdirectory("caf-viewer-source-").FullName;
+        var source = Path.Combine(root, "src", "RunLogViewer.cs");
+        Directory.CreateDirectory(Path.GetDirectoryName(source)!);
+        File.WriteAllText(source, string.Empty);
+        var start = Path.Combine(root, "a", "b");
+        Directory.CreateDirectory(start);
+        var resolver = new RunLogViewerCommandResolver(Path.Combine(root, "empty"), [start]);
+        var command = resolver.TryResolve(@"C:\runs\j.log", @"C:\runs\j.events.jsonl");
+        Assert.NotNull(command);
+        Assert.Equal("dotnet", command.FileName);
+        Assert.Equal(
+            ["run", "--file", Path.GetFullPath(source), "--verbosity", "minimal", "--", @"C:\runs\j.log", @"C:\runs\j.events.jsonl"],
+            command.Arguments);
+    }
+
+    [Fact]
+    public void MissingViewerReturnsNull()
+    {
+        var root = Directory.CreateTempSubdirectory("caf-viewer-none-").FullName;
+        var resolver = new RunLogViewerCommandResolver(root, [root]);
+        Assert.Null(resolver.TryResolve(@"C:\runs\j.log", @"C:\runs\j.events.jsonl"));
+    }
+
+    [Fact]
+    public void DisabledViewerDoesNotStartTerminal()
+    {
+        var starter = new RecordingTerminalStarter();
+        var launcher = CreateLauncher(enabled: false, isWindows: true, starter, ViewerCommand());
+        launcher.TryLaunch("job-1", @"C:\runs\job-1.log", @"C:\runs\job-1.events.jsonl");
+        Assert.Empty(starter.Commands);
+    }
+
+    [Fact]
+    public void EnabledViewerStartsOneDedicatedWindow()
+    {
+        var starter = new RecordingTerminalStarter();
+        var launcher = CreateLauncher(enabled: true, isWindows: true, starter, ViewerCommand());
+        launcher.TryLaunch("job-1", @"C:\runs\job-1.log", @"C:\runs\job-1.events.jsonl");
+        launcher.TryLaunch("job-2", @"C:\runs\job-2.log", @"C:\runs\job-2.events.jsonl");
+        Assert.Equal(2, starter.Commands.Count);
+        Assert.Equal("job-1", JobIdFromTitle(starter.Commands[0]));
+        Assert.Equal("job-2", JobIdFromTitle(starter.Commands[1]));
+        Assert.Equal("-w", starter.Commands[0].Arguments[0]);
+        Assert.Equal("new", starter.Commands[0].Arguments[1]);
+        Assert.Contains(@"C:\runs\job-1.log", starter.Commands[0].Arguments);
+        Assert.Contains(@"C:\runs\job-2.events.jsonl", starter.Commands[1].Arguments);
+    }
+
+    [Fact]
+    public void NonWindowsEnabledViewerDoesNotStartTerminal()
+    {
+        var capturing = new CapturingLogger();
+        var starter = new RecordingTerminalStarter();
+        var launcher = CreateLauncher(enabled: true, isWindows: false, starter, ViewerCommand(), capturing);
+        launcher.TryLaunch("job-1", @"C:\runs\job-1.log", @"C:\runs\job-1.events.jsonl");
+        Assert.Empty(starter.Commands);
+        Assert.Contains("not used on this OS", capturing.Buffer.ToString(), StringComparison.Ordinal);
+        Assert.Contains("job-1", capturing.Buffer.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MissingViewerExecutableIsWarningAndDoesNotThrow()
+    {
+        var capturing = new CapturingLogger();
+        var starter = new RecordingTerminalStarter();
+        var launcher = CreateLauncher(enabled: true, isWindows: true, starter, command: null, capturing);
+        launcher.TryLaunch("job-1", @"C:\runs\job-1.log", @"C:\runs\job-1.events.jsonl");
+        Assert.Empty(starter.Commands);
+        Assert.Contains("was not found", capturing.Buffer.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TerminalStartFailureIsTracedAndDoesNotThrow()
+    {
+        var capturing = new CapturingLogger();
+        var starter = new RecordingTerminalStarter
+        {
+            Exception = new InvalidOperationException("wt missing"),
+        };
+        var launcher = CreateLauncher(enabled: true, isWindows: true, starter, ViewerCommand(), capturing);
+        launcher.TryLaunch("job-1", @"C:\runs\job-1.log", @"C:\runs\job-1.events.jsonl");
+        var text = capturing.Buffer.ToString();
+        Assert.Contains("wt missing", text, StringComparison.Ordinal);
+        Assert.Contains("InvalidOperationException", text, StringComparison.Ordinal);
+        Assert.Contains("agent job will continue", text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("completed")]
+    [InlineData("failed")]
+    [InlineData("cancelled")]
+    public async Task ViewerExitsAfterTerminalEventAndShowsLog(string type)
+    {
+        using var pair = new ViewerLogPair();
+        pair.AppendLog("hello from agent\n");
+        var output = new StringWriter();
+        var task = FastSession().RunAsync(pair.LogPath, pair.EventsPath, output, TextWriter.Null, CancellationToken.None);
+        await WaitUntilAsync(() => output.ToString().Contains("hello from agent", StringComparison.Ordinal));
+        pair.AppendEvents(FacadeEvent(type));
+        var code = await task.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(0, code);
+        Assert.Contains("hello from agent", output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ViewerShowsFinalLineWrittenBeforeTerminalEvent()
+    {
+        using var pair = new ViewerLogPair();
+        pair.AppendLog("before\n");
+        var output = new StringWriter();
+        var task = FastSession().RunAsync(pair.LogPath, pair.EventsPath, output, TextWriter.Null, CancellationToken.None);
+        await WaitUntilAsync(() => output.ToString().Contains("before", StringComparison.Ordinal));
+        pair.AppendLog("final-line\n");
+        pair.AppendEvents(FacadeEvent("completed"));
+        var code = await task.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(0, code);
+        Assert.Contains("before", output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("final-line", output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ViewerShowsRealRunLogTerminalLine()
+    {
+        await using var log = TestRunLogs.CreateLog();
+        var output = new StringWriter();
+        var task = FastSession().RunAsync(log.TextLogPath, log.EventsPath, output, TextWriter.Null, CancellationToken.None);
+        log.AppendHumanFragment("assistant", "work output\n");
+        await WaitUntilAsync(() => output.ToString().Contains("work output", StringComparison.Ordinal));
+        log.WriteCompleted(new AgentRunResult(
+            AgentFacade.GrokBuildAgent,
+            "session",
+            0,
+            "done",
+            string.Empty,
+            log.RunId,
+            log.EventsPath,
+            log.TextLogPath));
+        var code = await task.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(0, code);
+        var text = output.ToString();
+        Assert.Contains("work output", text, StringComparison.Ordinal);
+        Assert.Contains("completed exitCode=0", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NonFacadeCompletedEventDoesNotStopViewer()
+    {
+        using var pair = new ViewerLogPair();
+        pair.AppendLog("still-running\n");
+        var output = new StringWriter();
+        var task = FastSession().RunAsync(pair.LogPath, pair.EventsPath, output, TextWriter.Null, CancellationToken.None);
+        await WaitUntilAsync(() => output.ToString().Contains("still-running", StringComparison.Ordinal));
+        pair.AppendEvents("{\"source\":\"agent\",\"type\":\"completed\"}\n");
+        pair.AppendEvents("{\"source\":\"facade\",\"type\":\"heartbeat\"}\n");
+        await Task.Delay(80);
+        Assert.False(task.IsCompleted);
+        pair.AppendLog("after-heartbeat\n");
+        pair.AppendEvents(FacadeEvent("failed"));
+        var code = await task.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(0, code);
+        Assert.Contains("after-heartbeat", output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PartialTerminalLineDoesNotStopUntilComplete()
+    {
+        using var pair = new ViewerLogPair();
+        pair.AppendLog("partial\n");
+        var output = new StringWriter();
+        var task = FastSession().RunAsync(pair.LogPath, pair.EventsPath, output, TextWriter.Null, CancellationToken.None);
+        await WaitUntilAsync(() => output.ToString().Contains("partial", StringComparison.Ordinal));
+        pair.AppendEvents("{\"source\":\"facade\",\"type\":\"comple");
+        await Task.Delay(80);
+        Assert.False(task.IsCompleted);
+        pair.AppendEvents("ted\"}\n");
+        var code = await task.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(0, code);
+    }
+
+    [Fact]
+    public async Task InvalidEventLineIsTracedAndViewerContinues()
+    {
+        using var pair = new ViewerLogPair();
+        pair.AppendLog("keep\n");
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var task = FastSession().RunAsync(pair.LogPath, pair.EventsPath, output, error, CancellationToken.None);
+        await WaitUntilAsync(() => output.ToString().Contains("keep", StringComparison.Ordinal));
+        pair.AppendEvents("not-json\n");
+        await WaitUntilAsync(() =>
+        {
+            var text = error.ToString();
+            return text.Contains("JsonException", StringComparison.Ordinal)
+                || text.Contains("JsonReaderException", StringComparison.Ordinal);
+        });
+        Assert.False(task.IsCompleted);
+        pair.AppendEvents(FacadeEvent("cancelled"));
+        Assert.Equal(0, await task.WaitAsync(TimeSpan.FromSeconds(3)));
+        Assert.Contains("keep", output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ParallelViewersFollowSeparateLogs()
+    {
+        using var first = new ViewerLogPair();
+        using var second = new ViewerLogPair();
+        first.AppendLog("one\n");
+        second.AppendLog("two\n");
+        var firstOutput = new StringWriter();
+        var secondOutput = new StringWriter();
+        var firstTask = FastSession().RunAsync(first.LogPath, first.EventsPath, firstOutput, TextWriter.Null, CancellationToken.None);
+        var secondTask = FastSession().RunAsync(second.LogPath, second.EventsPath, secondOutput, TextWriter.Null, CancellationToken.None);
+        await WaitUntilAsync(() => firstOutput.ToString().Contains("one", StringComparison.Ordinal)
+            && secondOutput.ToString().Contains("two", StringComparison.Ordinal));
+        first.AppendEvents(FacadeEvent("completed"));
+        Assert.Equal(0, await firstTask.WaitAsync(TimeSpan.FromSeconds(3)));
+        Assert.False(secondTask.IsCompleted);
+        second.AppendEvents(FacadeEvent("cancelled"));
+        Assert.Equal(0, await secondTask.WaitAsync(TimeSpan.FromSeconds(3)));
+        Assert.Contains("one", firstOutput.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("two", firstOutput.ToString(), StringComparison.Ordinal);
+        Assert.Contains("two", secondOutput.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CancellingViewerReturnsWithoutThrowing()
+    {
+        using var pair = new ViewerLogPair();
+        pair.AppendLog("visible\n");
+        var output = new StringWriter();
+        var error = new StringWriter();
+        using var cts = new CancellationTokenSource();
+        var task = FastSession().RunAsync(pair.LogPath, pair.EventsPath, output, error, cts.Token);
+        await WaitUntilAsync(() => output.ToString().Contains("visible", StringComparison.Ordinal));
+        cts.Cancel();
+        Assert.Equal(0, await task.WaitAsync(TimeSpan.FromSeconds(3)));
+        Assert.Contains("TaskCanceledException", error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TailHoldsIncompleteUtf8Sequence()
+    {
+        var path = Path.Combine(Directory.CreateTempSubdirectory("caf-utf8-").FullName, "log");
+        File.WriteAllBytes(path, [0xC3]);
+        var tail = new SharedTextTail(path);
+        Assert.Equal(string.Empty, tail.ReadNewText());
+        using (var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
+        {
+            stream.WriteByte(0xA9);
+        }
+
+        Assert.Equal("é", tail.ReadNewText());
+        Assert.Equal(0, Utf8TailDecoder.CompleteLength([0xF0, 0x9F, 0x98]));
+        Assert.Equal(4, Utf8TailDecoder.CompleteLength([0xF0, 0x9F, 0x98, 0x80]));
+    }
+
+    [Fact]
+    public void ViewerUsageErrorReturnsNonZero()
+    {
+        var error = new StringWriter();
+        var code = RunLogViewerProgram.RunAsync([], new StringWriter(), error, CancellationToken.None).GetAwaiter().GetResult();
+        Assert.Equal(1, code);
+        Assert.Contains("Usage: RunLogViewer", error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ViewerReadFailureReturnsNonZeroAndTraces()
+    {
+        var directory = Directory.CreateTempSubdirectory("caf-viewer-bad-").FullName;
+        var log = Path.Combine(directory, "job.log");
+        var events = Path.Combine(directory, "events.jsonl");
+        File.WriteAllText(events, string.Empty);
+        using var locked = new FileStream(log, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
+        var error = new StringWriter();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        var code = RunLogViewerProgram.RunAsync(
+            [log, events],
+            new StringWriter(),
+            error,
+            cts.Token).GetAwaiter().GetResult();
+        Assert.Equal(1, code);
+        Assert.Contains("Exception", error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task EachJobLaunchesItsOwnViewer()
+    {
+        var launcher = new RecordingRunLogViewerLauncher();
+        var runner = new RecordingProcessRunner
+        {
+            Gate = NewGate(),
+            Result = GrokStdout("ok"),
+        };
+        var service = CreateService(launcher, runner);
+        var first = service.Start("req-a", Grok("a"));
+        var second = service.Start("req-b", Grok("b"));
+        await WaitUntilAsync(() => launcher.Count >= 2);
+        Assert.Equal(2, launcher.Snapshot().Select(call => call.JobId).Distinct().Count());
+        Assert.Contains(launcher.Snapshot(), call => call.JobId == first.JobId && call.TextLogPath.EndsWith(first.JobId + ".log", StringComparison.Ordinal));
+        Assert.Contains(launcher.Snapshot(), call => call.JobId == second.JobId && call.EventsLogPath.EndsWith(second.JobId + ".events.jsonl", StringComparison.Ordinal));
+        Assert.NotEqual(launcher.Snapshot()[0].TextLogPath, launcher.Snapshot()[1].TextLogPath);
+        runner.Gate.SetResult(true);
+        Assert.Equal(AgentJobStatus.Completed, (await WaitJobAsync(service, first.JobId)).Status);
+        Assert.Equal(AgentJobStatus.Completed, (await WaitJobAsync(service, second.JobId)).Status);
+    }
+
+    [Fact]
+    public async Task SameRequestIdLaunchesViewerOnce()
+    {
+        var launcher = new RecordingRunLogViewerLauncher();
+        var runner = new RecordingProcessRunner
+        {
+            Gate = NewGate(),
+            Result = GrokStdout("ok"),
+        };
+        var service = CreateService(launcher, runner);
+        var first = service.Start("req-same", Grok("a"));
+        var second = service.Start("req-same", Grok("a"));
+        Assert.Equal(first.JobId, second.JobId);
+        await WaitUntilAsync(() => launcher.Count >= 1);
+        await Task.Delay(80);
+        Assert.Equal(1, launcher.Count);
+        runner.Gate.SetResult(true);
+        Assert.Equal(AgentJobStatus.Completed, (await WaitJobAsync(service, first.JobId)).Status);
+    }
+
+    [Fact]
+    public async Task ViewerLaunchFailureDoesNotFailJob()
+    {
+        var capturing = new CapturingLoggerFactory();
+        var launcher = new ThrowingRunLogViewerLauncher();
+        var runner = new RecordingProcessRunner { Result = GrokStdout("still-ok") };
+        var service = CreateService(launcher, runner);
+        using (FacadeLog.UseLoggerFactory(capturing))
+        {
+            var started = service.Start("req-viewer-fail", Grok("a"));
+            var completed = await WaitJobAsync(service, started.JobId);
+            Assert.Equal(AgentJobStatus.Completed, completed.Status);
+            Assert.Equal("still-ok", completed.Result!.OutputText);
+        }
+
+        Assert.Contains("viewer failed", capturing.Logger.Buffer.ToString(), StringComparison.Ordinal);
+        Assert.Contains("InvalidOperationException", capturing.Logger.Buffer.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ClosingViewerDoesNotChangeJobLifetime()
+    {
+        var launcher = new RecordingRunLogViewerLauncher();
+        var runner = new RecordingProcessRunner
+        {
+            Gate = NewGate(),
+            Result = GrokStdout("after-close"),
+        };
+        var service = CreateService(launcher, runner);
+        var started = service.Start("req-close-viewer", Grok("a"));
+        await WaitUntilAsync(() => launcher.Count >= 1);
+        Assert.Equal(AgentJobStatus.Running, service.Get(started.JobId).Status);
+        runner.Gate.SetResult(true);
+        var completed = await WaitJobAsync(service, started.JobId);
+        Assert.Equal(AgentJobStatus.Completed, completed.Status);
+        Assert.Equal("after-close", completed.Result!.OutputText);
+        Assert.Equal(1, launcher.Count);
+    }
+
+    [Fact]
+    public async Task DisabledViewerLeavesJobOnTheExistingPath()
+    {
+        var starter = new RecordingTerminalStarter();
+        var launcher = CreateLauncher(enabled: false, isWindows: true, starter, ViewerCommand());
+        var runner = new RecordingProcessRunner { Result = GrokStdout("quiet") };
+        var service = CreateService(launcher, runner);
+        var started = service.Start("req-off", Grok("a"));
+        var completed = await WaitJobAsync(service, started.JobId);
+        Assert.Equal(AgentJobStatus.Completed, completed.Status);
+        Assert.Empty(starter.Commands);
+    }
+
+    private static RunLogViewerSettings Load(string json, ILogger? logger = null)
+    {
+        return new FileRunLogViewerSettingsSource(WriteConfig(json), logger).Load();
+    }
+
+    private static string WriteConfig(string json)
+    {
+        var path = Path.Combine(Directory.CreateTempSubdirectory("caf-viewer-cfg-").FullName, "config.json");
+        File.WriteAllText(path, json);
+        return path;
+    }
+
+    private static WindowsRunLogViewerLauncher CreateLauncher(
+        bool enabled,
+        bool isWindows,
+        RecordingTerminalStarter starter,
+        RunLogViewerCommand? command,
+        ILogger? logger = null)
+    {
+        return new WindowsRunLogViewerLauncher(
+            new FixedRunLogViewerSettings(enabled),
+            new FakeOperatingSystem(isWindows),
+            new FixedViewerCommandResolver(command),
+            starter,
+            "wt.exe",
+            logger);
+    }
+
+    private static RunLogViewerCommand ViewerCommand()
+    {
+        return new RunLogViewerCommand("RunLogViewer.exe", ["log", "events"]);
+    }
+
+    private static string JobIdFromTitle(WindowsTerminalLaunchCommand command)
+    {
+        var titleIndex = command.Arguments.ToList().IndexOf("--title");
+        Assert.True(titleIndex >= 0);
+        return command.Arguments[titleIndex + 1].Replace("codex-agent-facade ", string.Empty, StringComparison.Ordinal);
+    }
+
+    private static RunLogViewerSession FastSession()
+    {
+        return new RunLogViewerSession(TimeSpan.FromMilliseconds(15));
+    }
+
+    private static string FacadeEvent(string type)
+    {
+        return "{\"source\":\"facade\",\"type\":\"" + type + "\"}\n";
+    }
+
+    private static AgentJobService CreateService(IRunLogViewerLauncher launcher, RecordingProcessRunner runner)
+    {
+        var facade = new AgentFacade(
+            new GitHubCopilotDriver(runner),
+            new GrokBuildDriver(runner),
+            new CursorCliDriver(runner),
+            TestRunLogs.CreateFactory(),
+            launcher);
+        return new AgentJobService(facade, Directory.CreateTempSubdirectory("caf-viewer-jobs-").FullName);
+    }
+
+    private static AgentRunRequest Grok(string prompt)
+    {
+        return new AgentRunRequest(AgentFacade.GrokBuildAgent, prompt, Path.GetTempPath(), null, null);
+    }
+
+    private static ProcessRunResult GrokStdout(string text)
+    {
+        var stdout = "{\"type\":\"text\",\"data\":" + JsonSerializer.Serialize(text)
+            + "}\n{\"type\":\"end\",\"sessionId\":\"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\"}";
+        return new ProcessRunResult(0, stdout, string.Empty);
+    }
+
+    private static TaskCompletionSource<bool> NewGate()
+    {
+        return new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    private static async Task<AgentJobSnapshot> WaitJobAsync(AgentJobService service, string jobId)
+    {
+        for (var i = 0; i < 200; i++)
+        {
+            var snapshot = service.Get(jobId);
+            if (snapshot.Status != AgentJobStatus.Running)
+            {
+                return snapshot;
+            }
+
+            await Task.Delay(20);
+        }
+
+        throw new TimeoutException("job did not finish: " + jobId);
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        for (var i = 0; i < 200; i++)
+        {
+            if (condition())
+            {
+                return;
+            }
+
+            await Task.Delay(20);
+        }
+
+        throw new TimeoutException("condition was not met");
+    }
+
+    private sealed class ViewerLogPair : IDisposable
+    {
+        private readonly string _directory = Directory.CreateTempSubdirectory("caf-viewer-log-").FullName;
+
+        public ViewerLogPair()
+        {
+            File.WriteAllText(LogPath, string.Empty);
+            File.WriteAllText(EventsPath, string.Empty);
+        }
+
+        public string LogPath => Path.Combine(_directory, "job.log");
+
+        public string EventsPath => Path.Combine(_directory, "job.events.jsonl");
+
+        public void AppendLog(string text)
+        {
+            Append(LogPath, text);
+        }
+
+        public void AppendEvents(string text)
+        {
+            Append(EventsPath, text);
+        }
+
+        public void Dispose()
+        {
+            Directory.Delete(_directory, recursive: true);
+        }
+
+        private static void Append(string path, string text)
+        {
+            using var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+            var bytes = Encoding.UTF8.GetBytes(text);
+            stream.Write(bytes, 0, bytes.Length);
+        }
+    }
+
+    private sealed class FixedRunLogViewerSettings : IRunLogViewerSettingsSource
+    {
+        private readonly bool _enabled;
+
+        public FixedRunLogViewerSettings(bool enabled)
+        {
+            _enabled = enabled;
+        }
+
+        public RunLogViewerSettings Load()
+        {
+            return new RunLogViewerSettings(_enabled);
+        }
+    }
+
+    private sealed class FakeOperatingSystem : IOperatingSystemInfo
+    {
+        public FakeOperatingSystem(bool isWindows)
+        {
+            IsWindows = isWindows;
+        }
+
+        public bool IsWindows { get; }
+    }
+
+    private sealed class FixedViewerCommandResolver : IRunLogViewerCommandResolver
+    {
+        private readonly RunLogViewerCommand? _command;
+
+        public FixedViewerCommandResolver(RunLogViewerCommand? command)
+        {
+            _command = command;
+        }
+
+        public RunLogViewerCommand? TryResolve(string textLogPath, string eventsLogPath)
+        {
+            if (_command is null)
+            {
+                return null;
+            }
+
+            return new RunLogViewerCommand(_command.FileName, [textLogPath, eventsLogPath]);
+        }
+    }
+
+    private sealed class RecordingTerminalStarter : IWindowsTerminalProcessStarter
+    {
+        public List<WindowsTerminalLaunchCommand> Commands { get; } = [];
+
+        public Exception? Exception { get; init; }
+
+        public void Start(WindowsTerminalLaunchCommand command)
+        {
+            Commands.Add(command);
+            if (Exception is not null)
+            {
+                throw Exception;
+            }
+        }
+    }
+
+    private sealed record RunLogViewerLaunch(string JobId, string TextLogPath, string EventsLogPath);
+
+    private sealed class RecordingRunLogViewerLauncher : IRunLogViewerLauncher
+    {
+        private readonly object _gate = new();
+        private readonly List<RunLogViewerLaunch> _calls = [];
+
+        public int Count
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _calls.Count;
+                }
+            }
+        }
+
+        public void TryLaunch(string jobId, string textLogPath, string eventsLogPath)
+        {
+            lock (_gate)
+            {
+                _calls.Add(new RunLogViewerLaunch(jobId, textLogPath, eventsLogPath));
+            }
+        }
+
+        public IReadOnlyList<RunLogViewerLaunch> Snapshot()
+        {
+            lock (_gate)
+            {
+                return _calls.ToArray();
+            }
+        }
+    }
+
+    private sealed class ThrowingRunLogViewerLauncher : IRunLogViewerLauncher
+    {
+        public void TryLaunch(string jobId, string textLogPath, string eventsLogPath)
+        {
+            throw new InvalidOperationException("viewer failed");
+        }
+    }
+}
+
+[Collection("http-host")]
+public class RunLogViewerHostTests
+{
+    [Fact]
+    public async Task TestHostDoesNotLaunchWindowsTerminal()
+    {
+        await using var session = await McpHttpTestHost.StartAsync();
+        var launcher = session.App.Services.GetRequiredService<IRunLogViewerLauncher>();
+        Assert.Same(NullRunLogViewerLauncher.Instance, launcher);
     }
 }
