@@ -166,6 +166,7 @@ internal sealed class AgentRunLog : IAgentRunLog
     private IProcessLifetime? _process;
     private Exception? _backgroundError;
     private bool _disposed;
+    private bool _terminalEventPublished;
     private string? _fragmentKind;
     private DateTimeOffset _fragmentStartedAt;
     private readonly StringBuilder _fragmentBuffer = new();
@@ -347,6 +348,11 @@ internal sealed class AgentRunLog : IAgentRunLog
         lock (_gate)
         {
             ThrowIfUnavailable();
+            if (_terminalEventPublished)
+            {
+                return;
+            }
+
             now = _timeProvider.GetUtcNow();
             elapsed = now - _startedAt;
             lastOutputAgo = now - _lastOutputAt;
@@ -591,6 +597,19 @@ internal sealed class AgentRunLog : IAgentRunLog
         lock (_gate)
         {
             ThrowIfUnavailable();
+            // WriteHeartbeat は状態採取のあと _gate を離してから WriteEnvelope する。
+            // terminal 行の公開前に印を付け、後から入った heartbeat はここで捨てる。
+            // 捨てないと viewer が terminal 行で終了したあとに人間向け行が残る。
+            if (IsHeartbeat(source, type) && _terminalEventPublished)
+            {
+                return;
+            }
+
+            if (IsFacadeTerminal(source, type))
+            {
+                _terminalEventPublished = true;
+            }
+
             try
             {
                 if (!string.IsNullOrWhiteSpace(humanSummary))
@@ -612,6 +631,16 @@ internal sealed class AgentRunLog : IAgentRunLog
                 throw;
             }
         }
+    }
+
+    private static bool IsHeartbeat(string source, string type)
+    {
+        return source == "facade" && type == "heartbeat";
+    }
+
+    private static bool IsFacadeTerminal(string source, string type)
+    {
+        return source == "facade" && type is "completed" or "failed" or "cancelled";
     }
 
     private void ThrowIfUnavailable()

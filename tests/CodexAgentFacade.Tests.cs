@@ -3683,6 +3683,44 @@ public class AgentRunLogTests
         Assert.Contains("completed exitCode=0", text, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("completed")]
+    [InlineData("failed")]
+    [InlineData("cancelled")]
+    public async Task HeartbeatAfterTerminalEventIsDropped(string type)
+    {
+        await using var log = (AgentRunLog)TestRunLogs.CreateLog();
+        switch (type)
+        {
+            case "completed":
+                log.WriteCompleted(new AgentRunResult(
+                    AgentFacade.GrokBuildAgent,
+                    "sid",
+                    0,
+                    "ok",
+                    "raw",
+                    log.RunId,
+                    log.EventsPath,
+                    log.TextLogPath));
+                break;
+            case "failed":
+                log.WriteFailed(new InvalidOperationException("nope"));
+                break;
+            default:
+                log.WriteCancelled();
+                break;
+        }
+
+        log.WriteHeartbeat();
+
+        var events = TestRunLogs.ReadShared(log.EventsPath);
+        var text = TestRunLogs.ReadShared(log.TextLogPath);
+        Assert.Contains("\"type\":\"" + type + "\"", events, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"type\":\"heartbeat\"", events, StringComparison.Ordinal);
+        Assert.Contains(type, text, StringComparison.Ordinal);
+        Assert.DoesNotContain("heartbeat", text, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task FlushesHumanFragmentsOnFailedAndCancelled()
     {
@@ -5280,8 +5318,30 @@ public class RunLogViewerTests
     public void MissingConfigStaysDisabled()
     {
         var path = Path.Combine(Directory.CreateTempSubdirectory("caf-viewer-cfg-").FullName, "config.json");
-        var settings = new FileRunLogViewerSettingsSource(path).Load();
+        var capturing = new CapturingLogger();
+        var settings = new FileRunLogViewerSettingsSource(path, capturing).Load();
         Assert.False(settings.Enabled);
+        Assert.Equal(0, capturing.Buffer.Length);
+    }
+
+    [Fact]
+    public void MissingConfigDirectoryStaysDisabledWithoutTrace()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "caf-viewer-missing-" + Guid.NewGuid().ToString("N"), "config.json");
+        var capturing = new CapturingLogger();
+        Assert.False(new FileRunLogViewerSettingsSource(path, capturing).Load().Enabled);
+        Assert.Equal(0, capturing.Buffer.Length);
+    }
+
+    [Fact]
+    public void DirectoryConfigPathStaysDisabledAndIsTraced()
+    {
+        var capturing = new CapturingLogger();
+        var path = Directory.CreateTempSubdirectory("caf-viewer-dir-").FullName;
+        Assert.False(new FileRunLogViewerSettingsSource(path, capturing).Load().Enabled);
+        var text = capturing.Buffer.ToString();
+        Assert.Contains("Exception", text, StringComparison.Ordinal);
+        Assert.Contains("Failed to read run log viewer settings", text, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -5377,7 +5437,8 @@ public class RunLogViewerTests
         Assert.Contains("-w new ", joined, StringComparison.Ordinal);
         Assert.Contains("\"codex-agent-facade job-1\"", joined, StringComparison.Ordinal);
         Assert.Contains("\"C:\\Program Files\\RunLogViewer.exe\"", joined, StringComparison.Ordinal);
-        Assert.Contains("\"C:\\runs\\a;b.log\"", joined, StringComparison.Ordinal);
+        Assert.Contains("\"C:\\runs\\a\\;b.log\"", joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"C:\\runs\\a;b.log\"", joined, StringComparison.Ordinal);
     }
 
     [Fact]

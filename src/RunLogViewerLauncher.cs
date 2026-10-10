@@ -48,13 +48,10 @@ public sealed class FileRunLogViewerSettingsSource : IRunLogViewerSettingsSource
 
     public RunLogViewerSettings Load()
     {
-        if (!File.Exists(_path))
-        {
-            return RunLogViewerSettings.Disabled;
-        }
-
         try
         {
+            // File.Exists はアクセス拒否などを false に畳む。無い設定だけを無言で無効にし、
+            // それ以外の読み取り失敗は下の診断ログへ落とす。
             using var stream = new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             using var reader = new StreamReader(stream);
             using var document = JsonDocument.Parse(reader.ReadToEnd());
@@ -88,6 +85,14 @@ public sealed class FileRunLogViewerSettingsSource : IRunLogViewerSettingsSource
             }
 
             return new RunLogViewerSettings(enabled.GetBoolean());
+        }
+        catch (FileNotFoundException)
+        {
+            return RunLogViewerSettings.Disabled;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return RunLogViewerSettings.Disabled;
         }
         catch (Exception ex)
         {
@@ -250,7 +255,14 @@ internal static class WindowsCommandLine
     public static string Join(IReadOnlyList<string> arguments)
     {
         ArgumentNullException.ThrowIfNull(arguments);
-        return string.Join(' ', arguments.Select(Quote));
+        return string.Join(' ', arguments.Select(QuoteForWindowsTerminal));
+    }
+
+    // wt.exe は Windows の argv 化のあとも ';' をコマンド区切りにする。引用符では区切られない。
+    // 区切りにしない ';' は '\;' として渡し、Windows の引用はその後にかける。
+    private static string QuoteForWindowsTerminal(string argument)
+    {
+        return Quote(argument.Replace(";", "\\;", StringComparison.Ordinal));
     }
 
     public static string Quote(string argument)
