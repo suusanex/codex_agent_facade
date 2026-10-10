@@ -32,7 +32,7 @@ public sealed class McpHttpHostOptions
     public NLog.LogFactory? LogFactory { get; init; }
 
     /// <summary>
-    /// 未指定時は viewer を起動しない。テストや Poc がユーザー設定の Terminal を開かないようにする。
+    /// 未指定時は viewer を起動しない。テストや PoC がユーザー設定の Terminal を開かないようにする。
     /// </summary>
     public IRunLogViewerLauncher? RunLogViewerLauncher { get; init; }
 }
