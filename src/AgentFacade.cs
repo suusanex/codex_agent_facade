@@ -36,6 +36,23 @@ internal sealed record ParsedCliOutput(
     string OutputText,
     string OutputKind = "assistant_transcript");
 
+/// <summary>
+/// agent job の人間向け run log を観測用プロセスで開く。失敗しても job は継続する。
+/// </summary>
+public interface IRunLogViewerLauncher
+{
+    void TryLaunch(string jobId, string textLogPath, string eventsLogPath);
+}
+
+public sealed class NullRunLogViewerLauncher : IRunLogViewerLauncher
+{
+    public static NullRunLogViewerLauncher Instance { get; } = new();
+
+    public void TryLaunch(string jobId, string textLogPath, string eventsLogPath)
+    {
+    }
+}
+
 internal static class AgentJson
 {
     public static readonly JsonSerializerOptions Options = new()
@@ -59,17 +76,20 @@ public sealed class AgentFacade
     private readonly GrokBuildDriver _grokBuild;
     private readonly CursorCliDriver _cursorCli;
     private readonly IAgentRunLogFactory _runLogFactory;
+    private readonly IRunLogViewerLauncher _runLogViewerLauncher;
 
     public AgentFacade(
         GitHubCopilotDriver gitHubCopilot,
         GrokBuildDriver grokBuild,
         CursorCliDriver cursorCli,
-        IAgentRunLogFactory runLogFactory)
+        IAgentRunLogFactory runLogFactory,
+        IRunLogViewerLauncher? runLogViewerLauncher = null)
     {
         _gitHubCopilot = gitHubCopilot;
         _grokBuild = grokBuild;
         _cursorCli = cursorCli;
         _runLogFactory = runLogFactory;
+        _runLogViewerLauncher = runLogViewerLauncher ?? NullRunLogViewerLauncher.Instance;
     }
 
     public async Task<AgentRunResult> RunAsync(
@@ -91,6 +111,7 @@ public sealed class AgentFacade
         await using var log = string.IsNullOrWhiteSpace(runId)
             ? _runLogFactory.Start(request)
             : _runLogFactory.Start(request, runId);
+        TryLaunchRunLogViewer(log);
         try
         {
             var result = request.Agent.Trim() switch
@@ -125,6 +146,19 @@ public sealed class AgentFacade
             CliJson.TraceException(ex);
             log.WriteFailed(ex);
             throw;
+        }
+    }
+
+    private void TryLaunchRunLogViewer(IAgentRunLog log)
+    {
+        try
+        {
+            _runLogViewerLauncher.TryLaunch(log.RunId, log.TextLogPath, log.EventsPath);
+        }
+        catch (Exception ex)
+        {
+            // viewer の失敗は execution の失敗へ昇格させない。
+            CliJson.TraceException(ex);
         }
     }
 

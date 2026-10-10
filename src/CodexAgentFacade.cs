@@ -20,6 +20,7 @@
 #:include McpPublicContract.cs
 #:include AgentJob.cs
 #:include AgentJobService.cs
+#:include RunLogViewerLauncher.cs
 #:include McpHttpHost.cs
 
 using Microsoft.Extensions.Logging;
@@ -40,6 +41,8 @@ try
         Port = envOptions.Port,
         LogFactory = nlogFactory,
         ServerLogDirectory = logDirectory,
+        RunLogViewerLauncher = new WindowsRunLogViewerLauncher(
+            new FileRunLogViewerSettingsSource(FacadeUserConfig.GetDefaultPath())),
     };
     await using var app = McpHttpHost.Create(args, options);
     await app.StartAsync();

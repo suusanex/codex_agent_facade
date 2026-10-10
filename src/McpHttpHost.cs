@@ -30,6 +30,11 @@ public sealed class McpHttpHostOptions
     public string? ServerLogDirectory { get; init; }
 
     public NLog.LogFactory? LogFactory { get; init; }
+
+    /// <summary>
+    /// 未指定時は viewer を起動しない。テストや Poc がユーザー設定の Terminal を開かないようにする。
+    /// </summary>
+    public IRunLogViewerLauncher? RunLogViewerLauncher { get; init; }
 }
 
 /// <summary>
@@ -108,6 +113,8 @@ public static class McpHttpHost
         builder.Services.AddSingleton<GitHubCopilotDriver>();
         builder.Services.AddSingleton<GrokBuildDriver>();
         builder.Services.AddSingleton<CursorCliDriver>();
+        builder.Services.AddSingleton<IRunLogViewerLauncher>(
+            options.RunLogViewerLauncher ?? NullRunLogViewerLauncher.Instance);
         builder.Services.AddSingleton<AgentFacade>();
         builder.Services.AddSingleton(sp => new AgentJobService(
             sp.GetRequiredService<AgentFacade>(),

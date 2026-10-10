@@ -27,10 +27,11 @@ dotnet run --file src/CodexAgentFacade.cs
 
 既定の listen 先は `http://127.0.0.1:18765/mcp`。`127.0.0.1` のみに bind する。ポートを変える場合は `CODEX_AGENT_FACADE_PORT` と Codex 側の `url` を同じ値に揃える。token はログに出さない。
 
-`dotnet publish` した exe でもよい。exe を使う場合は成果物フォルダごと配置し、ソースツリーは不要。publish 成果物は WinExe なので、直接起動してもコンソールウィンドウは出ない。
+`dotnet publish` した exe でもよい。exe を使う場合は成果物フォルダごと配置し、ソースツリーは不要。publish 成果物は WinExe なので、直接起動してもコンソールウィンドウは出ない。run log viewer を使うときは `RunLogViewer.exe` を同じフォルダに置く。
 
 ```powershell
-dotnet publish src/CodexAgentFacade.cs
+dotnet publish src/CodexAgentFacade.cs -o .\publish
+dotnet publish src/RunLogViewer.cs -o .\publish
 ```
 
 ポートが既に使われている場合は別ポートへ逃げず、起動失敗する。
@@ -68,7 +69,7 @@ prompt、agent の回答本文、result本文、credential、token、その他�
 Facade は Windows Service にしない。GitHub Copilot CLI / Grok Build CLI のユーザー認証を使うため、対象ユーザーのログオンセッション内で `CodexAgentFacade.exe` を直接起動する。PowerShell や `Start-Process` の wrapper は不要。
 
 1. `CODEX_AGENT_FACADE_TOKEN` を対象ユーザーのユーザー環境変数として設定する
-2. `dotnet publish src/CodexAgentFacade.cs` したフォルダごと配置する（例: `D:\Tools\Development\CodexAgentFacade\`）
+2. Facade と `RunLogViewer.exe` を同じフォルダへ publish して配置する（例: `D:\Tools\Development\CodexAgentFacade\`）
 3. タスク スケジューラで基本タスクではなく「タスクの作成」から登録する
 
 推奨設定:
@@ -223,11 +224,42 @@ Codex UI へのストリーミング表示とは独立して、各 agent job の
 | `{runId}.events.jsonl` | 機械解析・監査向け。agent の構造化イベントを元の粒度のまま保存する。Facade の started / heartbeat / completed / failed / cancelled も含む |
 | `{runId}.log` | 人間が実行中に読むテキスト。thought / assistant の細かい streaming fragment は読みやすい行へ結合する。tool 概要 / plan / 完了も含む。巨大な tool 入出力はここに展開しない |
 
-実行中の追従例:
+実行中の手動追従例:
 
 ```powershell
 Get-Content -Wait "$env:USERPROFILE\.codex-agent-facade\runs\<runId>.log"
 ```
+
+### Run log の自動表示
+
+agent job の開始時に、その job の `{jobId}.log` を Windows Terminal の専用ウィンドウで追従できる。1 job につき 1 ウィンドウ。観測専用であり、job の実行や取消とは独立している。Codex のコンテキストへ逐次出力は返さない。
+
+既定は無効。設定ファイルが無い、`runLogViewer` が無い、`enabled` が無い場合は viewer を起動しない。有効にするには次を保存する。
+
+```json
+{
+  "runLogViewer": {
+    "enabled": true
+  }
+}
+```
+
+```text
+%USERPROFILE%\.codex-agent-facade\config.json
+```
+
+このファイルは publish 成果物とは別のユーザー領域に置く。Facade を差し替えても設定は残る。`enabled` を `false` にすると viewer は起動しない。JSON が壊れている、読めない、`enabled` が boolean でない場合は `server.log` に診断を残し、viewer は無効のまま job を続行する。
+
+有効時の動作:
+
+- job 開始時に `wt.exe -w new` で専用ウィンドウを開く。既存ウィンドウへのタブ追加はしない。
+- `{jobId}.log` の追記を表示する。終了判定は `{jobId}.events.jsonl` の `source=facade` かつ `type` が `completed` / `failed` / `cancelled` の行。
+- terminal 行を検出したら、その時点までの最終行を表示してから viewer は exit code 0 で終了する。Windows Terminal のプロファイル `closeOnExit` が既定の `automatic`（Terminal から直接起動したプロセスは `graceful` 相当）または `always` のとき、専用ウィンドウも閉じる。`never` のときはウィンドウが残る。
+- viewer や Terminal を手動で閉じても agent job は継続する。
+- `wt.exe` が無い、viewer 実行ファイルが無い、起動に失敗した場合は `server.log` に warning を残し、job は続行する。
+- `dotnet run --file src/CodexAgentFacade.cs` で起動しているときは、カレントディレクトリかアプリのベースディレクトリから上へ `src/RunLogViewer.cs` を探して viewer にする。publish した exe の隣に `RunLogViewer.exe` があるときはそちらを使う。
+- 非 Windows では viewer を起動しない。`enabled` が `true` でも job は実行し、`server.log` に warning を残す。
+- Facade プロセスが terminal 行を書く前に終了した場合、開いている viewer はそのまま残る。ウィンドウを閉じても job 記録は変わらない。
 
 `runId` は `jobId` と同じ値である。パスは completed の `result` に含まれる。heartbeat は 15 秒間隔で、経過時間・process 生存・最後の外部出力からの経過を記録する。出力が無いこととハングは同義ではない。認証情報・credential・token は書き込み前に `[REDACTED]` へ置換する。起動時には PATH 解決後の実行ファイル、wrapper 種別、host / wrapper switch と論理引数を記録する。
 
