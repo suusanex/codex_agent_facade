@@ -21,13 +21,15 @@ public sealed class AgentTools
     [McpServerTool(Name = "start_agent"), Description(McpPublicContract.StartAgentDescription)]
     public string StartAgent(
         [Description(McpPublicContract.RequestIdDescription)] string request_id,
-        [Description("Target agent. github-copilot, grok-build, or cursor.")] string agent,
+        [Description("Target agent. github-copilot, grok-build, cursor, or codex.")] string agent,
         [Description(McpPublicContract.PromptDescription)] string prompt,
         [Description(McpPublicContract.WorkingDirectoryDescription)] string working_directory,
         [Description("Existing external agent session id. Omit to start a new session.")] string? session_id = null,
         [Description(McpPublicContract.SkillsDescription)] string[]? skills = null,
-        [Description("When true (default), pass the CLI native non-interactive auto-approve flag. Set false to observe question/permission blocking on this same MCP path.")] bool auto_approve = true,
-        [Description(McpPublicContract.ModelDescription)] string? model = null)
+        [Description(McpPublicContract.AutoApproveDescription)] bool auto_approve = true,
+        [Description(McpPublicContract.ModelDescription)] string? model = null,
+        [Description(McpPublicContract.ReasoningEffortDescription)] string? reasoning_effort = null,
+        [Description(McpPublicContract.FastDescription)] bool? fast = null)
     {
         var invocationId = Guid.NewGuid().ToString("N");
         var startedAt = Stopwatch.GetTimestamp();
@@ -43,7 +45,9 @@ public sealed class AgentTools
                     SessionId: session_id,
                     Skills: skills,
                     AutoApprove: auto_approve,
-                    Model: model));
+                    Model: model,
+                    ReasoningEffort: reasoning_effort,
+                    Fast: fast));
             LogCompleted("start_agent", invocationId, startedAt, snapshot, includeRequestId: true, agent: agent);
             return SerializePublic(snapshot);
         }

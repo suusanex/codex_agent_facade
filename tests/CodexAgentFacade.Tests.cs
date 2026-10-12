@@ -17,6 +17,7 @@
 #:include ../src/GitHubCopilotDriver.cs
 #:include ../src/GrokBuildDriver.cs
 #:include ../src/CursorCliDriver.cs
+#:include ../src/CodexCliDriver.cs
 #:include ../src/AgentTools.cs
 #:include ../src/McpPublicContract.cs
 #:include ../src/AgentJob.cs
@@ -145,6 +146,12 @@ public sealed class RecordingProcessRunner : IProcessRunner
     }
 }
 
+[CollectionDefinition("global-facade-logger", DisableParallelization = true)]
+public sealed class GlobalFacadeLoggerCollection
+{
+}
+
+[Collection("global-facade-logger")]
 public class AgentFacadeTests
 {
     [Fact]
@@ -198,7 +205,7 @@ public class AgentFacadeTests
                     Model: "a\nb"),
                 onStdoutLine: null,
                 CancellationToken.None));
-            Assert.Contains("line breaks", ex.Message, StringComparison.Ordinal);
+            Assert.Contains("control characters", ex.Message, StringComparison.Ordinal);
             Assert.Equal(0, runner.CallCount);
             var trace = capturing.Logger.Buffer.ToString();
             Assert.Contains(nameof(ArgumentException), trace, StringComparison.Ordinal);
@@ -270,6 +277,21 @@ public class AgentFacadeTests
         Assert.True(File.Exists(result.TextLogPath));
     }
 
+    [Fact]
+    public async Task ExplicitFastIsRejectedForCopilotAndGrokBeforeLaunch()
+    {
+        foreach (var agent in new[] { AgentFacade.GitHubCopilotAgent, AgentFacade.GrokBuildAgent })
+        {
+            var facade = CreateFacade(out var runner);
+            var ex = await Assert.ThrowsAsync<ArgumentException>(() => facade.RunAsync(
+                new AgentRunRequest(agent, "hello", Path.GetTempPath(), null, null, Fast: false),
+                onStdoutLine: null,
+                CancellationToken.None));
+            Assert.Contains("does not support", ex.Message, StringComparison.Ordinal);
+            Assert.Equal(0, runner.CallCount);
+        }
+    }
+
     private static AgentFacade CreateFacade(out RecordingProcessRunner runner)
     {
         return CreateFacade(out runner, out _);
@@ -283,7 +305,261 @@ public class AgentFacadeTests
             new GitHubCopilotDriver(runner),
             new GrokBuildDriver(runner),
             new CursorCliDriver(runner),
+            new CodexCliDriver(runner),
             factory);
+    }
+}
+
+[Collection("global-facade-logger")]
+public class CodexCliDriverTests
+{
+    [Fact]
+    public void BuildArgumentsPreservesUnspecifiedOptionsAndMapsExplicitFalse()
+    {
+        var unspecified = CodexCliDriver.BuildArguments(new AgentRunRequest(
+            AgentFacade.CodexAgent, "hello", @"C:\repo", null, null));
+        Assert.DoesNotContain("service_tier=", unspecified);
+        Assert.DoesNotContain("model_reasoning_effort=", unspecified);
+
+        var specified = CodexCliDriver.BuildArguments(new AgentRunRequest(
+            AgentFacade.CodexAgent, "continue", @"C:\repo", "thread-1", null,
+            AutoApprove: false, Model: "gpt-6-luna", ReasoningEffort: "low", Fast: false));
+        Assert.Contains("resume", specified);
+        Assert.Contains("thread-1", specified);
+        Assert.Contains("model_reasoning_effort=\"low\"", specified);
+        Assert.Contains("service_tier=\"default\"", specified);
+        Assert.Contains("sandbox_mode=\"read-only\"", specified);
+        Assert.Contains("approval_policy=\"never\"", specified);
+    }
+
+    [Fact]
+    public async Task ParsesCompletedJsonlAndUsesResumePromptOverStdin()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(0,
+                "{\"type\":\"thread.started\",\"thread_id\":\"thread-2\"}\n"
+                + "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"pong\"}}\n"
+                + "{\"type\":\"turn.completed\"}", ""),
+        };
+        await using var log = TestRunLogs.CreateLog();
+        var result = await new CodexCliDriver(runner).RunAsync(
+            new AgentRunRequest(AgentFacade.CodexAgent, "say pong", @"C:\repo", "thread-2", null,
+                ReasoningEffort: "low", Fast: false), log, onStdoutLine: null, CancellationToken.None);
+        Assert.Equal("thread-2", result.SessionId);
+        Assert.Equal("pong", result.OutputText);
+        Assert.Equal("say pong", runner.LastRequest!.StandardInputText);
+        Assert.Equal("resume", runner.LastRequest.Arguments[1]);
+    }
+
+    [Fact]
+    public async Task NewCodexSessionUsesReturnedThreadId()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(0,
+                "{\"type\":\"thread.started\",\"thread_id\":\"thread-new\"}\n"
+                + "{\"type\":\"turn.completed\"}", ""),
+        };
+        await using var log = TestRunLogs.CreateLog();
+        var result = await new CodexCliDriver(runner).RunAsync(
+            new AgentRunRequest(AgentFacade.CodexAgent, "hello", @"C:\repo", null, null),
+            log, onStdoutLine: null, CancellationToken.None);
+        Assert.Equal("thread-new", result.SessionId);
+        Assert.DoesNotContain("resume", runner.LastRequest!.Arguments);
+    }
+
+    [Fact]
+    public async Task ResumeWithDifferentReturnedThreadIdFailsWithSessionMismatch()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(0,
+                "{\"type\":\"thread.started\",\"thread_id\":\"thread-other\"}\n"
+                + "{\"type\":\"turn.completed\"}", ""),
+        };
+        await using var log = TestRunLogs.CreateLog();
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => new CodexCliDriver(runner).RunAsync(
+            new AgentRunRequest(AgentFacade.CodexAgent, "continue", @"C:\repo", "thread-requested", null),
+            log, onStdoutLine: null, CancellationToken.None));
+
+        Assert.Equal("session_mismatch", failure.Data[CliJson.FailureKindKey]);
+        Assert.Contains("different session id", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("resume", runner.LastRequest!.Arguments);
+        Assert.Contains("thread-requested", runner.LastRequest.Arguments);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RequestedFastFailsWhenCliOmitsUnsupportedPriorityEvenAfterCompletedTurn(bool resume)
+    {
+        const string warning = "Configured service tier `priority` is not advertised as supported for model `gpt-6-luna` and will be omitted from requests.";
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(0,
+                "{\"type\":\"thread.started\",\"thread_id\":\"thread-fast\"}\n"
+                + "{\"type\":\"item.completed\",\"item\":{\"type\":\"error\",\"message\":" + JsonSerializer.Serialize(warning) + "}}\n"
+                + "{\"type\":\"turn.completed\"}", ""),
+        };
+        await using var log = TestRunLogs.CreateLog();
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => new CodexCliDriver(runner).RunAsync(
+            new AgentRunRequest(AgentFacade.CodexAgent, "hello", Path.GetTempPath(), resume ? "thread-fast" : null, null,
+                Model: "gpt-6-luna", Fast: true),
+            log, onStdoutLine: null, CancellationToken.None));
+
+        Assert.Equal("option_not_applied", failure.Data[CliJson.FailureKindKey]);
+        Assert.Contains(warning, failure.Message, StringComparison.Ordinal);
+        Assert.Equal(resume, runner.LastRequest!.Arguments.Contains("resume", StringComparer.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(false)]
+    public async Task UnsupportedPriorityWarningDoesNotFailWhenFastWasNotRequested(bool? fast)
+    {
+        const string warning = "Configured service tier `priority` is not advertised as supported for model `gpt-6-luna` and will be omitted from requests.";
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(0,
+                "{\"type\":\"thread.started\",\"thread_id\":\"thread-fast\"}\n"
+                + "{\"type\":\"item.completed\",\"item\":{\"type\":\"error\",\"message\":" + JsonSerializer.Serialize(warning) + "}}\n"
+                + "{\"type\":\"turn.completed\"}", ""),
+        };
+        await using var log = TestRunLogs.CreateLog();
+
+        var result = await new CodexCliDriver(runner).RunAsync(
+            new AgentRunRequest(AgentFacade.CodexAgent, "hello", Path.GetTempPath(), null, null, Fast: fast),
+            log, onStdoutLine: null, CancellationToken.None);
+
+        Assert.Equal("thread-fast", result.SessionId);
+    }
+
+    [Fact]
+    public async Task UnrelatedCodexErrorItemDoesNotFailRequestedFast()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(0,
+                "{\"type\":\"thread.started\",\"thread_id\":\"thread-fast\"}\n"
+                + "{\"type\":\"item.completed\",\"item\":{\"type\":\"error\",\"message\":\"An unrelated warning.\"}}\n"
+                + "{\"type\":\"turn.completed\"}", ""),
+        };
+        await using var log = TestRunLogs.CreateLog();
+
+        var result = await new CodexCliDriver(runner).RunAsync(
+            new AgentRunRequest(AgentFacade.CodexAgent, "hello", Path.GetTempPath(), null, null, Fast: true),
+            log, onStdoutLine: null, CancellationToken.None);
+
+        Assert.Equal("thread-fast", result.SessionId);
+    }
+
+    [Theory]
+    [InlineData("{\"type\":\"turn.failed\",\"error\":{\"message\":\"later turn failure\"}}", "later turn failure")]
+    [InlineData("{\"type\":\"error\",\"message\":\"later stream failure\"}", "later stream failure")]
+    public async Task FastOmissionWarningDoesNotMaskLaterCodexFailure(string failureEvent, string expectedReason)
+    {
+        const string warning = "Configured service tier `priority` is not advertised as supported for model `gpt-6-luna` and will be omitted from requests.";
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(0,
+                "{\"type\":\"thread.started\",\"thread_id\":\"thread-fast\"}\n"
+                + "{\"type\":\"item.completed\",\"item\":{\"type\":\"error\",\"message\":" + JsonSerializer.Serialize(warning) + "}}\n"
+                + failureEvent + "\n{\"type\":\"turn.completed\"}", ""),
+        };
+        await using var log = TestRunLogs.CreateLog();
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => new CodexCliDriver(runner).RunAsync(
+            new AgentRunRequest(AgentFacade.CodexAgent, "hello", Path.GetTempPath(), null, null, Fast: true),
+            log, onStdoutLine: null, CancellationToken.None));
+
+        Assert.Equal("output_parse_failed", failure.Data[CliJson.FailureKindKey]);
+        Assert.Contains(expectedReason, failure.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("did not apply the requested Fast setting", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task InvalidJsonAfterFastOmissionWarningKeepsParseFailureClassification()
+    {
+        const string warning = "Configured service tier `priority` is not advertised as supported for model `gpt-6-luna` and will be omitted from requests.";
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(0,
+                "{\"type\":\"thread.started\",\"thread_id\":\"thread-fast\"}\n"
+                + "{\"type\":\"item.completed\",\"item\":{\"type\":\"error\",\"message\":" + JsonSerializer.Serialize(warning) + "}}\n"
+                + "not-json\n{\"type\":\"turn.completed\"}", ""),
+        };
+        await using var log = TestRunLogs.CreateLog();
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => new CodexCliDriver(runner).RunAsync(
+            new AgentRunRequest(AgentFacade.CodexAgent, "hello", Path.GetTempPath(), null, null, Fast: true),
+            log, onStdoutLine: null, CancellationToken.None));
+
+        Assert.Equal("output_parse_failed", failure.Data[CliJson.FailureKindKey]);
+        Assert.Contains("invalid JSONL", failure.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("did not apply the requested Fast setting", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("{\"type\":\"turn.failed\",\"error\":{\"message\":\"nested turn reason\"}}", "nested turn reason")]
+    [InlineData("{\"type\":\"error\",\"message\":\"top-level error reason\"}", "top-level error reason")]
+    [InlineData("{\"type\":\"error\",\"error\":\"legacy error reason\"}", "legacy error reason")]
+    public async Task CodexFailureEventsPreserveTheirReportedReason(string failureEvent, string expectedReason)
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(0,
+                "{\"type\":\"thread.started\",\"thread_id\":\"thread-failed\"}\n"
+                + failureEvent + "\n{\"type\":\"turn.completed\"}", ""),
+        };
+        await using var log = TestRunLogs.CreateLog();
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => new CodexCliDriver(runner).RunAsync(
+            new AgentRunRequest(AgentFacade.CodexAgent, "hello", Path.GetTempPath(), null, null),
+            log, onStdoutLine: null, CancellationToken.None));
+
+        Assert.Contains(expectedReason, failure.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("not-json")]
+    [InlineData("not-json\n{\"type\":\"thread.started\",\"thread_id\":\"thread-2\"}\n{\"type\":\"turn.completed\"}")]
+    [InlineData("[]\n{\"type\":\"thread.started\",\"thread_id\":\"thread-2\"}\n{\"type\":\"turn.completed\"}")]
+    [InlineData("{\"type\":\"thread.started\",\"thread_id\":\"thread-2\"}")]
+    [InlineData("{\"type\":\"thread.started\",\"thread_id\":\"thread-2\"}\n{\"type\":\"turn.failed\",\"message\":\"failed\"}\n{\"type\":\"turn.completed\"}")]
+    [InlineData("{\"type\":\"thread.started\",\"thread_id\":\"thread-2\"}\n{\"type\":\"error\",\"message\":\"failed\"}\n{\"type\":\"turn.completed\"}")]
+    public async Task IncompleteOrInvalidJsonlFailsClosed(string stdout)
+    {
+        var runner = new RecordingProcessRunner { Result = new ProcessRunResult(0, stdout, "") };
+        await using var log = TestRunLogs.CreateLog();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new CodexCliDriver(runner).RunAsync(
+            new AgentRunRequest(AgentFacade.CodexAgent, "hello", Path.GetTempPath(), null, null),
+            log, onStdoutLine: null, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task InvalidJsonStdoutIsTracedWhenProcessExitsNonZero()
+    {
+        var capturing = new CapturingLoggerFactory();
+        using (FacadeLog.UseLoggerFactory(capturing))
+        {
+            var runner = new RecordingProcessRunner
+            {
+                Result = new ProcessRunResult(7, "{invalid json", "process failed"),
+            };
+            await using var log = TestRunLogs.CreateLog();
+
+            var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => new CodexCliDriver(runner).RunAsync(
+                new AgentRunRequest(AgentFacade.CodexAgent, "hello", Path.GetTempPath(), null, null),
+                log, onStdoutLine: null, CancellationToken.None));
+
+            Assert.Equal("non_zero_exit", failure.Data[CliJson.FailureKindKey]);
+            var trace = capturing.Logger.Buffer.ToString();
+            Assert.Contains(nameof(JsonException), trace, StringComparison.Ordinal);
+            Assert.Contains("CodexJsonlAccumulator.OnStdoutLine", trace, StringComparison.Ordinal);
+            Assert.Contains("Path:", trace, StringComparison.Ordinal);
+        }
     }
 }
 
@@ -356,6 +632,25 @@ public class AgentJobServiceTests
     }
 
     [Fact]
+    public void WhitespaceOnlyModelKeepsOmissionSemanticsWithNewOptions()
+    {
+        var request = new AgentRunRequest(
+            AgentFacade.CodexAgent,
+            "hello",
+            @"C:\repo",
+            null,
+            null,
+            Fast: false);
+        var fingerprint = AgentJobService.ComputeRequestFingerprint(request);
+        Assert.Equal(fingerprint, AgentJobService.ComputeRequestFingerprint(request with { Model = null }));
+        Assert.Equal(fingerprint, AgentJobService.ComputeRequestFingerprint(request with { Model = "" }));
+        Assert.Equal(fingerprint, AgentJobService.ComputeRequestFingerprint(request with { Model = " \t " }));
+        Assert.Equal(
+            AgentJobService.ComputeRequestFingerprint(request with { SessionId = null, Skills = null }),
+            AgentJobService.ComputeRequestFingerprint(request with { SessionId = "", Skills = [] }));
+    }
+
+    [Fact]
     public void ModelFingerprintDoesNotMatchSkillTextThatLooksLikeModelMarker()
     {
         var baseRequest = new AgentRunRequest(
@@ -378,6 +673,67 @@ public class AgentJobServiceTests
             AgentJobService.ComputeRequestFingerprint(skillAndModel),
             AgentJobService.ComputeRequestFingerprint(skillsOnly));
         Assert.NotEqual(specifiedFingerprint, AgentJobService.ComputeRequestFingerprint(baseRequest));
+    }
+
+    [Fact]
+    public void EffortAndFastUseVersionedFingerprintWhileUnspecifiedKeepsLegacyHash()
+    {
+        var request = Grok("hello");
+        var legacy = HistoricalFingerprintWithoutModel(request);
+        Assert.Equal(legacy, AgentJobService.ComputeRequestFingerprint(request));
+        var effort = AgentJobService.ComputeRequestFingerprint(request with { ReasoningEffort = "medium" });
+        var fastFalse = AgentJobService.ComputeRequestFingerprint(request with { Fast = false });
+        var fastTrue = AgentJobService.ComputeRequestFingerprint(request with { Fast = true });
+        Assert.NotEqual(legacy, effort);
+        Assert.NotEqual(legacy, fastFalse);
+        Assert.NotEqual(fastFalse, fastTrue);
+        Assert.NotEqual(effort, AgentJobService.ComputeRequestFingerprint(request with { ReasoningEffort = "high" }));
+    }
+
+    [Fact]
+    public async Task ExactRetryWithDifferentEffortOrFastFailsWithoutSecondRun()
+    {
+        var facade = AgentFacadeTests.CreateFacade(out var runner, out _);
+        runner.Result = new ProcessRunResult(0,
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"cursor-session\"}", "");
+        var service = new AgentJobService(facade, Directory.CreateTempSubdirectory("caf-option-retry-").FullName);
+        runner.Gate = NewGate();
+        var request = new AgentRunRequest(AgentFacade.CursorAgent, "hello", Path.GetTempPath(), null, null,
+            Model: "composer-2.5", ReasoningEffort: "medium", Fast: false);
+        var initial = service.Start("req-options-conflict", request);
+        Assert.Throws<ArgumentException>(() => service.Start(
+            "req-options-conflict", request with { ReasoningEffort = "high" }));
+        Assert.Throws<ArgumentException>(() => service.Start(
+            "req-options-conflict", request with { Fast = true }));
+        Assert.Equal(1, runner.CallCount);
+        runner.Gate.SetResult(true);
+        Assert.Equal(AgentJobStatus.Completed, (await WaitAsync(service, initial.JobId)).Status);
+    }
+
+    [Fact]
+    public async Task PersistedOptionRequestSupportsExactRetryAndRejectsChangedOptions()
+    {
+        var store = Directory.CreateTempSubdirectory("caf-option-persist-").FullName;
+        var firstFacade = AgentFacadeTests.CreateFacade(out var firstRunner, out _);
+        firstRunner.Result = new ProcessRunResult(0,
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"cursor-option-session\"}", "");
+        var request = new AgentRunRequest(AgentFacade.CursorAgent, "hello", Path.GetTempPath(), null, null,
+            Model: "grok-4.7", ReasoningEffort: "medium", Fast: false);
+        var firstService = new AgentJobService(firstFacade, store);
+        var started = firstService.Start("req-option-persist", request);
+        Assert.Equal(AgentJobStatus.Completed, (await WaitAsync(firstService, started.JobId)).Status);
+
+        var secondFacade = AgentFacadeTests.CreateFacade(out var secondRunner, out _);
+        var secondService = new AgentJobService(secondFacade, store);
+        var retry = secondService.Start("req-option-persist", request);
+        Assert.Equal(started.JobId, retry.JobId);
+        Assert.Equal(AgentJobStatus.Completed, retry.Status);
+        Assert.Equal(0, secondRunner.CallCount);
+        Assert.Throws<ArgumentException>(() => secondService.Start(
+            "req-option-persist", request with { ReasoningEffort = "high" }));
+        Assert.Throws<ArgumentException>(() => secondService.Start(
+            "req-option-persist", request with { Fast = true }));
+        Assert.Equal(0, secondRunner.CallCount);
     }
 
     [Fact]
@@ -424,8 +780,23 @@ public class AgentJobServiceTests
         var service = CreateService(out var runner, grokText: "ok");
         var ex = Assert.Throws<ArgumentException>(() =>
             service.Start("req-model-nl", Grok("hello") with { Model = "a\nb" }));
-        Assert.Contains("line breaks", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("control characters", ex.Message, StringComparison.Ordinal);
+        var whitespaceNewline = Assert.Throws<ArgumentException>(() =>
+            service.Start("req-model-whitespace-nl", Grok("hello") with { Model = " \n " }));
+        Assert.Contains("control characters", whitespaceNewline.Message, StringComparison.Ordinal);
+        var newOptionsWhitespaceNewline = Assert.Throws<ArgumentException>(() =>
+            AgentFacade.Validate(new AgentRunRequest(AgentFacade.CodexAgent, "hello", @"C:\repo", null, null, Fast: false, Model: "\n")));
+        Assert.Contains("control characters", newOptionsWhitespaceNewline.Message, StringComparison.Ordinal);
         Assert.Equal(0, runner.CallCount);
+    }
+
+    [Fact]
+    public async Task WhitespaceOnlyControlModelRetainsOmittedModelBehavior()
+    {
+        var service = CreateService(out var runner, grokText: "ok");
+        var started = service.Start("req-model-whitespace", Grok("hello") with { Model = " \t " });
+        Assert.Equal(AgentJobStatus.Completed, (await WaitAsync(service, started.JobId)).Status);
+        Assert.DoesNotContain("--model", runner.LastRequest!.Arguments);
     }
 
     [Fact]
@@ -767,6 +1138,16 @@ public class AgentJobServiceTests
                 runner.Result = new ProcessRunResult(0, "not-json", "");
                 return Grok("parse");
             }),
+            ("option_not_applied", runner =>
+            {
+                const string warning = "Configured service tier `priority` is not advertised as supported for model `gpt-6-luna` and will be omitted from requests.";
+                runner.Result = new ProcessRunResult(0,
+                    "{\"type\":\"thread.started\",\"thread_id\":\"thread-fast\"}\n"
+                    + "{\"type\":\"item.completed\",\"item\":{\"type\":\"error\",\"message\":" + JsonSerializer.Serialize(warning) + "}}\n"
+                    + "{\"type\":\"turn.completed\"}", "");
+                return new AgentRunRequest(AgentFacade.CodexAgent, "fast", Path.GetTempPath(), null, null,
+                    Model: "gpt-6-luna", Fast: true);
+            }),
             ("internal_error", runner =>
             {
                 runner.ExceptionToThrow = new InvalidOperationException("worker state is uncertain");
@@ -808,6 +1189,11 @@ public class AgentJobServiceTests
                 Assert.Null(failed.Failure.ExitCode);
             }
 
+            if (kind == "option_not_applied")
+            {
+                Assert.Contains("priority` is not advertised as supported", failed.Failure.Summary, StringComparison.Ordinal);
+            }
+
             var record = Directory.EnumerateFiles(store, "req-*.json").Single();
             var persisted = File.ReadAllText(record);
             Assert.Contains("\"failure\"", persisted, StringComparison.Ordinal);
@@ -831,6 +1217,35 @@ public class AgentJobServiceTests
         Assert.Equal(started.JobId, recovered.JobId);
         Assert.Equal(failed.Failure, recovered.Failure);
         Assert.Equal(0, runner2.CallCount);
+    }
+
+    [Fact]
+    public async Task UnsupportedFastFailurePersistsAndExactRetryReturnsFailureWithoutRerunning()
+    {
+        const string warning = "Configured service tier `priority` is not advertised as supported for model `gpt-6-luna` and will be omitted from requests.";
+        var store = Directory.CreateTempSubdirectory("caf-fast-option-failure-").FullName;
+        var first = AgentFacadeTests.CreateFacade(out var runner, out _);
+        runner.Result = new ProcessRunResult(0,
+            "{\"type\":\"thread.started\",\"thread_id\":\"thread-fast\"}\n"
+            + "{\"type\":\"item.completed\",\"item\":{\"type\":\"error\",\"message\":" + JsonSerializer.Serialize(warning) + "}}\n"
+            + "{\"type\":\"turn.completed\"}", "");
+        var request = new AgentRunRequest(AgentFacade.CodexAgent, "hello", Path.GetTempPath(), null, null,
+            Model: "gpt-6-luna", Fast: true);
+        var firstService = new AgentJobService(first, store);
+        var started = firstService.Start("req-fast-option-failure", request);
+        var failed = await WaitAsync(firstService, started.JobId);
+
+        Assert.Equal(AgentJobStatus.Failed, failed.Status);
+        Assert.Equal("option_not_applied", failed.Failure!.Kind);
+        Assert.Contains(warning, failed.Failure.Summary, StringComparison.Ordinal);
+
+        var secondFacade = AgentFacadeTests.CreateFacade(out var secondRunner, out _);
+        var retried = new AgentJobService(secondFacade, store).Start("req-fast-option-failure", request);
+
+        Assert.Equal(AgentJobStatus.Failed, retried.Status);
+        Assert.Equal(failed.JobId, retried.JobId);
+        Assert.Equal(failed.Failure, retried.Failure);
+        Assert.Equal(0, secondRunner.CallCount);
     }
 
     [Fact]
@@ -999,6 +1414,17 @@ public class GitHubCopilotDriverTests
             args);
         Assert.DoesNotContain(prompt, args);
         Assert.DoesNotContain("gpt-5", args.Where(arg => arg != "gpt-5.4"));
+    }
+
+    [Fact]
+    public void BuildArgumentsPassesSupportedEffortOnResume()
+    {
+        var args = GitHubCopilotDriver.BuildArguments(new AgentRunRequest(
+            AgentFacade.GitHubCopilotAgent, "continue", @"C:\repo", "session", null,
+            Model: "gpt-5.4", ReasoningEffort: "xhigh"));
+        Assert.Equal("--reasoning-effort", args[args.IndexOf("--reasoning-effort")]);
+        Assert.Equal("xhigh", args[args.IndexOf("--reasoning-effort") + 1]);
+        Assert.Contains("--resume", args);
     }
 
     [Theory]
@@ -1291,6 +1717,24 @@ public class GitHubCopilotDriverTests
 public class GrokBuildDriverTests
 {
     [Fact]
+    public async Task UnsupportedRequestedEffortFailsWhenCliReportsIgnoredOption()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(0,
+                "{\"type\":\"text\",\"data\":\"ok\"}\n{\"type\":\"end\",\"sessionId\":\"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\"}",
+                "model does not support reasoning effort; ignoring"),
+        };
+        await using var log = TestRunLogs.CreateLog();
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => new GrokBuildDriver(runner).RunAsync(
+            new AgentRunRequest(AgentFacade.GrokBuildAgent, "go", Path.GetTempPath(), null, null,
+                Model: "grok-4.7", ReasoningEffort: "medium"),
+            log, onStdoutLine: null, CancellationToken.None));
+        Assert.Contains("did not apply", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(0, runner.Result.ExitCode);
+    }
+
+    [Fact]
     public void BuildArgumentsIncludeNonInteractiveFlags()
     {
         var args = GrokBuildDriver.BuildArguments(
@@ -1501,6 +1945,26 @@ public class GrokBuildDriverTests
 
 public class CursorCliDriverTests
 {
+    [Fact]
+    public void BuildArgumentsAppendsEffortAndExplicitFalseWithoutChangingOtherModelParameters()
+    {
+        var args = CursorCliDriver.BuildArguments(new AgentRunRequest(
+            AgentFacade.CursorAgent, "hello", @"C:\repo", null, null,
+            Model: "composer-2.5[context=1m]", ReasoningEffort: "high", Fast: false));
+        Assert.Contains("composer-2.5[context=1m,effort=high,fast=false]", args);
+    }
+
+    [Theory]
+    [InlineData("composer-2.5[effort=low]", "medium", null)]
+    [InlineData("composer-2.5-fast", null, false)]
+    [InlineData("composer-2.5[context=(nested)]", "high", null)]
+    [InlineData("composer-2.5[context=1m", "high", null)]
+    [InlineData("[context=1m]", "high", null)]
+    public void InvalidOrDuplicateModelParametersFail(string model, string? effort, bool? fast)
+    {
+        Assert.Throws<ArgumentException>(() => CursorCliDriver.ValidateAndBuildModelArgument(model, effort, fast));
+    }
+
     [Fact]
     public void BuildArgumentsIncludeNonInteractiveFlags()
     {
@@ -2011,6 +2475,7 @@ public class FacadeDelegationSkillContractTests
         "github-copilot",
         "grok-build",
         "cursor",
+        "codex",
     ];
 
     private static readonly (string Name, string SessionLabel)[] KnownAgentSessionLabels =
@@ -2018,6 +2483,7 @@ public class FacadeDelegationSkillContractTests
         ("github-copilot", "Copilot session"),
         ("grok-build", "Grok session"),
         ("cursor", "Cursor session"),
+        ("codex", "Codex CLI session"),
     ];
 
     private static readonly string[] RequiredRelayContractPhrases =
@@ -2175,6 +2641,24 @@ public class FacadeDelegationSkillContractTests
     }
 
     [Fact]
+    public void RelaySkillsUseOnlyActualUserPayloadAndFailClosedOnMcpErrors()
+    {
+        foreach (var skill in LoadFacadeDelegationSkills())
+        {
+            Assert.Contains("実際のユーザー", skill.Text, StringComparison.Ordinal);
+            Assert.Contains("`$" + skill.Name + "` より後ろの本文", skill.Text, StringComparison.Ordinal);
+            Assert.Contains("注入された `<skill>` 定義", skill.Text, StringComparison.Ordinal);
+            Assert.Contains("例文を実行・転送せず", skill.Text, StringComparison.Ordinal);
+            Assert.Contains("構文説明用の非実行例", skill.Text, StringComparison.Ordinal);
+            Assert.Contains("終了フェンスの直後から末尾までを一字も変更せず", skill.Text, StringComparison.Ordinal);
+            Assert.Contains("approval_requiredを含む失敗後に", skill.Text, StringComparison.Ordinal);
+            Assert.Contains("失敗を報告して停止する", skill.Text, StringComparison.Ordinal);
+            Assert.Contains("成功したような回答を生成したりしない", skill.Text, StringComparison.Ordinal);
+            Assert.Contains("`completed` の `result.outputText` が無い限り、成功したと答えない", skill.Text, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public void NonDelegationSkillsDoNotReceiveRelayOnlyConstraint()
     {
         foreach (var path in EnumerateSkillFiles(LocateRepoRoot()))
@@ -2218,13 +2702,12 @@ public class FacadeDelegationSkillContractTests
         foreach (var skill in LoadFacadeDelegationSkills())
         {
             AssertContains(skill.Name, skill.Text, "facade-options");
-            AssertContains(skill.Name, skill.Text, "prompt 本文に現れたモデル名から起動用の `model` を推測しない");
-            AssertContains(skill.Name, skill.Text, "`model` は渡さない");
+            AssertContains(skill.Name, skill.Text, "prompt 本文から実行設定を推測しない");
+            AssertContains(skill.Name, skill.Text, "`model`, `reasoning_effort`, `fast` は渡さない");
             var lifetime = ReadHeadingSection(skill.Text, "## request_id と session_id の lifetime");
-            AssertContains(skill.Name, lifetime, "`auto_approve`, `model`");
+            AssertContains(skill.Name, lifetime, "`auto_approve`, `model`, `reasoning_effort`, `fast`");
             var followUp = ReadHeadingSection(skill.Text, "## Follow-up continuation");
-            var actions = ReadActionBlock(skill.Name, followUp, "Follow-up continuation");
-            AssertContains(skill.Name, actions, "前回 session のモデルは継承しない");
+            AssertContains(skill.Name, followUp, "前回 session の値は継承しない");
         }
     }
 
@@ -2247,7 +2730,18 @@ public class FacadeDelegationSkillContractTests
             text,
             StringComparison.Ordinal);
 
-        foreach (var other in KnownFacadeDelegationSkillNames.Where(name => name != "cursor"))
+        var codexText = skills["codex"].Text;
+        Assert.DoesNotContain(
+            "ユーザーが通し指定した Skill 名だけ。Codex 形式のまま渡す",
+            codexText,
+            StringComparison.Ordinal);
+        AssertContains("codex", codexText, "Codex CLI Driverは `skills` fieldをCodex CLIへ渡さず");
+        AssertContains("codex", codexText, "新規jobと継続ではこのrelayから `skills` fieldを送らない");
+        AssertContains("codex", codexText, "元requestに含まれていた `skills` 値も全引数の一部としてそのまま再送する");
+        AssertContains("codex", codexText, "ユーザーの実際の作業payloadにCodex CLIでの明示的なSkill invocationが含まれている必要がある");
+        AssertContains("codex", codexText, "relayはそのinvocationを補足・書き換えない");
+
+        foreach (var other in KnownFacadeDelegationSkillNames.Where(name => name is not "cursor" and not "codex"))
         {
             Assert.Contains(
                 "ユーザーが通し指定した Skill 名だけ。Codex 形式のまま渡す",
@@ -3126,6 +3620,7 @@ public sealed class ThrowingProcessJobGuard : IProcessJobGuard
     }
 }
 
+[Collection("global-facade-logger")]
 public class AgentRunLogTests
 {
     [Fact]
@@ -4095,7 +4590,19 @@ public class McpPublicContractTests
         Assert.Equal(McpPublicContract.PromptDescription, ReadInputPropertyDescription(start, "prompt"));
         Assert.Equal(McpPublicContract.WorkingDirectoryDescription, ReadInputPropertyDescription(start, "working_directory"));
         Assert.Equal(McpPublicContract.SkillsDescription, ReadInputPropertyDescription(start, "skills"));
+        Assert.Equal(McpPublicContract.AutoApproveDescription, ReadInputPropertyDescription(start, "auto_approve"));
         Assert.Equal(McpPublicContract.ModelDescription, ReadInputPropertyDescription(start, "model"));
+        Assert.Equal(McpPublicContract.ReasoningEffortDescription, ReadInputPropertyDescription(start, "reasoning_effort"));
+        Assert.Equal(McpPublicContract.FastDescription, ReadInputPropertyDescription(start, "fast"));
+        var fastType = start.JsonSchema.GetProperty("properties").GetProperty("fast").GetProperty("type");
+        if (fastType.ValueKind == JsonValueKind.String)
+        {
+            Assert.Equal("boolean", fastType.GetString());
+        }
+        else
+        {
+            Assert.Contains("boolean", fastType.EnumerateArray().Select(item => item.GetString()), StringComparer.Ordinal);
+        }
         if (start.JsonSchema.TryGetProperty("required", out var startRequired))
         {
             Assert.DoesNotContain(
@@ -4223,6 +4730,79 @@ public class McpPublicContractTests
         Assert.DoesNotContain("--model", session.Runner.LastRequest!.Arguments);
     }
 
+    [Fact]
+    public async Task StartAgentForwardsFastFalseAsExplicitProviderSetting()
+    {
+        await using var session = await McpHttpTestHost.StartAsync();
+        await using var client = await session.CreateClientAsync();
+        session.Runner.Result = CursorStdout();
+        await StartAndWaitAsync(client, "req-cursor-fast-false", AgentFacade.CursorAgent, "check",
+            model: "composer-2.5", fast: false);
+        Assert.Contains("composer-2.5[fast=false]", session.Runner.LastRequest!.Arguments);
+
+        session.Runner.Result = CodexStdout();
+        await StartAndWaitAsync(client, "req-codex-fast-false", AgentFacade.CodexAgent, "check",
+            model: "gpt-6-luna", reasoningEffort: "low", fast: false);
+        Assert.Contains("service_tier=\"default\"", session.Runner.LastRequest!.Arguments);
+        Assert.Contains("model_reasoning_effort=\"low\"", session.Runner.LastRequest.Arguments);
+    }
+
+    [Fact]
+    public async Task StartAgentRejectsFastForUnsupportedDriversAndRejectsChangedOptionRetry()
+    {
+        await using var session = await McpHttpTestHost.StartAsync();
+        await using var client = await session.CreateClientAsync();
+        var call = await client.CallToolAsync("start_agent", new Dictionary<string, object?>
+        {
+            ["request_id"] = "req-fast-copilot-rejected",
+            ["agent"] = AgentFacade.GitHubCopilotAgent,
+            ["prompt"] = "check",
+            ["working_directory"] = Path.GetTempPath(),
+            ["fast"] = false,
+        });
+        Assert.True(call.IsError == true);
+        Assert.Equal(0, session.Runner.CallCount);
+
+        session.Runner.Result = CodexStdout();
+        var started = await CallStartAgentAsync(client, "req-fast-retry-change", AgentFacade.CodexAgent, "check",
+            model: "gpt-6-luna", reasoningEffort: "low", fast: false);
+        await WaitForMcpJobAsync(client, started.JobId);
+        var changed = await client.CallToolAsync("start_agent", new Dictionary<string, object?>
+        {
+            ["request_id"] = "req-fast-retry-change",
+            ["agent"] = AgentFacade.CodexAgent,
+            ["prompt"] = "check",
+            ["working_directory"] = Path.GetTempPath(),
+            ["model"] = "gpt-6-luna",
+            ["reasoning_effort"] = "low",
+            ["fast"] = true,
+        });
+        Assert.True(changed.IsError == true);
+        Assert.Equal(1, session.Runner.CallCount);
+    }
+
+    [Fact]
+    public async Task StartAgentSchemaRejectsNonBooleanFastAndUnsafeEffort()
+    {
+        await using var session = await McpHttpTestHost.StartAsync();
+        await using var client = await session.CreateClientAsync();
+        foreach (var (name, value) in new[] { ("fast", (object?)"false"), ("reasoning_effort", (object?)"low\nmedium") })
+        {
+            var arguments = new Dictionary<string, object?>
+            {
+                ["request_id"] = "req-invalid-" + name,
+                ["agent"] = AgentFacade.CodexAgent,
+                ["prompt"] = "hello",
+                ["working_directory"] = Path.GetTempPath(),
+                [name] = value,
+            };
+            var call = await client.CallToolAsync("start_agent", arguments);
+            Assert.True(call.IsError == true);
+        }
+
+        Assert.Equal(0, session.Runner.CallCount);
+    }
+
     private static void AssertWorkerDelegationContract(string text)
     {
         Assert.False(string.IsNullOrWhiteSpace(text));
@@ -4278,7 +4858,7 @@ public class McpPublicContractTests
     private static void AssertSkillsContract(string text)
     {
         Assert.Contains("GitHub Copilot and Grok Build translate", text, StringComparison.Ordinal);
-        Assert.Contains("Cursor currently does not translate this field", text, StringComparison.Ordinal);
+        Assert.Contains("Cursor and Codex currently do not translate this field", text, StringComparison.Ordinal);
         Assert.Contains("worker prompt", text, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("Each driver converts them to that agent's native invocation", text, StringComparison.Ordinal);
     }
@@ -4385,6 +4965,14 @@ public class McpPublicContractTests
             "");
     }
 
+    private static ProcessRunResult CodexStdout()
+    {
+        return new ProcessRunResult(0,
+            "{\"type\":\"thread.started\",\"thread_id\":\"thread-mcp\"}\n"
+            + "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"ok\"}}\n"
+            + "{\"type\":\"turn.completed\"}", "");
+    }
+
     private static async Task<AgentJobPublicSnapshot> StartAndWaitAsync(
         McpClient client,
         string requestId,
@@ -4392,9 +4980,11 @@ public class McpPublicContractTests
         string prompt,
         IReadOnlyList<string>? skills = null,
         string? model = null,
-        string? sessionId = null)
+        string? sessionId = null,
+        string? reasoningEffort = null,
+        bool? fast = null)
     {
-        var started = await CallStartAgentAsync(client, requestId, agent, prompt, skills, model, sessionId);
+        var started = await CallStartAgentAsync(client, requestId, agent, prompt, skills, model, sessionId, reasoningEffort, fast);
         return await WaitForMcpJobAsync(client, started.JobId);
     }
 
@@ -4405,7 +4995,9 @@ public class McpPublicContractTests
         string prompt,
         IReadOnlyList<string>? skills = null,
         string? model = null,
-        string? sessionId = null)
+        string? sessionId = null,
+        string? reasoningEffort = null,
+        bool? fast = null)
     {
         var arguments = new Dictionary<string, object?>
         {
@@ -4427,6 +5019,16 @@ public class McpPublicContractTests
         if (sessionId is not null)
         {
             arguments["session_id"] = sessionId;
+        }
+
+        if (reasoningEffort is not null)
+        {
+            arguments["reasoning_effort"] = reasoningEffort;
+        }
+
+        if (fast is not null)
+        {
+            arguments["fast"] = fast.Value;
         }
 
         var call = await client.CallToolAsync("start_agent", arguments);
@@ -4820,6 +5422,41 @@ public class McpHttpHostTests
         Assert.Equal(waited.Failure, gotten.Failure);
         Assert.Equal(waited.Failure, retried.Failure);
         Assert.Equal(waited.Failure, cancelled.Failure);
+        Assert.Equal(1, session.Runner.CallCount);
+    }
+
+    [Fact]
+    public async Task UnsupportedFastIsReportedAsFailedAcrossMcpAndExactRetry()
+    {
+        const string warning = "Configured service tier `priority` is not advertised as supported for model `gpt-6-luna` and will be omitted from requests.";
+        await using var session = await McpHttpTestHost.StartAsync();
+        session.Runner.Result = new ProcessRunResult(0,
+            "{\"type\":\"thread.started\",\"thread_id\":\"thread-fast\"}\n"
+            + "{\"type\":\"item.completed\",\"item\":{\"type\":\"error\",\"message\":" + JsonSerializer.Serialize(warning) + "}}\n"
+            + "{\"type\":\"turn.completed\"}", "");
+        await using var client = await session.CreateClientAsync();
+        var arguments = new Dictionary<string, object?>
+        {
+            ["request_id"] = "req-mcp-fast-unsupported",
+            ["agent"] = AgentFacade.CodexAgent,
+            ["prompt"] = "hello",
+            ["working_directory"] = Path.GetTempPath(),
+            ["model"] = "gpt-6-luna",
+            ["fast"] = true,
+        };
+
+        var startCall = await client.CallToolAsync("start_agent", arguments);
+        var started = ReadSnapshot(startCall);
+        var waited = await WaitForMcpJobAsync(client, started.JobId);
+        var retryCall = await client.CallToolAsync("start_agent", arguments);
+        var retried = ReadSnapshot(retryCall);
+
+        Assert.Equal(AgentJobStatus.Failed, waited.Status);
+        Assert.Equal("option_not_applied", waited.Failure!.Kind);
+        Assert.Contains(warning, waited.Failure.Summary, StringComparison.Ordinal);
+        Assert.Equal(waited.JobId, retried.JobId);
+        Assert.Equal(AgentJobStatus.Failed, retried.Status);
+        Assert.Equal(waited.Failure, retried.Failure);
         Assert.Equal(1, session.Runner.CallCount);
     }
 
@@ -5895,6 +6532,7 @@ public class RunLogViewerTests
             new GitHubCopilotDriver(runner),
             new GrokBuildDriver(runner),
             new CursorCliDriver(runner),
+            new CodexCliDriver(runner),
             TestRunLogs.CreateFactory(),
             launcher);
         return new AgentJobService(facade, Directory.CreateTempSubdirectory("caf-viewer-jobs-").FullName);

@@ -113,6 +113,7 @@ public static class McpHttpHost
         builder.Services.AddSingleton<GitHubCopilotDriver>();
         builder.Services.AddSingleton<GrokBuildDriver>();
         builder.Services.AddSingleton<CursorCliDriver>();
+        builder.Services.AddSingleton<CodexCliDriver>();
         builder.Services.AddSingleton<IRunLogViewerLauncher>(
             options.RunLogViewerLauncher ?? NullRunLogViewerLauncher.Instance);
         builder.Services.AddSingleton<AgentFacade>();
