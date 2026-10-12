@@ -181,7 +181,7 @@ public sealed class CursorCliDriver
                 throw new ArgumentException("Cursor model parameter syntax is invalid.");
             }
 
-            modelId = model[..openBracket];
+            modelId = model[..openBracket].TrimEnd();
             var parameterText = model[(openBracket + 1)..closeBracket];
             if (string.IsNullOrWhiteSpace(modelId))
             {

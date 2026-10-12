@@ -1945,18 +1945,30 @@ public class GrokBuildDriverTests
 
 public class CursorCliDriverTests
 {
-    [Fact]
-    public void BuildArgumentsAppendsEffortAndExplicitFalseWithoutChangingOtherModelParameters()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BuildArgumentsAppendsEffortAndExplicitFalseWithoutChangingOtherModelParameters(bool resume)
     {
         var args = CursorCliDriver.BuildArguments(new AgentRunRequest(
-            AgentFacade.CursorAgent, "hello", @"C:\repo", null, null,
-            Model: "composer-2.5[context=1m]", ReasoningEffort: "high", Fast: false));
+            AgentFacade.CursorAgent,
+            "hello",
+            @"C:\repo",
+            resume ? "cursor-session" : null,
+            null,
+            Model: "composer-2.5 [context=1m]",
+            ReasoningEffort: "high",
+            Fast: false));
         Assert.Contains("composer-2.5[context=1m,effort=high,fast=false]", args);
+        Assert.Equal(resume, args.Contains("--resume"));
     }
 
     [Theory]
     [InlineData("composer-2.5[effort=low]", "medium", null)]
     [InlineData("composer-2.5-fast", null, false)]
+    [InlineData("composer-2.5-high [context=1m]", "medium", null)]
+    [InlineData("composer-2.5-fast [context=1m]", null, false)]
+    [InlineData("composer-2.5-fast [context=1m]", null, true)]
     [InlineData("composer-2.5[context=(nested)]", "high", null)]
     [InlineData("composer-2.5[context=1m", "high", null)]
     [InlineData("[context=1m]", "high", null)]
@@ -2118,6 +2130,16 @@ public class CursorCliDriverTests
             new AgentRunRequest(AgentFacade.CursorAgent, "ask", @"C:\repo", null, null, Model: model));
         Assert.DoesNotContain("--model", args);
         Assert.Equal("ask", args[^1]);
+    }
+
+    [Fact]
+    public void BuildArgumentsPreservesModelSpacingWhenOptionsAreOmitted()
+    {
+        const string model = "composer-2.5 [context=1m]";
+        var args = CursorCliDriver.BuildArguments(
+            new AgentRunRequest(AgentFacade.CursorAgent, "ask", @"C:\repo", null, null, Model: model));
+
+        Assert.Equal(model, args[args.IndexOf("--model") + 1]);
     }
 
     [Fact]
