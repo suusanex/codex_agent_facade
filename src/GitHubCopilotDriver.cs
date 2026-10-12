@@ -6,6 +6,7 @@ using System.Text.Json;
 /// </summary>
 public sealed class GitHubCopilotDriver
 {
+    internal static readonly string[] SupportedReasoningEfforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
     private readonly IProcessRunner _processRunner;
 
     public GitHubCopilotDriver(IProcessRunner processRunner)
@@ -30,7 +31,9 @@ public sealed class GitHubCopilotDriver
             Prompt: prompt,
             FileName: "copilot",
             Arguments: arguments,
-            Model: request.Model));
+            Model: request.Model,
+            ReasoningEffort: request.ReasoningEffort,
+            Fast: request.Fast));
 
         var accumulator = new GitHubCopilotStreamAccumulator(runLog);
         ProcessRunResult processResult;
@@ -120,6 +123,11 @@ public sealed class GitHubCopilotDriver
         }
 
         AppendModelArgument(arguments, request.Model);
+        if (request.ReasoningEffort is not null)
+        {
+            arguments.Add("--reasoning-effort");
+            arguments.Add(request.ReasoningEffort);
+        }
 
         if (!string.IsNullOrWhiteSpace(request.SessionId))
         {
