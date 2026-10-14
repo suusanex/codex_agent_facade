@@ -1760,7 +1760,69 @@ public class GrokBuildDriverTests
                 Model: "grok-4.7", ReasoningEffort: "medium"),
             log, onStdoutLine: null, CancellationToken.None));
         Assert.Contains("did not apply", ex.Message, StringComparison.Ordinal);
+        Assert.Equal("option_not_applied", ex.Data[CliJson.FailureKindKey]);
         Assert.Equal(0, runner.Result.ExitCode);
+    }
+
+    [Fact]
+    public async Task CurrentCliIgnoreWarningFailsWhenExitCodeIsZero()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(0,
+                "{\"type\":\"text\",\"data\":\"ok\"}\n{\"type\":\"end\",\"sessionId\":\"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\"}",
+                "warning: grok-4.6 isn't in the model catalog; ignoring --effort/--reasoning-effort low"),
+        };
+        await using var log = TestRunLogs.CreateLog();
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => new GrokBuildDriver(runner).RunAsync(
+            new AgentRunRequest(AgentFacade.GrokBuildAgent, "go", Path.GetTempPath(), null, null,
+                Model: "grok-4.6", ReasoningEffort: "low"),
+            log, onStdoutLine: null, CancellationToken.None));
+        Assert.Equal("option_not_applied", ex.Data[CliJson.FailureKindKey]);
+    }
+
+    [Fact]
+    public async Task NonZeroExitWinsWhenCurrentCliAlsoIgnoresEffort()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(1,
+                "{\"type\":\"error\",\"message\":\"unknown model id\"}",
+                "warning: grok-4.6 isn't in the model catalog; ignoring --effort/--reasoning-effort low\nError: Couldn't set model 'grok-4.6'"),
+        };
+        await using var log = TestRunLogs.CreateLog();
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => new GrokBuildDriver(runner).RunAsync(
+            new AgentRunRequest(AgentFacade.GrokBuildAgent, "go", Path.GetTempPath(), null, null,
+                Model: "grok-4.6", ReasoningEffort: "low"),
+            log, onStdoutLine: null, CancellationToken.None));
+        Assert.Equal("non_zero_exit", ex.Data[CliJson.FailureKindKey]);
+    }
+
+    [Fact]
+    public async Task ParsesCurrentStreamingJsonShape()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(
+                0,
+                """
+                {"type":"available_commands","tools":["read_file"],"commands":["dotnet-file-based-apps"]}
+                {"type":"thought","data":"The"}
+                {"type":"thought","data":" user"}
+                {"type":"text","data":"po"}
+                {"type":"text","data":"ng"}
+                {"type":"usage","usage":{"input_tokens":1,"output_tokens":1,"reasoning_tokens":1}}
+                {"type":"end","stopReason":"end_turn","sessionId":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","cwd":"D:\\ws","modelUsage":{"grok-4.7":{"modelCalls":1}}}
+                """,
+                ""),
+        };
+        var result = await RunAsync(runner);
+        Assert.Equal("pong", result.OutputText);
+        Assert.Equal("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", result.SessionId);
+        var text = TestRunLogs.ReadShared(result.TextLogPath);
+        Assert.Contains("assistant: pong", text, StringComparison.Ordinal);
+        Assert.Contains("thought: The user", text, StringComparison.Ordinal);
+        Assert.Contains("end stopReason=end_turn sessionId=eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -7718,5 +7780,303 @@ public class AgentCliProcessTests
         public string[] Arguments { get; set; } = [];
         public string StandardInput { get; set; } = string.Empty;
         public int AgentPid { get; set; }
+    }
+}
+
+/// <summary>
+/// 実 Grok Build CLI を使う opt-in 試験。CI では走らない。
+/// 再実行: <c>$env:CODEX_AGENT_FACADE_GROK_LIVE='1'; dotnet run --file tests/CodexAgentFacade.Tests.cs</c>
+/// ログイン済みの grok、モデル grok-4.7、user skill dotnet-file-based-apps が必要。
+/// </summary>
+public class GrokBuildLiveTests
+{
+    private const string LiveEnvironmentVariable = "CODEX_AGENT_FACADE_GROK_LIVE";
+
+    [Fact]
+    public async Task LiveHeadlessMcpAndCliContract()
+    {
+        Assert.SkipUnless(
+            string.Equals(Environment.GetEnvironmentVariable(LiveEnvironmentVariable), "1", StringComparison.Ordinal),
+            "Set " + LiveEnvironmentVariable + "=1 to run the live Grok Build CLI test.");
+
+        var root = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "caf-grok-live",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var runs = Path.Combine(root, "runs");
+        Directory.CreateDirectory(runs);
+        var logs = new AgentRunLogFactory(runs, TimeProvider.System);
+        var facade = new AgentFacade(
+            new GitHubCopilotDriver(new ProcessRunner()),
+            new GrokBuildDriver(new ProcessRunner()),
+            new CursorCliDriver(new ProcessRunner()),
+            new CodexCliDriver(new ProcessRunner()),
+            logs);
+
+        var driverDir = Path.Combine(root, "driver");
+        Directory.CreateDirectory(driverDir);
+        await AssertGrokFailureAsync(
+            facade,
+            Request(driverDir, "Reply with exactly the word pong. Do not use tools.", model: "not-a-real-model"),
+            "non_zero_exit");
+        await AssertGrokFailureAsync(
+            facade,
+            Request(driverDir, "Reply with exactly the word pong. Do not use tools.", model: "grok-4.7", effort: "none"),
+            "non_zero_exit");
+
+        var started = await RunLiveAsync(
+            facade,
+            Request(driverDir, "Reply with exactly the word pong. Do not use tools.", model: "grok-4.7", effort: "low"));
+        Assert.Contains("pong", started.OutputText, StringComparison.OrdinalIgnoreCase);
+        Assert.False(string.IsNullOrWhiteSpace(started.SessionId));
+        Assert.Contains(Path.GetFileName(driverDir), started.RawOutput, StringComparison.OrdinalIgnoreCase);
+        AssertApplied(driverDir, started.SessionId, "grok-4.7", "low");
+        AssertRunLog(started, "grok-4.7", "low", alwaysApprove: true);
+
+        var continued = await RunLiveAsync(
+            facade,
+            Request(driverDir, "Reply with exactly the word pingpong. Do not use tools.", model: "grok-4.7", effort: "low", sessionId: started.SessionId));
+        Assert.Equal(started.SessionId, continued.SessionId);
+        Assert.Contains("pingpong", continued.OutputText, StringComparison.OrdinalIgnoreCase);
+        AssertApplied(driverDir, continued.SessionId, "grok-4.7", "low");
+
+        var skillDir = Path.Combine(root, "skill");
+        Directory.CreateDirectory(skillDir);
+        var skill = await RunLiveAsync(
+            facade,
+            Request(
+                skillDir,
+                "State only the exact NuGet directive token required by the invoked skill. Do not modify files. Do not use tools.",
+                model: "grok-4.7",
+                skills: ["$dotnet-file-based-apps"]));
+        Assert.Contains("#:package", skill.OutputText, StringComparison.Ordinal);
+
+        var quietDir = Path.Combine(root, "no-approve");
+        Directory.CreateDirectory(quietDir);
+        var quiet = await RunLiveAsync(
+            facade,
+            Request(quietDir, "Reply with exactly the word pong. Do not use tools.", autoApprove: false));
+        Assert.Contains("pong", quiet.OutputText, StringComparison.OrdinalIgnoreCase);
+        AssertRunLog(quiet, model: null, effort: null, alwaysApprove: false);
+
+        await AssertMcpAsync(root, logs);
+        await AssertCliAsync(root, runs);
+    }
+
+    private static AgentRunRequest Request(
+        string directory,
+        string prompt,
+        string? model = null,
+        string? effort = null,
+        string? sessionId = null,
+        bool autoApprove = true,
+        IReadOnlyList<string>? skills = null)
+    {
+        return new AgentRunRequest(
+            AgentFacade.GrokBuildAgent,
+            prompt,
+            directory,
+            sessionId,
+            skills,
+            autoApprove,
+            model,
+            effort);
+    }
+
+    private static async Task<AgentRunResult> RunLiveAsync(AgentFacade facade, AgentRunRequest request)
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+        return await facade.RunAsync(request, onStdoutLine: null, cancellation.Token);
+    }
+
+    private static async Task AssertGrokFailureAsync(AgentFacade facade, AgentRunRequest request, string kind)
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => facade.RunAsync(request, onStdoutLine: null, cancellation.Token));
+        Assert.Equal(kind, ex.Data[CliJson.FailureKindKey]);
+    }
+
+    private static void AssertApplied(string workingDirectory, string sessionId, string model, string effort)
+    {
+        var encoded = Uri.EscapeDataString(workingDirectory);
+        var path = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".grok",
+            "sessions",
+            encoded,
+            sessionId,
+            "summary.json");
+        Assert.True(File.Exists(path), path);
+        using var document = JsonDocument.Parse(File.ReadAllText(path));
+        Assert.Equal(model, document.RootElement.GetProperty("current_model_id").GetString());
+        Assert.Equal(effort, document.RootElement.GetProperty("reasoning_effort").GetString());
+    }
+
+    private static void AssertRunLog(AgentRunResult result, string? model, string? effort, bool alwaysApprove)
+    {
+        Assert.True(File.Exists(result.EventsLogPath));
+        Assert.True(File.Exists(result.TextLogPath));
+        var events = TestRunLogs.ReadShared(result.EventsLogPath);
+        var text = TestRunLogs.ReadShared(result.TextLogPath);
+        Assert.Contains(result.SessionId, text, StringComparison.Ordinal);
+        Assert.Contains("assistant:", text, StringComparison.Ordinal);
+        if (alwaysApprove)
+        {
+            Assert.Contains("--always-approve", events, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.DoesNotContain("--always-approve", events, StringComparison.Ordinal);
+        }
+
+        if (model is not null)
+        {
+            Assert.Contains("\"--model\"", events, StringComparison.Ordinal);
+            Assert.Contains(model, events, StringComparison.Ordinal);
+        }
+
+        if (effort is not null)
+        {
+            Assert.Contains("\"--reasoning-effort\"", events, StringComparison.Ordinal);
+            Assert.Contains(effort, events, StringComparison.Ordinal);
+        }
+    }
+
+    private static async Task AssertMcpAsync(string root, AgentRunLogFactory logs)
+    {
+        var directory = Path.Combine(root, "mcp");
+        Directory.CreateDirectory(directory);
+        var token = "live-token-" + Guid.NewGuid().ToString("N");
+        var app = McpHttpHost.Create(
+            [],
+            new McpHttpHostOptions
+            {
+                Token = token,
+                Port = 0,
+                ProcessRunner = new ProcessRunner(),
+                RunLogFactory = logs,
+                JobStoreDirectory = Path.Combine(root, "jobs"),
+                ServerLogDirectory = Path.Combine(root, "server-log"),
+                RunLogViewerLauncher = NullRunLogViewerLauncher.Instance,
+            });
+        await app.StartAsync();
+        try
+        {
+            var transport = new HttpClientTransport(new HttpClientTransportOptions
+            {
+                Endpoint = McpHttpHost.GetMcpEndpoint(app),
+                TransportMode = HttpTransportMode.StreamableHttp,
+                AdditionalHeaders = new Dictionary<string, string>
+                {
+                    ["Authorization"] = "Bearer " + token,
+                },
+                EnableStandaloneGetStream = false,
+            });
+            await using var client = await McpClient.CreateAsync(transport);
+            var startedCall = await client.CallToolAsync("start_agent", new Dictionary<string, object?>
+            {
+                ["request_id"] = "grok-live-mcp",
+                ["agent"] = AgentFacade.GrokBuildAgent,
+                ["prompt"] = "Reply with exactly the word pong. Do not use tools.",
+                ["working_directory"] = directory,
+                ["auto_approve"] = true,
+                ["model"] = "grok-4.7",
+                ["reasoning_effort"] = "low",
+            });
+            var startedText = string.Concat(startedCall.Content.OfType<TextContentBlock>().Select(block => block.Text));
+            Assert.True(startedCall.IsError != true, startedText);
+            var started = JsonSerializer.Deserialize<AgentJobPublicSnapshot>(startedText, AgentJson.Options);
+            Assert.NotNull(started);
+            var waitedCall = await client.CallToolAsync("wait_agent_job", new Dictionary<string, object?>
+            {
+                ["job_id"] = started!.JobId,
+                ["timeout_seconds"] = 180,
+            });
+            var waitedText = string.Concat(waitedCall.Content.OfType<TextContentBlock>().Select(block => block.Text));
+            Assert.True(waitedCall.IsError != true, waitedText);
+            var waited = JsonSerializer.Deserialize<AgentJobPublicSnapshot>(waitedText, AgentJson.Options);
+            Assert.NotNull(waited);
+            Assert.Equal(AgentJobStatus.Completed, waited!.Status);
+            Assert.Contains("pong", waited.Result!.OutputText, StringComparison.OrdinalIgnoreCase);
+            AssertApplied(directory, waited.Result.SessionId, "grok-4.7", "low");
+        }
+        finally
+        {
+            await app.StopAsync();
+            await app.DisposeAsync();
+        }
+    }
+
+    private static async Task AssertCliAsync(string root, string runs)
+    {
+        var directory = Path.Combine(root, "cli");
+        Directory.CreateDirectory(directory);
+        var repo = FindRepoRoot();
+        var psi = new ProcessStartInfo
+        {
+            FileName = "dotnet",
+            WorkingDirectory = repo,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        psi.ArgumentList.Add("run");
+        psi.ArgumentList.Add("--file");
+        psi.ArgumentList.Add(Path.Combine(repo, "src", "CodexAgentFacadeCli.cs"));
+        psi.Environment[AgentRunLogFactory.LogDirectoryEnvironmentVariable] = runs;
+        using var process = new Process { StartInfo = psi };
+        Assert.True(process.Start());
+        var request = JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["agent"] = AgentFacade.GrokBuildAgent,
+            ["prompt"] = "Reply with exactly the word pong. Do not use tools.",
+            ["working_directory"] = directory,
+            ["auto_approve"] = true,
+            ["model"] = "grok-4.7",
+            ["reasoning_effort"] = "low",
+            ["timeout_seconds"] = 180,
+        });
+        await process.StandardInput.WriteAsync(request);
+        process.StandardInput.Close();
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(4));
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            process.Kill(entireProcessTree: true);
+            throw new TimeoutException("CodexAgentFacadeCli did not exit. stderr: " + await stderrTask);
+        }
+
+        var stdout = await stdoutTask;
+        var stderr = await stderrTask;
+        Assert.Equal(0, process.ExitCode);
+        var line = stdout.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).LastOrDefault(text => text.TrimStart().StartsWith("{", StringComparison.Ordinal));
+        Assert.False(string.IsNullOrWhiteSpace(line), stdout + stderr);
+        var response = JsonSerializer.Deserialize<AgentCliResponse>(line, AgentJson.Options);
+        Assert.NotNull(response);
+        Assert.Equal(AgentJobStatus.Completed, response!.Status);
+        Assert.Contains("pong", response.Result!.OutputText, StringComparison.OrdinalIgnoreCase);
+        AssertApplied(directory, response.Result.SessionId, "grok-4.7", "low");
+    }
+
+    private static string FindRepoRoot([CallerFilePath] string callerFile = "")
+    {
+        var testsDir = Path.GetDirectoryName(callerFile);
+        if (!string.IsNullOrEmpty(testsDir))
+        {
+            var root = Path.GetFullPath(Path.Combine(testsDir, ".."));
+            if (File.Exists(Path.Combine(root, "src", "CodexAgentFacadeCli.cs")))
+            {
+                return root;
+            }
+        }
+
+        throw new InvalidOperationException("Could not locate repository root.");
     }
 }

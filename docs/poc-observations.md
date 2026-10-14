@@ -524,3 +524,68 @@ CLI入口の自動検証はstub agentで行う。Codex、Cursor、GitHub Copilot
 
 2026-10-14に、このworktree（Windows、.NET SDK）で `dotnet run --file tests/CodexAgentFacade.Tests.cs` を実行し、302件成功、失敗0件だった。所要時間は約15.8秒。確認したのはfake agent経由の新規と継続、model / effort / fastの指定、非ゼロ終了、timeout、親プロセスの強制終了、公開JSONとrun logの分離、`server.log` を共有読み取りで開いたままの2つのCLIがそれぞれ `cli.{processId}.log` へ例外を残すこと、失敗JSONの `error` がその診断ログを指し `server.log` を案内しないこと、nullまたは空白のskillを起動前に拒否すること、製品ディレクトリを作れないときの制御された終了、終了済みCLI診断ログの保持上限、既存MCPの失敗案内が server log のままであること。配置先のタスクスケジューラ、viewer設定、他checkoutは変更していない。有料実推論、Fast=trueの実測、FlaUIアプリの移行はしていない。
 
+## Grok Build 1.0.52 実機確認（2026-10-14）
+
+対象は現行 Facade の CLI 方式である。ACP、`--allow` / `--deny`、tool allowlist、`--max-turns`、worktree は追加していない。
+
+### 環境（実機）
+
+- CLI: `grok 1.0.52 (0920c8169e27) [stable]`
+- `grok update --check --json`: `updateAvailable=false`、`latestVersion=1.0.52`、`channel=stable`
+- ログイン: `grok models` が `You are logged in with grok.com.` を表示
+- カタログ: default `grok-4.7` のみ。2026-10-06 の未ログイン一覧（`grok-4.6` / `grok-4.5`）は現在の選択可能集合ではない
+- `--no-auto-update` は `grok --help` の一覧に出ないが、`grok --no-auto-update --version` は exit 0。未知のフラグは exit 2
+- 机上: 1.0.52 バイナリに `--effort/--reasoning-effort ignored` という文字列がある。このアカウントのカタログでは、その文言で exit 0 になる経路は再現していない
+
+### 直接 CLI（実機）
+
+Facade と同じ引数（`--no-auto-update -p --cwd --output-format streaming-json --always-approve`）で確認した。
+
+| 項目 | 結果 |
+| --- | --- |
+| 基本 headless | exit 0。`type=text` の `data` が `pong`。`type=end` の `sessionId=01a13ac4-94ed-7673-94fb-9b179d2bfb36`。`modelUsage.grok-4.7`。stderr は空 |
+| working directory | `end.cwd` が指定ディレクトリと一致。別ディレクトリの `SECRET_TOKEN_CAF_P0.txt` を読ませ、応答に `caf-wd-token-9142` が含まれた |
+| model 未指定 | session `summary.json` は `current_model_id=grok-4.7`、`reasoning_effort=high` |
+| model のみ `grok-4.7` | `modelUsage` と summary が `grok-4.7`。effort は `high` |
+| effort `low` / `medium` / `high` / `xhigh` | summary の `reasoning_effort` が指定値。無視警告は無し |
+| effort `none` / `minimal` / `max` / `not-a-level` | exit 1。`unknown effort level` と、受け付ける値 `xhigh, high, medium, low` |
+| 存在しない model `not-a-real-model` | exit 1。stdout は `type=error`、メッセージは `unknown model id` |
+| カタログ外 `grok-4.6` + effort `low` | stderr に `ignoring --effort/--reasoning-effort low`。続けて model 失敗で exit 1。旧文言 `model does not support reasoning effort; ignoring` は出なかった |
+| session resume | `--resume 01a13ac4-94ed-7673-94fb-9b179d2bfb36` で同じ `sessionId`。応答は `pingpong` |
+| streaming-json | `available_commands`、token 単位の `thought.data`、`text.data`、`usage`、`end.sessionId`。assistant 本文は `text` の連結で取れる |
+| Skill | prompt 先頭の `/dotnet-file-based-apps` が chat history の `<skill name="dotnet-file-based-apps">` になり、skill 本文が注入された。応答は `#:package` |
+| `auto_approve=true` | `--always-approve` ありで exit 0 |
+| `auto_approve=false` | `--always-approve` 無しでも、ツールを使わない prompt は exit 0。ファイルを読ませる prompt も入力待ちにならず exit 0 で内容を返した。承認ダイアログで止まる挙動は、この headless 経路では再現しなかった |
+
+### Facade 経路（実機）
+
+`CODEX_AGENT_FACADE_GROK_LIVE=1` で `GrokBuildLiveTests.LiveHeadlessMcpAndCliContract` を実行した。run log は `%LOCALAPPDATA%\caf-grok-live\c26a8a41a31b420fa007cd13e9fe2526\runs`。
+
+| 経路 | run | 結果 |
+| --- | --- | --- |
+| Driver、不正 model | `20261014T143145Z-f7cab1f4` | exit 1、`non_zero_exit` |
+| Driver、effort `none` | `20261014T143147Z-5e96bd17` | exit 1、`unknown effort level 'none'` |
+| Driver、`grok-4.7` + `low` | `20261014T143148Z-cc8860ed` | `outputText` に `pong`。session `01a13ad3-9a17-7b80-ad5d-109bc62c0da0`。summary は model `grok-4.7`、effort `low` |
+| Driver resume | `20261014T143153Z-2618adc3` | 同じ session。応答 `pingpong` |
+| Driver skill `$dotnet-file-based-apps` | `20261014T143203Z-aceeacc2` | prompt は `/dotnet-file-based-apps` で始まる。応答 `#:package`。session `01a13ad3-d368-7ca0-ab89-6964da87fb48` |
+| Driver `auto_approve=false` | `20261014T143208Z-e4b5a59d` | `--always-approve` 無しで `pong`。session `01a13ad3-e8fe-7d40-8b53-0d0bcdf669fc` |
+| MCP `start_agent` → `wait_agent_job` | `20261014T143223Z-a3bcbbed` | job `completed`、`outputText=pong`、session `01a13ad4-2349-74a2-a105-5ee2b79eb10d`。summary は `grok-4.7` / `low` |
+| `dotnet run --file src/CodexAgentFacadeCli.cs` | `20261014T143231Z-f9dc5e5a` | CLI exit 0、公開 JSON は `completed`、`pong`、session `01a13ad4-41d6-7661-afdf-2b7cb8395f25`。summary は `grok-4.7` / `low` |
+
+### 互換性の修正
+
+streaming-json の `text` / `end.sessionId`、`--resume`、`--model`、`--reasoning-effort`、`--cwd`、`--always-approve`、`--no-auto-update`、skill の `/name` は 1.0.52 でも成立した。引数生成と parser の成功経路は変えていない。
+
+変えたのは、effort を無視した stderr の判定だけである。1.0.5 付近の `model does not support reasoning effort; ignoring` に加え、1.0.52 で実測した `ignoring --effort/--reasoning-effort` を exit 0 のとき `option_not_applied` にする。実測したカタログ外モデルの警告は exit 1 であり、その場合は従来の `non_zero_exit` のままである。
+
+### 再実行
+
+通常テストは実 CLI を呼ばない。実機試験は次で再実行する。未設定のときは `GrokBuildLiveTests` が skip される。
+
+```powershell
+$env:CODEX_AGENT_FACADE_GROK_LIVE = '1'
+dotnet run --file tests/CodexAgentFacade.Tests.cs
+```
+
+この実行にはログイン済み `grok`、モデル `grok-4.7`、user skill `dotnet-file-based-apps` が必要である。2026-10-14 の再実行では 306 件成功（live を含む）だった。環境変数なしの実行は 305 件成功、live 1 件 skip だった。
+

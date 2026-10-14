@@ -2,7 +2,7 @@
 
 この一覧は、relay SKILL の `facade-options` ブロック内 `model:` 行、および MCP `start_agent` の `model` 引数へ渡す **CLI 識別子** を記録する。Codex App / Cursor IDE / GitHub Copilot App など UI 上のモデル名とは文字列が一致しない場合がある。Facade は、Cursor で `reasoning_effort` または `fast` を指定したときを除き、識別子を変換せず指定時だけ各 CLI の `--model` へそのまま渡す。Cursor の選択規則は下の effort / fast 表を参照する。
 
-**スナップショット取得日:** 2026-10-06
+**スナップショット取得日:** Cursor と GitHub Copilot は 2026-10-06。Grok Build は 2026-10-14。
 
 ## 使い方
 
@@ -308,15 +308,35 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 
 ## Grok Build CLI
 
-- **CLI バージョン:** `grok 1.0.5 (5115b46bc9) [stable]`
+- **調査日:** 2026-10-14
+- **CLI バージョン:** `grok 1.0.52 (0920c8169e27) [stable]`
+- **更新確認:** `grok update --check --json` は `currentVersion=1.0.52`、`latestVersion=1.0.52`、`updateAvailable=false`、`channel=stable`
+- **ログイン:** `grok models` は `You are logged in with grok.com.` のあとにカタログを返した
 - **取得コマンド:** `grok models`
-- **件数:** 2
-- **注意:** 2026-10-06 のこの環境では CLI が未ログインで、`grok models` は `You are not authenticated.` と出しつつ次のカタログを返した。選択されたモデルの証拠ではない。アカウントで使える集合はログイン後に変わり得る。
+- **件数:** 1
+- **default model:** `grok-4.7`
 
 | CLI 識別子 (`model:` / `--model`) | 備考 |
 | --- | --- |
-| `grok-4.6` | `grok models` が default と表示 |
-| `grok-4.5` | `grok models` が一覧に含めた |
+| `grok-4.7` | `grok models` が default と表示。ログイン済みカタログの唯一の ID |
+
+2026-10-06 の未ログイン出力（`grok-4.6` / `grok-4.5`）は、この環境の現行カタログではない。
+
+### reasoning effort（2026-10-14 実機）
+
+Facade は `reasoning_effort` を `--reasoning-effort` へそのまま渡す。Cursor のようなカタログ合成はしない。
+
+このログイン状態の `grok-4.7` で、session `summary.json` の `current_model_id` と `reasoning_effort` を確認した。
+
+| 指定 | 結果 |
+| --- | --- |
+| model 未指定 | `current_model_id=grok-4.7`、`reasoning_effort=high`。この環境の `~/.grok/config.toml` は `default_reasoning_effort = "high"` |
+| `--model grok-4.7` のみ | `grok-4.7` / `high` |
+| `--reasoning-effort low` / `medium` / `high` / `xhigh` | それぞれ session の `reasoning_effort` がその値になった。stderr の無視警告は無し |
+| `none` / `minimal` / `max` / `not-a-level` | exit 1。stderr は `unknown effort level '<値>'; use one of: xhigh, high, medium, low` |
+| `--model grok-4.6 --reasoning-effort low` | `grok-4.6` はカタログに無い。stderr に `warning: grok-4.6 isn't in the model catalog; ignoring --effort/--reasoning-effort low` が出て、続けて model 設定失敗で exit 1 |
+
+`model does not support reasoning effort; ignoring` は 1.0.52 のバイナリにも、上記の実機 stderr にも無かった。カタログ外モデルの無視警告は exit 1 なので、Facade は従来どおり `non_zero_exit` で失敗する。exit 0 で新しい無視警告だけが出た場合は `option_not_applied` にする。`--effort/--reasoning-effort ignored` は同じバイナリの文字列としてあるが、このカタログでは exit 0 の再現は取れていない。
 
 ## 更新方法
 
@@ -355,4 +375,4 @@ Fastの利用条件と費用はproviderとmodelに依存する。OpenAIの現行
 - [GitHub Copilot CLI reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference)
 - [Grok Build CLI option handling](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/src/headless.rs)
 
-コード上の引数生成、MCP schema、mock runnerによるnew/resume/result/failure検証と、実CLIの実推論・backend tier提供確認は別の証拠である。実推論は明示的な承認後に実施する。
+コード上の引数生成、MCP schema、mock runnerによるnew/resume/result/failure検証と、実CLIの実推論・backend tier提供確認は別の証拠である。この節の Cursor / Codex / Copilot についての実推論は、明示的な承認後に実施する。Grok Build の 2026-10-14 実機結果は上の Grok Build CLI 節に記録した。
