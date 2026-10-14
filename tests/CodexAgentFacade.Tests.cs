@@ -7787,7 +7787,9 @@ public class AgentCliProcessTests
 /// 実 Grok Build CLI を使う opt-in 試験。CI では走らない。
 /// 再実行: <c>$env:CODEX_AGENT_FACADE_GROK_LIVE='1'; dotnet run --file tests/CodexAgentFacade.Tests.cs</c>
 /// ログイン済みの grok、モデル grok-4.7、user skill dotnet-file-based-apps が必要。
+/// MCP host はプロセス共通 logger を入れ替えるため、他の host 試験と同じ collection で直列化する。
 /// </summary>
+[Collection("http-host")]
 public class GrokBuildLiveTests
 {
     private const string LiveEnvironmentVariable = "CODEX_AGENT_FACADE_GROK_LIVE";
@@ -7961,6 +7963,7 @@ public class GrokBuildLiveTests
                 RunLogViewerLauncher = NullRunLogViewerLauncher.Instance,
             });
         await app.StartAsync();
+        string? jobId = null;
         try
         {
             var transport = new HttpClientTransport(new HttpClientTransportOptions
@@ -7988,9 +7991,10 @@ public class GrokBuildLiveTests
             Assert.True(startedCall.IsError != true, startedText);
             var started = JsonSerializer.Deserialize<AgentJobPublicSnapshot>(startedText, AgentJson.Options);
             Assert.NotNull(started);
+            jobId = started!.JobId;
             var waitedCall = await client.CallToolAsync("wait_agent_job", new Dictionary<string, object?>
             {
-                ["job_id"] = started!.JobId,
+                ["job_id"] = jobId,
                 ["timeout_seconds"] = 180,
             });
             var waitedText = string.Concat(waitedCall.Content.OfType<TextContentBlock>().Select(block => block.Text));
@@ -8003,8 +8007,18 @@ public class GrokBuildLiveTests
         }
         finally
         {
-            await app.StopAsync();
-            await app.DisposeAsync();
+            try
+            {
+                if (jobId is not null)
+                {
+                    app.Services.GetRequiredService<AgentJobService>().Cancel(jobId);
+                }
+            }
+            finally
+            {
+                await app.StopAsync();
+                await app.DisposeAsync();
+            }
         }
     }
 
@@ -8012,6 +8026,10 @@ public class GrokBuildLiveTests
     {
         var directory = Path.Combine(root, "cli");
         Directory.CreateDirectory(directory);
+        var cliHome = Path.Combine(root, "cli-home");
+        Directory.CreateDirectory(cliHome);
+        JunctionToRealProfile(cliHome, ".grok");
+        JunctionToRealProfile(cliHome, ".agents");
         var repo = FindRepoRoot();
         var psi = new ProcessStartInfo
         {
@@ -8025,6 +8043,7 @@ public class GrokBuildLiveTests
         psi.ArgumentList.Add("run");
         psi.ArgumentList.Add("--file");
         psi.ArgumentList.Add(Path.Combine(repo, "src", "CodexAgentFacadeCli.cs"));
+        psi.Environment["USERPROFILE"] = cliHome;
         psi.Environment[AgentRunLogFactory.LogDirectoryEnvironmentVariable] = runs;
         using var process = new Process { StartInfo = psi };
         Assert.True(process.Start());
@@ -8047,10 +8066,11 @@ public class GrokBuildLiveTests
         {
             await process.WaitForExitAsync(timeout.Token);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException ex)
         {
+            CliJson.TraceException(ex);
             process.Kill(entireProcessTree: true);
-            throw new TimeoutException("CodexAgentFacadeCli did not exit. stderr: " + await stderrTask);
+            throw new TimeoutException("CodexAgentFacadeCli did not exit. stderr: " + await stderrTask, ex);
         }
 
         var stdout = await stdoutTask;
@@ -8063,6 +8083,41 @@ public class GrokBuildLiveTests
         Assert.Equal(AgentJobStatus.Completed, response!.Status);
         Assert.Contains("pong", response.Result!.OutputText, StringComparison.OrdinalIgnoreCase);
         AssertApplied(directory, response.Result.SessionId, "grok-4.7", "low");
+        // 成功経路は例外をトレースしないため cli.*.log は作られない。
+        // ディレクトリが試験用 home にできることと、viewer 設定を読まないことを確認する。
+        var isolatedProduct = Path.Combine(cliHome, ".codex-agent-facade");
+        Assert.True(Directory.Exists(isolatedProduct), isolatedProduct);
+        Assert.False(File.Exists(Path.Combine(isolatedProduct, FacadeUserConfig.FileName)));
+    }
+
+    /// <summary>
+    /// Grok の認証と skill は実プロファイルのジャンクションで維持し、Facade 製品ディレクトリは試験用 home に作らせる。
+    /// </summary>
+    private static void JunctionToRealProfile(string home, string directoryName)
+    {
+        var source = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            directoryName);
+        if (!Directory.Exists(source))
+        {
+            return;
+        }
+
+        var link = Path.Combine(home, directoryName);
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = "cmd.exe",
+            ArgumentList = { "/c", "mklink", "/J", link, source },
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        }) ?? throw new InvalidOperationException("Could not start mklink.");
+        process.WaitForExit();
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException(
+                "Could not link " + directoryName + ". " + process.StandardError.ReadToEnd());
+        }
     }
 
     private static string FindRepoRoot([CallerFilePath] string callerFile = "")
