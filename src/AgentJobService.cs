@@ -494,34 +494,7 @@ public sealed class AgentJobService
 
     private static AgentJobFailure CreateFailure(Exception exception)
     {
-        if (exception.Data[CliJson.FailureKindKey] is string kind)
-        {
-            var exitCode = exception.Data[CliJson.FailureExitCodeKey] is int code ? code : (int?)null;
-            var summary = exception.Data[CliJson.FailureSummaryKey] as string ?? exception.Message;
-            return new AgentJobFailure(
-                kind,
-                FailureSummary(summary),
-                exitCode,
-                exception.Data[CliJson.FailureRunIdKey] as string,
-                exception.Data[CliJson.FailureEventsLogPathKey] as string,
-                exception.Data[CliJson.FailureTextLogPathKey] as string);
-        }
-
-        return new AgentJobFailure(
-            "internal_error",
-            FailureSummary(exception.Message),
-            null,
-            exception.Data[CliJson.FailureRunIdKey] as string,
-            exception.Data[CliJson.FailureEventsLogPathKey] as string,
-            exception.Data[CliJson.FailureTextLogPathKey] as string);
-    }
-
-    private static string FailureSummary(string summary)
-    {
-        var oneLine = SecretRedactor.RedactText(summary)
-            .Replace('\r', ' ')
-            .Replace('\n', ' ');
-        return oneLine.Length <= 512 ? oneLine : oneLine[..512];
+        return CliJson.CreateFailure(exception);
     }
 }
 

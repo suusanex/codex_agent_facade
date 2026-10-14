@@ -25,6 +25,7 @@
 #:include ../src/RunLogViewerLauncher.cs
 #:include ../src/RunLogViewerSession.cs
 #:include ../src/McpHttpHost.cs
+#:include ../src/AgentCli.cs
 
 using System.Diagnostics;
 using System.Security.Cryptography;
@@ -33,6 +34,7 @@ using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Ardalis.SingleFileTestRunner;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
@@ -6759,5 +6761,805 @@ public class RunLogViewerHostTests
         await using var session = await McpHttpTestHost.StartAsync();
         var launcher = session.App.Services.GetRequiredService<IRunLogViewerLauncher>();
         Assert.Same(NullRunLogViewerLauncher.Instance, launcher);
+    }
+}
+
+[Collection("global-facade-logger")]
+public class AgentCliLogTests
+{
+    [Fact]
+    public void WritesTraceWhileServerLogIsLocked()
+    {
+        var directory = Directory.CreateTempSubdirectory("caf-cli-log-").FullName;
+        var serverLog = FacadeLogging.GetLogFilePath(directory);
+        using (var locked = new FileStream(serverLog, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
+        {
+            locked.WriteByte(1);
+            locked.Flush();
+            using var nlog = FacadeLogging.CreateCliNLogFactory(directory, 4242);
+            using var loggerFactory = FacadeLogging.CreateLoggerFactory(nlog);
+            using (FacadeLog.UseLoggerFactory(loggerFactory))
+            {
+                CliJson.TraceException(new InvalidOperationException("cli-trace-marker"));
+            }
+        }
+
+        var text = File.ReadAllText(FacadeLogging.GetCliLogFilePath(directory, 4242));
+        Assert.Contains("cli-trace-marker", text, StringComparison.Ordinal);
+        Assert.Contains(nameof(InvalidOperationException), text, StringComparison.Ordinal);
+        Assert.Equal(1, new FileInfo(serverLog).Length);
+    }
+}
+
+public class AgentCliTests
+{
+    private const string UnitDiagnosticLogPath = @"C:\facade-cli-test\cli.4242.log";
+
+    [Fact]
+    public void TimeoutRangeMatchesWaitBounds()
+    {
+        Assert.Equal(AgentJobService.MinWaitTimeoutSeconds, AgentCli.MinTimeoutSeconds);
+        Assert.Equal(AgentJobService.MaxWaitTimeoutSeconds, AgentCli.MaxTimeoutSeconds);
+    }
+
+    [Fact]
+    public async Task RejectsArgumentsWithoutStartingAgent()
+    {
+        await using var writer = new StringWriter();
+        var code = AgentCli.WriteInvalidArguments(writer);
+        Assert.Equal(AgentCli.ExitInvalidRequest, code);
+        Assert.Equal("invalid_request", FailureKind(writer.ToString()));
+    }
+
+    [Fact]
+    public async Task RejectsUnknownFieldAndExtraJson()
+    {
+        var facade = CreateFacade(out var runner);
+        var unknown = await RunAsync(facade, """{"agent":"github-copilot","prompt":"pong","working_directory":"C:\\work","request_id":"same"}""");
+        Assert.Equal(AgentCli.ExitInvalidRequest, unknown.ExitCode);
+        Assert.Equal("invalid_request", unknown.FailureKind);
+        Assert.Equal(0, runner.CallCount);
+
+        var extra = await RunAsync(facade, """{"agent":"github-copilot","prompt":"pong","working_directory":"C:\\work"}{"agent":"cursor"}""");
+        Assert.Equal(AgentCli.ExitInvalidRequest, extra.ExitCode);
+        Assert.Equal(0, runner.CallCount);
+    }
+
+    [Fact]
+    public async Task CompletedResultOmitsRawStreamAndKeepsItInRunLog()
+    {
+        var facade = CreateFacade(out var runner);
+        runner.Result = CopilotSuccess();
+        var work = Path.GetTempPath();
+        var completed = await RunAsync(facade, Request(new
+        {
+            Agent = AgentFacade.GitHubCopilotAgent,
+            Prompt = "say pong",
+            WorkingDirectory = work,
+            Model = "gpt-5-mini",
+            ReasoningEffort = "low",
+        }));
+
+        Assert.Equal(AgentCli.ExitCompleted, completed.ExitCode);
+        Assert.Equal("completed", completed.Status);
+        Assert.Equal("pong", completed.Root.GetProperty("result").GetProperty("outputText").GetString());
+        Assert.Equal("sess-copilot", completed.Root.GetProperty("result").GetProperty("sessionId").GetString());
+        Assert.False(completed.Root.GetProperty("result").TryGetProperty("rawOutput", out _));
+        Assert.DoesNotContain("RAW_TOOL_MARKER", completed.Text, StringComparison.Ordinal);
+        var events = TestRunLogs.ReadShared(completed.Root.GetProperty("result").GetProperty("eventsLogPath").GetString()!);
+        Assert.Contains("RAW_TOOL_MARKER", events, StringComparison.Ordinal);
+        Assert.Contains("--model", runner.LastRequest!.Arguments);
+        Assert.Contains("gpt-5-mini", runner.LastRequest.Arguments);
+        Assert.Contains("--reasoning-effort", runner.LastRequest.Arguments);
+        Assert.Contains("low", runner.LastRequest.Arguments);
+        Assert.DoesNotContain("--resume", runner.LastRequest.Arguments);
+        Assert.Equal("say pong", runner.LastRequest.StandardInputText);
+    }
+
+    [Fact]
+    public async Task ContinuationPassesSessionAndCursorCodexOptions()
+    {
+        var facade = CreateFacade(out var runner);
+        runner.Result = CopilotSuccess();
+        var continued = await RunAsync(facade, Request(new
+        {
+            Agent = AgentFacade.GitHubCopilotAgent,
+            Prompt = "continue",
+            WorkingDirectory = Path.GetTempPath(),
+            SessionId = "sess-existing",
+        }));
+        Assert.Equal(AgentCli.ExitCompleted, continued.ExitCode);
+        Assert.Contains("--resume", runner.LastRequest!.Arguments);
+        Assert.Contains("sess-existing", runner.LastRequest.Arguments);
+
+        runner.Result = new ProcessRunResult(0,
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"c6b62c6f-7ead-4fd6-9922-e952131177ff\"}\n"
+            + "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"pong\"}]}}\n"
+            + "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"pong\",\"session_id\":\"c6b62c6f-7ead-4fd6-9922-e952131177ff\"}",
+            "");
+        var cursor = await RunAsync(facade, Request(new
+        {
+            Agent = AgentFacade.CursorAgent,
+            Prompt = "pong",
+            WorkingDirectory = @"D:\work",
+            Model = "composer-2.5",
+            ReasoningEffort = "high",
+            Fast = false,
+        }));
+        Assert.Equal(AgentCli.ExitCompleted, cursor.ExitCode);
+        Assert.Contains("composer-2.5[effort=high,fast=false]", runner.LastRequest!.Arguments);
+
+        runner.Result = new ProcessRunResult(0,
+            "{\"type\":\"thread.started\",\"thread_id\":\"thread-9\"}\n"
+            + "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"pong\"}}\n"
+            + "{\"type\":\"turn.completed\"}",
+            "");
+        var codex = await RunAsync(facade, Request(new
+        {
+            Agent = AgentFacade.CodexAgent,
+            Prompt = "pong",
+            WorkingDirectory = @"D:\work",
+            Model = "gpt-6-luna",
+            ReasoningEffort = "low",
+            Fast = false,
+        }));
+        Assert.Equal(AgentCli.ExitCompleted, codex.ExitCode);
+        Assert.Contains("model_reasoning_effort=\"low\"", runner.LastRequest!.Arguments);
+        Assert.Contains("service_tier=\"default\"", runner.LastRequest.Arguments);
+        Assert.Contains("gpt-6-luna", runner.LastRequest.Arguments);
+    }
+
+    [Fact]
+    public async Task RejectsUnsupportedFastBeforeLaunch()
+    {
+        var facade = CreateFacade(out var runner);
+        var rejected = await RunAsync(facade, Request(new
+        {
+            Agent = AgentFacade.GitHubCopilotAgent,
+            Prompt = "pong",
+            WorkingDirectory = Path.GetTempPath(),
+            Fast = true,
+        }));
+        Assert.Equal(AgentCli.ExitInvalidRequest, rejected.ExitCode);
+        Assert.Equal("invalid_request", rejected.FailureKind);
+        Assert.Equal(0, runner.CallCount);
+    }
+
+    [Fact]
+    public async Task FailedRunReturnsFailureWithoutRawResult()
+    {
+        var facade = CreateFacade(out var runner);
+        runner.Result = new ProcessRunResult(7, "not-json", "boom");
+        var failed = await RunAsync(facade, Request(new
+        {
+            Agent = AgentFacade.GitHubCopilotAgent,
+            Prompt = "pong",
+            WorkingDirectory = Path.GetTempPath(),
+        }));
+        Assert.Equal(AgentCli.ExitFailed, failed.ExitCode);
+        Assert.Equal("failed", failed.Status);
+        Assert.Equal("non_zero_exit", failed.FailureKind);
+        Assert.Equal(AgentCli.RunFailureError(UnitDiagnosticLogPath), failed.Root.GetProperty("error").GetString());
+        Assert.DoesNotContain("server log", failed.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("server log", AgentCli.StartupFailureError(UnitDiagnosticLogPath), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(UnitDiagnosticLogPath, AgentCli.StartupFailureError(UnitDiagnosticLogPath), StringComparison.Ordinal);
+        Assert.False(failed.Root.TryGetProperty("result", out var result) && result.ValueKind != JsonValueKind.Null);
+        Assert.Equal(7, failed.Root.GetProperty("failure").GetProperty("exitCode").GetInt32());
+        Assert.False(string.IsNullOrWhiteSpace(failed.Root.GetProperty("failure").GetProperty("eventsLogPath").GetString()));
+    }
+
+    [Fact]
+    public async Task CallerCancellationAndTimeoutStopTheRun()
+    {
+        var facade = CreateFacade(out var runner);
+        runner.Gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        var cancel = await RunAsync(facade, Request(new
+        {
+            Agent = AgentFacade.GitHubCopilotAgent,
+            Prompt = "pong",
+            WorkingDirectory = Path.GetTempPath(),
+        }), cancelled.Token);
+        Assert.Equal(AgentCli.ExitCancelled, cancel.ExitCode);
+        Assert.Equal("cancelled", cancel.Status);
+
+        runner.Gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var timedOut = await RunAsync(facade, Request(new
+        {
+            Agent = AgentFacade.GitHubCopilotAgent,
+            Prompt = "pong",
+            WorkingDirectory = Path.GetTempPath(),
+            TimeoutSeconds = 1,
+        }));
+        Assert.Equal(AgentCli.ExitTimedOut, timedOut.ExitCode);
+        Assert.Equal(AgentCli.StatusTimedOut, timedOut.Status);
+        Assert.Equal("timeout", timedOut.FailureKind);
+    }
+
+    private static ProcessRunResult CopilotSuccess()
+    {
+        return new ProcessRunResult(
+            0,
+            """
+            {"type":"assistant.turn_start"}
+            {"type":"assistant.message","data":{"content":"pong"}}
+            {"type":"tool","name":"RAW_TOOL_MARKER"}
+            {"type":"assistant.turn_end"}
+            {"type":"result","sessionId":"sess-copilot"}
+            """,
+            "");
+    }
+
+    private static AgentFacade CreateFacade(out RecordingProcessRunner runner)
+    {
+        runner = new RecordingProcessRunner();
+        return new AgentFacade(
+            new GitHubCopilotDriver(runner),
+            new GrokBuildDriver(runner),
+            new CursorCliDriver(runner),
+            new CodexCliDriver(runner),
+            TestRunLogs.CreateFactory(),
+            NullRunLogViewerLauncher.Instance);
+    }
+
+    private static string Request(object payload)
+    {
+        return JsonSerializer.Serialize(payload, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        });
+    }
+
+    private static async Task<CliJsonResult> RunAsync(AgentFacade facade, string json, CancellationToken cancellationToken = default)
+    {
+        await using var writer = new StringWriter();
+        var code = await AgentCli.ExecuteAsync(facade, json, writer, cancellationToken, UnitDiagnosticLogPath);
+        var text = writer.ToString();
+        using var document = JsonDocument.Parse(text);
+        return new CliJsonResult(code, text, document.RootElement.Clone());
+    }
+
+    private static string? FailureKind(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        return document.RootElement.GetProperty("failure").GetProperty("kind").GetString();
+    }
+
+    private sealed record CliJsonResult(int ExitCode, string Text, JsonElement Root)
+    {
+        public string? Status => Root.GetProperty("status").GetString();
+
+        public string? FailureKind => Root.TryGetProperty("failure", out var failure) && failure.ValueKind == JsonValueKind.Object
+            ? failure.GetProperty("kind").GetString()
+            : null;
+    }
+}
+
+public class AgentCliProcessTests
+{
+    private static readonly SemaphoreSlim PublishGate = new(1, 1);
+    private static PublishedTools? Published;
+
+    [Fact]
+    public async Task CallerProcessReceivesNewAndContinuedResults()
+    {
+        var tools = await PublishAsync();
+        var created = await RunAsync(tools, AgentFacade.GitHubCopilotAgent, "say pong", sessionId: null, model: "gpt-5-mini", reasoningEffort: "low");
+        Assert.Equal(AgentCli.ExitCompleted, created.ExitCode);
+        Assert.Equal(string.Empty, created.StandardError);
+        Assert.Equal("pong", created.ResultText);
+        Assert.DoesNotContain("RAW_TOOL_MARKER", created.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("RAW_TOOL_MARKER", await File.ReadAllTextAsync(created.EventsLogPath), StringComparison.Ordinal);
+        Assert.DoesNotContain("--resume", created.Arguments);
+        Assert.Contains("--model", created.Arguments);
+        Assert.Contains("gpt-5-mini", created.Arguments);
+        Assert.Equal("say pong", created.StandardInput);
+        Assert.False(Directory.Exists(Path.Combine(created.Home, ".codex-agent-facade", "jobs")));
+
+        var continued = await RunAsync(tools, AgentFacade.GitHubCopilotAgent, "continue", sessionId: "sess-copilot");
+        Assert.Equal(AgentCli.ExitCompleted, continued.ExitCode);
+        Assert.Contains("--resume", continued.Arguments);
+        Assert.Contains("sess-copilot", continued.Arguments);
+    }
+
+    [Fact]
+    public async Task PassesCursorGrokAndCodexOptionsThroughTheProcess()
+    {
+        var tools = await PublishAsync();
+        var cursor = await RunAsync(
+            tools,
+            AgentFacade.CursorAgent,
+            "pong",
+            sessionId: null,
+            model: "composer-2.5",
+            reasoningEffort: "high",
+            fast: false);
+        Assert.Equal(AgentCli.ExitCompleted, cursor.ExitCode);
+        Assert.Contains("composer-2.5[effort=high,fast=false]", cursor.Arguments);
+        Assert.Equal("pong", cursor.ResultText);
+
+        var grok = await RunAsync(
+            tools,
+            AgentFacade.GrokBuildAgent,
+            "pong",
+            sessionId: "22222222-2222-2222-2222-222222222222",
+            model: "grok-4.6",
+            reasoningEffort: "high");
+        Assert.Equal(AgentCli.ExitCompleted, grok.ExitCode);
+        Assert.Contains("--resume", grok.Arguments);
+        Assert.Contains("grok-4.6", grok.Arguments);
+        Assert.Contains("--reasoning-effort", grok.Arguments);
+        Assert.Equal("pong", grok.ResultText);
+
+        var codex = await RunAsync(
+            tools,
+            AgentFacade.CodexAgent,
+            "pong",
+            sessionId: "thread-keep",
+            model: "gpt-6-luna",
+            reasoningEffort: "low",
+            fast: false,
+            environment: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["FAKE_AGENT_THREAD_ID"] = "thread-keep",
+            });
+        Assert.Equal(AgentCli.ExitCompleted, codex.ExitCode);
+        Assert.Contains("resume", codex.Arguments);
+        Assert.Contains("thread-keep", codex.Arguments);
+        Assert.Contains("service_tier=\"default\"", codex.Arguments);
+        Assert.Contains("model_reasoning_effort=\"low\"", codex.Arguments);
+        Assert.Equal("pong", codex.StandardInput);
+    }
+
+    [Fact]
+    public async Task ReportsFailureTimeoutAndKill()
+    {
+        var tools = await PublishAsync();
+        var invalid = await RunAsync(tools, AgentFacade.GitHubCopilotAgent, "pong", sessionId: null, fast: true);
+        Assert.Equal(AgentCli.ExitInvalidRequest, invalid.ExitCode);
+        Assert.Equal("invalid_request", invalid.FailureKind);
+        Assert.False(File.Exists(Path.Combine(invalid.Capture, "pid.txt")));
+
+        var failed = await RunAsync(
+            tools,
+            AgentFacade.GitHubCopilotAgent,
+            "pong",
+            sessionId: null,
+            environment: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["FAKE_AGENT_EXIT_CODE"] = "7",
+            });
+        Assert.Equal(AgentCli.ExitFailed, failed.ExitCode);
+        Assert.Equal("non_zero_exit", failed.FailureKind);
+        Assert.Equal(7, failed.FailureExitCode);
+        var diagnosticLog = FacadeLogging.GetCliLogFilePath(
+            Path.Combine(failed.Home, ".codex-agent-facade"),
+            failed.CliProcessId);
+        using (var failedJson = JsonDocument.Parse(failed.StandardOutput))
+        {
+            Assert.Equal(AgentCli.RunFailureError(diagnosticLog), failedJson.RootElement.GetProperty("error").GetString());
+        }
+
+        Assert.DoesNotContain("server log", failed.StandardOutput, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(string.Empty, failed.StandardError);
+        var trace = await File.ReadAllTextAsync(diagnosticLog);
+        Assert.Contains(nameof(InvalidOperationException), trace, StringComparison.Ordinal);
+
+        var timedOut = await RunAsync(
+            tools,
+            AgentFacade.GitHubCopilotAgent,
+            "pong",
+            sessionId: null,
+            timeoutSeconds: 5,
+            environment: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["FAKE_AGENT_SLEEP_MS"] = "60000",
+            });
+        Assert.Equal(AgentCli.ExitTimedOut, timedOut.ExitCode);
+        Assert.Equal("timeout", timedOut.FailureKind);
+        Assert.False(await WaitUntilDeadAsync(timedOut.AgentPid));
+
+        var killed = await RunAndKillAsync(tools);
+        Assert.False(await WaitUntilDeadAsync(killed));
+    }
+
+    [Fact]
+    public async Task WritesSeparateTracesWhileServerLogIsLocked()
+    {
+        var tools = await PublishAsync();
+        var home = Directory.CreateTempSubdirectory("caf-cli-home-").FullName;
+        var logDirectory = Path.Combine(home, ".codex-agent-facade");
+        Directory.CreateDirectory(logDirectory);
+        var serverLog = Path.Combine(logDirectory, "server.log");
+        await using var locked = new FileStream(serverLog, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+        locked.WriteByte(1);
+        await locked.FlushAsync();
+        var first = StartAsync(
+            tools,
+            "{",
+            [],
+            Merge(home, Directory.CreateTempSubdirectory("caf-cli-capture-").FullName, null),
+            CancellationToken.None);
+        var second = StartAsync(
+            tools,
+            "{",
+            [],
+            Merge(home, Directory.CreateTempSubdirectory("caf-cli-capture-").FullName, null),
+            CancellationToken.None);
+        var results = await Task.WhenAll(first, second);
+        Assert.All(results, result =>
+        {
+            Assert.Equal(AgentCli.ExitInvalidRequest, result.ExitCode);
+            Assert.Equal("invalid_request", result.FailureKind);
+        });
+        var cliLogs = Directory.GetFiles(logDirectory, "cli.*.log");
+        Assert.Equal(2, cliLogs.Length);
+        foreach (var path in cliLogs)
+        {
+            var text = await File.ReadAllTextAsync(path);
+            Assert.Contains(nameof(JsonException), text, StringComparison.Ordinal);
+        }
+
+        Assert.Equal(1, new FileInfo(serverLog).Length);
+    }
+
+    [Fact]
+    public async Task RejectsCommandLineArguments()
+    {
+        var tools = await PublishAsync();
+        var result = await StartAsync(tools, "ignored", ["--help"], new Dictionary<string, string>(StringComparer.Ordinal), CancellationToken.None);
+        Assert.Equal(AgentCli.ExitInvalidRequest, result.ExitCode);
+        Assert.Equal("invalid_request", result.FailureKind);
+    }
+
+    private static async Task<int> RunAndKillAsync(PublishedTools tools)
+    {
+        var home = Directory.CreateTempSubdirectory("caf-cli-home-").FullName;
+        var capture = Directory.CreateTempSubdirectory("caf-cli-capture-").FullName;
+        var work = Directory.CreateTempSubdirectory("caf-cli-work-").FullName;
+        var json = Request(new
+        {
+            Agent = AgentFacade.GitHubCopilotAgent,
+            Prompt = "sleep",
+            WorkingDirectory = work,
+        });
+        using var process = StartProcess(tools, home, capture, json, new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["FAKE_AGENT_SLEEP_MS"] = "60000",
+        }, []);
+        var stdout = process.StandardOutput.ReadToEndAsync();
+        var stderr = process.StandardError.ReadToEndAsync();
+        await process.StandardInput.WriteAsync(json);
+        process.StandardInput.Close();
+        var pid = await WaitForPidAsync(capture, process);
+        process.Kill(entireProcessTree: false);
+        await process.WaitForExitAsync();
+        _ = await stdout;
+        _ = await stderr;
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (IsProcessAlive(pid) && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(50);
+        }
+
+        return pid;
+    }
+
+    private static async Task<bool> WaitUntilDeadAsync(int pid)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (!IsProcessAlive(pid))
+            {
+                return false;
+            }
+
+            await Task.Delay(50);
+        }
+
+        return IsProcessAlive(pid);
+    }
+
+    private static async Task<ProcessObservation> RunAsync(
+        PublishedTools tools,
+        string agent,
+        string prompt,
+        string? sessionId,
+        string? model = null,
+        string? reasoningEffort = null,
+        bool? fast = null,
+        int? timeoutSeconds = null,
+        IReadOnlyDictionary<string, string>? environment = null)
+    {
+        var home = Directory.CreateTempSubdirectory("caf-cli-home-").FullName;
+        var capture = Directory.CreateTempSubdirectory("caf-cli-capture-").FullName;
+        var work = Directory.CreateTempSubdirectory("caf-cli-work-").FullName;
+        var json = Request(new
+        {
+            Agent = agent,
+            Prompt = prompt,
+            WorkingDirectory = work,
+            SessionId = sessionId,
+            Model = model,
+            ReasoningEffort = reasoningEffort,
+            Fast = fast,
+            TimeoutSeconds = timeoutSeconds,
+        });
+        var result = await StartAsync(tools, json, [], Merge(home, capture, environment), CancellationToken.None);
+        result.Home = home;
+        result.Capture = capture;
+        if (File.Exists(Path.Combine(capture, "args.json")))
+        {
+            result.Arguments = JsonSerializer.Deserialize<string[]>(await File.ReadAllTextAsync(Path.Combine(capture, "args.json"))) ?? [];
+        }
+
+        if (File.Exists(Path.Combine(capture, "stdin.txt")))
+        {
+            result.StandardInput = await File.ReadAllTextAsync(Path.Combine(capture, "stdin.txt"));
+        }
+
+        if (File.Exists(Path.Combine(capture, "pid.txt")))
+        {
+            result.AgentPid = int.Parse(await File.ReadAllTextAsync(Path.Combine(capture, "pid.txt")), System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        return result;
+    }
+
+    private static Dictionary<string, string> Merge(string home, string capture, IReadOnlyDictionary<string, string>? extra)
+    {
+        var environment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["USERPROFILE"] = home,
+            ["FAKE_AGENT_CAPTURE"] = capture,
+        };
+        if (extra is not null)
+        {
+            foreach (var pair in extra)
+            {
+                environment[pair.Key] = pair.Value;
+            }
+        }
+
+        return environment;
+    }
+
+    private static async Task<ProcessObservation> StartAsync(
+        PublishedTools tools,
+        string json,
+        string[] arguments,
+        IReadOnlyDictionary<string, string> environment,
+        CancellationToken cancellationToken)
+    {
+        var home = environment.TryGetValue("USERPROFILE", out var configuredHome)
+            ? configuredHome
+            : Directory.CreateTempSubdirectory("caf-cli-home-").FullName;
+        var capture = environment.TryGetValue("FAKE_AGENT_CAPTURE", out var configuredCapture)
+            ? configuredCapture
+            : Directory.CreateTempSubdirectory("caf-cli-capture-").FullName;
+        using var process = StartProcess(tools, home, capture, json, environment, arguments);
+        var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+        var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
+        if (arguments.Length == 0)
+        {
+            await process.StandardInput.WriteAsync(json.AsMemory(), cancellationToken);
+            process.StandardInput.Close();
+        }
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
+        await process.WaitForExitAsync(linked.Token);
+        var observation = new ProcessObservation
+        {
+            ExitCode = process.ExitCode,
+            CliProcessId = process.Id,
+            StandardOutput = await stdoutTask,
+            StandardError = await stderrTask,
+            Home = home,
+            Capture = capture,
+        };
+        if (observation.ExitCode == AgentCli.ExitCompleted)
+        {
+            using var document = JsonDocument.Parse(observation.StandardOutput);
+            observation.ResultText = document.RootElement.GetProperty("result").GetProperty("outputText").GetString();
+            observation.EventsLogPath = document.RootElement.GetProperty("result").GetProperty("eventsLogPath").GetString() ?? string.Empty;
+        }
+        else if (!string.IsNullOrWhiteSpace(observation.StandardOutput))
+        {
+            using var document = JsonDocument.Parse(observation.StandardOutput);
+            observation.FailureKind = document.RootElement.GetProperty("failure").GetProperty("kind").GetString();
+            if (document.RootElement.GetProperty("failure").TryGetProperty("exitCode", out var exitCode)
+                && exitCode.ValueKind == JsonValueKind.Number)
+            {
+                observation.FailureExitCode = exitCode.GetInt32();
+            }
+        }
+
+        return observation;
+    }
+
+    private static Process StartProcess(
+        PublishedTools tools,
+        string home,
+        string capture,
+        string json,
+        IReadOnlyDictionary<string, string> environment,
+        string[] arguments)
+    {
+        var start = new ProcessStartInfo(tools.CliPath)
+        {
+            WorkingDirectory = capture,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+            StandardErrorEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+        };
+        foreach (var argument in arguments)
+        {
+            start.ArgumentList.Add(argument);
+        }
+
+        start.Environment["PATH"] = tools.FakeBin + Path.PathSeparator + Environment.GetEnvironmentVariable("PATH");
+        start.Environment["USERPROFILE"] = home;
+        start.Environment["FAKE_AGENT_CAPTURE"] = capture;
+        foreach (var pair in environment)
+        {
+            start.Environment[pair.Key] = pair.Value;
+        }
+
+        return Process.Start(start) ?? throw new InvalidOperationException("Failed to start the CLI.");
+    }
+
+    private static async Task<int> WaitForPidAsync(string capture, Process process)
+    {
+        var path = Path.Combine(capture, "pid.txt");
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (File.Exists(path))
+            {
+                return int.Parse(await File.ReadAllTextAsync(path), System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (process.HasExited)
+            {
+                throw new InvalidOperationException("CLI exited before the fake agent wrote a pid. exit=" + process.ExitCode);
+            }
+
+            await Task.Delay(50);
+        }
+
+        throw new TimeoutException("Fake agent did not write a pid.");
+    }
+
+    private static bool IsProcessAlive(int pid)
+    {
+        try
+        {
+            var process = Process.GetProcessById(pid);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private static string Request(object payload)
+    {
+        return JsonSerializer.Serialize(payload, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        });
+    }
+
+    private static async Task<PublishedTools> PublishAsync()
+    {
+        await PublishGate.WaitAsync();
+        try
+        {
+            if (Published is not null)
+            {
+                return Published;
+            }
+
+            var root = LocateRepoRoot();
+            var output = Directory.CreateTempSubdirectory("caf-cli-publish-").FullName;
+            var fake = Path.Combine(output, "fake");
+            Directory.CreateDirectory(fake);
+            await PublishTool(root, Path.Combine(root, "src", "CodexAgentFacadeCli.cs"), Path.Combine(output, "cli"), null);
+            await PublishTool(root, Path.Combine(root, "tests", "fakes", "agent-stub.cs"), Path.Combine(fake, "copilot"), "copilot");
+            await PublishTool(root, Path.Combine(root, "tests", "fakes", "agent-stub.cs"), Path.Combine(fake, "grok"), "grok");
+            await PublishTool(root, Path.Combine(root, "tests", "fakes", "agent-stub.cs"), Path.Combine(fake, "codex"), "codex");
+            await PublishTool(root, Path.Combine(root, "tests", "fakes", "agent-stub.cs"), Path.Combine(fake, "cursor"), "cursor-stub");
+            await File.WriteAllTextAsync(Path.Combine(fake, "cursor", "cursor-agent.ps1"), """
+                & "$PSScriptRoot\cursor-stub.exe" @args
+                exit $LASTEXITCODE
+                """);
+            Published = new PublishedTools(
+                Path.Combine(output, "cli", "CodexAgentFacadeCli.exe"),
+                string.Join(Path.PathSeparator, Path.Combine(fake, "copilot"), Path.Combine(fake, "grok"), Path.Combine(fake, "codex"), Path.Combine(fake, "cursor")));
+            return Published;
+        }
+        finally
+        {
+            PublishGate.Release();
+        }
+    }
+
+    private static async Task PublishTool(string root, string source, string output, string? assemblyName)
+    {
+        var arguments = "publish \"" + source + "\" -c Release --self-contained false -o \"" + output + "\" --nologo";
+        if (!string.IsNullOrWhiteSpace(assemblyName))
+        {
+            arguments += " -p:AssemblyName=" + assemblyName;
+        }
+
+        using var process = Process.Start(new ProcessStartInfo("dotnet", arguments)
+        {
+            WorkingDirectory = root,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        }) ?? throw new InvalidOperationException("Failed to start dotnet publish.");
+        var stdout = await process.StandardOutput.ReadToEndAsync();
+        var stderr = await process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException("dotnet publish failed (" + process.ExitCode + "): " + stderr + stdout);
+        }
+    }
+
+    private static string LocateRepoRoot([CallerFilePath] string? callerFile = null)
+    {
+        var seeds = new List<string> { Directory.GetCurrentDirectory() };
+        if (!string.IsNullOrEmpty(callerFile))
+        {
+            var testsDir = Path.GetDirectoryName(callerFile);
+            if (!string.IsNullOrEmpty(testsDir))
+            {
+                seeds.Add(Path.GetFullPath(Path.Combine(testsDir, "..")));
+            }
+        }
+
+        foreach (var seed in seeds)
+        {
+            for (var dir = new DirectoryInfo(seed); dir is not null; dir = dir.Parent)
+            {
+                if (File.Exists(Path.Combine(dir.FullName, "src", "CodexAgentFacadeCli.cs")))
+                {
+                    return dir.FullName;
+                }
+            }
+        }
+
+        throw new InvalidOperationException("Could not locate repository root.");
+    }
+
+    private sealed record PublishedTools(string CliPath, string FakeBin);
+
+    private sealed class ProcessObservation
+    {
+        public int ExitCode { get; set; }
+        public int CliProcessId { get; set; }
+        public string StandardOutput { get; set; } = string.Empty;
+        public string StandardError { get; set; } = string.Empty;
+        public string Home { get; set; } = string.Empty;
+        public string Capture { get; set; } = string.Empty;
+        public string? ResultText { get; set; }
+        public string EventsLogPath { get; set; } = string.Empty;
+        public string? FailureKind { get; set; }
+        public int? FailureExitCode { get; set; }
+        public string[] Arguments { get; set; } = [];
+        public string StandardInput { get; set; } = string.Empty;
+        public int AgentPid { get; set; }
     }
 }

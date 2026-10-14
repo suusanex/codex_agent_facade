@@ -32,7 +32,10 @@ dotnet run --file src/CodexAgentFacade.cs
 ```powershell
 dotnet publish src/CodexAgentFacade.cs -o .\publish
 dotnet publish src/RunLogViewer.cs -o .\publish
+dotnet publish src/CodexAgentFacadeCli.cs -o .\publish
 ```
+
+`CodexAgentFacadeCli.exe` は通常アプリが1回のagent実行を同期で呼ぶコンソール入口である。常駐MCPホストとは別プロセスで、タスクスケジューラの起動対象にはしない。契約、入出力、終了コード、MCPおよびFlaUIとの差は [通常アプリ向けCLI](docs/cli.md) を参照する。
 
 ポートが既に使われている場合は別ポートへ逃げず、起動失敗する。
 
@@ -83,7 +86,7 @@ Facade は Windows Service にしない。GitHub Copilot CLI / Grok Build CLI �
 | 停止条件 | 長時間実行前提なので、タスクを停止する期限は設定しない |
 | 異常終了 | 必要ならタスク スケジューラの再起動機能を使う |
 
-exe は GUI subsystem（WinExe）なので、ログオン時にコンソールウィンドウは出ない。起動・停止・異常終了はタスク スケジューラがプロセスとして追跡する。
+exe は GUI subsystem（WinExe）なので、ログオン時にコンソールウィンドウは出ない。起動・停止・異常終了はタスク スケジューラがプロセスとして追跡する。同じフォルダの `CodexAgentFacadeCli.exe` はスケジューラから起動しない。通常アプリが必要とするときだけ、そのプロセスから起動する。
 
 人手確認: 配置した `CodexAgentFacade.exe` を直接起動し、コンソールウィンドウが出ないこと、`127.0.0.1:18765` が LISTEN になること、`server.log` が生成されることを確認する。
 
@@ -122,7 +125,7 @@ enabled = true
 dotnet run --file tools/publish-facade.cs
 ```
 
-設定ファイルを別の場所に置く場合は、1個目の引数にパスを指定する。Facadeの複数インスタンスがある場合、スクリプトは停止せず終了する。
+設定ファイルを別の場所に置く場合は、1個目の引数にパスを指定する。Facadeの複数インスタンスがある場合、スクリプトは停止せず終了する。差し替え対象は配置フォルダ全体で、同じタスクのプログラムと引数は変更しない。`CodexAgentFacadeCli.exe` と `RunLogViewer.exe` も同じフォルダへ入る。ユーザー領域の `config.json` にある run log viewer 設定は publish では変更しない。
 
 ## MCP tool
 
