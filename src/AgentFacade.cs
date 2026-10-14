@@ -188,6 +188,17 @@ public sealed class AgentFacade
             throw new ArgumentException("working_directory is required.");
         }
 
+        if (request.Skills is not null)
+        {
+            foreach (var skill in request.Skills)
+            {
+                if (string.IsNullOrWhiteSpace(skill))
+                {
+                    throw new ArgumentException("skill name is required.");
+                }
+            }
+        }
+
         // fingerprint は行単位である。改行を含む model は別フィールドと衝突し、CLI の1引数としても渡せない。
         if (request.Model is not null
             && (request.Model.Contains('\r')

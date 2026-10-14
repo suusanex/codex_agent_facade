@@ -36,14 +36,14 @@ CLIに `CODEX_AGENT_FACADE_TOKEN` は不要である。tokenは常駐MCPホス�
 | `prompt` | はい | worker prompt。本文からmodel、effort、fastは推測しない |
 | `working_directory` | はい | agent processの作業場所。継続時も毎回指定する |
 | `session_id` | いいえ | 完了結果の `sessionId` による同一外部sessionの継続。省略時は新規 |
-| `skills` | いいえ | 既存Driverの変換に従う。CursorとCodexはpromptへ変換しない |
+| `skills` | いいえ | 既存Driverの変換に従う。CursorとCodexはpromptへ変換しない。nullや空白の要素は起動前に `invalid_request` |
 | `auto_approve` | いいえ | 省略時は true |
 | `model` | いいえ | 省略時はCLIへmodel引数を付けない |
 | `reasoning_effort` | いいえ | 省略時はCLI既定。非対応値は起動前に失敗する |
 | `fast` | いいえ | 省略、true、false。CopilotとGrok Buildは true/false とも起動前に失敗する |
 | `timeout_seconds` | いいえ | 1〜86400。指定時は期限でagent process treeを止める。省略時はCLI側の時間制限は無い |
 
-標準出力は完了時にJSON objectを1個だけ書く。run logの本文、agentのraw stream、診断ログは書かない。agent実行の逐次出力は、結果が指す run log に残る。CLIプロセスの例外トレースは `%USERPROFILE%\.codex-agent-facade\cli.{processId}.log` に残る。常駐MCPホストは `server.log` をプロセス終了まで開いたままにするため、CLIはそのファイルへ書かない。複数のCLIはそれぞれ自分のファイルへ書く。agent実行の失敗JSONの `error` は、その呼び出しの `cli.{processId}.log` のパスを示す。`server.log` とは書かない。MCP jobの失敗案内は従来どおり server log を指す。標準エラーは、結果JSONを書けなかった起動失敗の1行にだけ使い、同じCLI診断ログのパスを示す。
+標準出力は完了時にJSON objectを1個だけ書く。run logの本文、agentのraw stream、診断ログは書かない。agent実行の逐次出力は、結果が指す run log に残る。CLIプロセスの例外トレースは `%USERPROFILE%\.codex-agent-facade\cli.{processId}.log` に残る。常駐MCPホストは `server.log` をプロセス終了まで開いたままにするため、CLIはそのファイルへ書かない。複数のCLIはそれぞれ自分のファイルへ書く。agent実行の失敗JSONの `error` は、その呼び出しの `cli.{processId}.log` のパスを示す。`server.log` とは書かない。MCP jobの失敗案内は従来どおり server log を指す。標準エラーは、結果JSONを書けなかった起動失敗の1行にだけ使い、同じCLI診断ログのパスを示す。診断ログのファイルを開けない場合は、標準エラーに `Exception.ToString()` と、ログを作れなかったことを示す1行を書き、終了コード1で終わる。終了済みプロセスの `cli.*.log` は、実行中プロセスのファイルを残したまま、合わせて最大4件まで保持する。`server.log` は削除しない。
 
 成功例:
 

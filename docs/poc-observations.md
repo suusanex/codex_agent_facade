@@ -522,5 +522,5 @@ Codex CLI 0.162.1の公式sourceで、非対応の明示priority tierがomitted�
 
 CLI入口の自動検証はstub agentで行う。Codex、Cursor、GitHub Copilot、Grok Buildの有料実推論は、この入口の完了確認には使っていない。第2段階までで未確認のまま残している新規Codex実行の正常完了、Fast有効時のbackend tier、速度、消費は、CLIのstub成功から確認済みに読み替えない。契約とFlaUIとの差は [通常アプリ向けCLI](cli.md)。
 
-2026-10-14に、このworktree（Windows、.NET SDK）で `dotnet run --file tests/CodexAgentFacade.Tests.cs` を実行し、299件成功、失敗0件だった。所要時間は約15.8秒。確認したのはfake agent経由の新規と継続、model / effort / fastの指定、非ゼロ終了、timeout、親プロセスの強制終了、公開JSONとrun logの分離、`server.log` を共有読み取りで開いたままの2つのCLIがそれぞれ `cli.{processId}.log` へ例外を残すこと、失敗JSONの `error` がその診断ログを指し `server.log` を案内しないこと、既存MCPの失敗案内が server log のままであること。配置先のタスクスケジューラ、viewer設定、他checkoutは変更していない。有料実推論、Fast=trueの実測、FlaUIアプリの移行はしていない。
+2026-10-14に、このworktree（Windows、.NET SDK）で `dotnet run --file tests/CodexAgentFacade.Tests.cs` を実行し、302件成功、失敗0件だった。所要時間は約15.8秒。確認したのはfake agent経由の新規と継続、model / effort / fastの指定、非ゼロ終了、timeout、親プロセスの強制終了、公開JSONとrun logの分離、`server.log` を共有読み取りで開いたままの2つのCLIがそれぞれ `cli.{processId}.log` へ例外を残すこと、失敗JSONの `error` がその診断ログを指し `server.log` を案内しないこと、nullまたは空白のskillを起動前に拒否すること、製品ディレクトリを作れないときの制御された終了、終了済みCLI診断ログの保持上限、既存MCPの失敗案内が server log のままであること。配置先のタスクスケジューラ、viewer設定、他checkoutは変更していない。有料実推論、Fast=trueの実測、FlaUIアプリの移行はしていない。
 

@@ -56,6 +56,9 @@ public static class AgentCli
         return "Codex Agent Facade CLI failed. See the CLI diagnostic log for details: " + diagnosticLogPath.Trim();
     }
 
+    public const string DiagnosticLogUnavailableError =
+        "Codex Agent Facade CLI failed. The CLI diagnostic log could not be created.";
+
     public static async Task<int> ExecuteAsync(
         AgentFacade facade,
         string input,
