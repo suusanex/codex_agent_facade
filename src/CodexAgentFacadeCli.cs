@@ -26,13 +26,35 @@ var utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 Console.InputEncoding = utf8;
 Console.OutputEncoding = utf8;
 
-var productDirectory = ResolveProductDirectory();
-var diagnosticLogPath = FacadeLogging.GetCliLogFilePath(productDirectory, Environment.ProcessId);
-using var nlogFactory = FacadeLogging.CreateCliNLogFactory(productDirectory, Environment.ProcessId);
-using var loggerFactory = FacadeLogging.CreateLoggerFactory(nlogFactory);
-using var loggerScope = FacadeLog.UseLoggerFactory(loggerFactory);
-
+string? diagnosticLogPath = null;
 try
+{
+    var productDirectory = ResolveProductDirectory();
+    diagnosticLogPath = FacadeLogging.GetCliLogFilePath(productDirectory, Environment.ProcessId);
+    using var nlogFactory = FacadeLogging.CreateCliNLogFactory(productDirectory, Environment.ProcessId);
+    using var loggerFactory = FacadeLogging.CreateLoggerFactory(nlogFactory);
+    using var loggerScope = FacadeLog.UseLoggerFactory(loggerFactory);
+    try
+    {
+        FacadeLogging.PruneCliLogs(productDirectory, Environment.ProcessId);
+        return await RunAsync(args, productDirectory, diagnosticLogPath).ConfigureAwait(false);
+    }
+    catch (Exception ex)
+    {
+        CliJson.TraceException(ex);
+        Console.Error.WriteLine(AgentCli.StartupFailureError(diagnosticLogPath));
+        return AgentCli.ExitFailed;
+    }
+}
+catch (Exception ex)
+{
+    // 診断ファイルを開く前の失敗は、Exception.ToString() を書ける先が標準エラーしかない。
+    Console.Error.WriteLine(ex.ToString());
+    Console.Error.WriteLine(AgentCli.DiagnosticLogUnavailableError);
+    return AgentCli.ExitFailed;
+}
+
+static async Task<int> RunAsync(string[] args, string productDirectory, string diagnosticLogPath)
 {
     if (args.Length != 0)
     {
@@ -76,12 +98,6 @@ try
         new WindowsRunLogViewerLauncher(
             new FileRunLogViewerSettingsSource(Path.Combine(productDirectory, FacadeUserConfig.FileName))));
     return await AgentCli.ExecuteAsync(facade, input, Console.Out, cancellation.Token, diagnosticLogPath).ConfigureAwait(false);
-}
-catch (Exception ex)
-{
-    CliJson.TraceException(ex);
-    Console.Error.WriteLine(AgentCli.StartupFailureError(diagnosticLogPath));
-    return AgentCli.ExitFailed;
 }
 
 static string ResolveProductDirectory()

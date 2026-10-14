@@ -6789,6 +6789,63 @@ public class AgentCliLogTests
         Assert.Contains(nameof(InvalidOperationException), text, StringComparison.Ordinal);
         Assert.Equal(1, new FileInfo(serverLog).Length);
     }
+
+    [Fact]
+    public void PruneKeepsActiveProcessLogsAndBoundsFinishedLogs()
+    {
+        var directory = Directory.CreateTempSubdirectory("caf-cli-prune-").FullName;
+        var serverLog = Path.Combine(directory, "server.log");
+        File.WriteAllText(serverLog, "keep");
+        File.WriteAllText(Path.Combine(directory, "cli.not-a-pid.log"), "keep");
+
+        var dead = new List<int>();
+        for (var candidate = 2_100_000; dead.Count < 6 && candidate < 2_200_000; candidate++)
+        {
+            try
+            {
+                using var process = Process.GetProcessById(candidate);
+            }
+            catch (ArgumentException)
+            {
+                dead.Add(candidate);
+            }
+        }
+
+        Assert.Equal(6, dead.Count);
+        var current = dead[0];
+        var oldest = dead[^1];
+        WriteCliLog(directory, current, DateTime.UtcNow);
+        WriteCliLog(directory, Environment.ProcessId, DateTime.UtcNow.AddHours(-8));
+        for (var index = 1; index < dead.Count; index++)
+        {
+            WriteCliLog(directory, dead[index], DateTime.UtcNow.AddHours(-index));
+        }
+
+        var archive = Path.Combine(directory, "cli." + oldest.ToString(System.Globalization.CultureInfo.InvariantCulture) + ".log.1");
+        File.WriteAllText(archive, "archive");
+        File.SetLastWriteTimeUtc(archive, DateTime.UtcNow.AddHours(-7));
+
+        FacadeLogging.PruneCliLogs(directory, current);
+
+        Assert.Equal("keep", File.ReadAllText(serverLog));
+        Assert.Equal("keep", File.ReadAllText(Path.Combine(directory, "cli.not-a-pid.log")));
+        Assert.True(File.Exists(FacadeLogging.GetCliLogFilePath(directory, current)));
+        Assert.True(File.Exists(FacadeLogging.GetCliLogFilePath(directory, Environment.ProcessId)));
+        Assert.False(File.Exists(FacadeLogging.GetCliLogFilePath(directory, oldest)));
+        Assert.False(File.Exists(Path.Combine(directory, "cli." + oldest.ToString(System.Globalization.CultureInfo.InvariantCulture) + ".log.1")));
+        var retained = Directory.GetFiles(directory, "cli.*.log")
+            .Select(Path.GetFileName)
+            .Count(name => name is not null
+                && int.TryParse(name["cli.".Length..].Split('.')[0], System.Globalization.CultureInfo.InvariantCulture, out _));
+        Assert.Equal(FacadeLogging.MaxCliLogFiles, retained);
+    }
+
+    private static void WriteCliLog(string directory, int processId, DateTime lastWriteUtc)
+    {
+        var path = FacadeLogging.GetCliLogFilePath(directory, processId);
+        File.WriteAllText(path, "log");
+        File.SetLastWriteTimeUtc(path, lastWriteUtc);
+    }
 }
 
 public class AgentCliTests
@@ -6922,6 +6979,24 @@ public class AgentCliTests
         }));
         Assert.Equal(AgentCli.ExitInvalidRequest, rejected.ExitCode);
         Assert.Equal("invalid_request", rejected.FailureKind);
+        Assert.Equal(0, runner.CallCount);
+    }
+
+    [Fact]
+    public async Task RejectsNullOrBlankSkillBeforeLaunch()
+    {
+        var facade = CreateFacade(out var runner);
+        var directory = JsonSerializer.Serialize(Path.GetTempPath());
+        foreach (var skills in new[] { "[null]", "[\"\"]", "[\"  \"]" })
+        {
+            var rejected = await RunAsync(
+                facade,
+                "{\"agent\":\"github-copilot\",\"prompt\":\"pong\",\"working_directory\":" + directory + ",\"skills\":" + skills + "}");
+            Assert.Equal(AgentCli.ExitInvalidRequest, rejected.ExitCode);
+            Assert.Equal("invalid_request", rejected.FailureKind);
+            Assert.Contains("skill name is required.", rejected.Text, StringComparison.Ordinal);
+        }
+
         Assert.Equal(0, runner.CallCount);
     }
 
@@ -7203,6 +7278,28 @@ public class AgentCliProcessTests
         }
 
         Assert.Equal(1, new FileInfo(serverLog).Length);
+    }
+
+    [Fact]
+    public async Task ReportsControlledErrorWhenDiagnosticLogCannotBeCreated()
+    {
+        var tools = await PublishAsync();
+        var blockedHome = Path.Combine(Path.GetTempPath(), "caf-cli-file-home-" + Guid.NewGuid().ToString("N"));
+        await File.WriteAllTextAsync(blockedHome, "not-a-directory");
+        var result = await StartAsync(
+            tools,
+            "{}",
+            [],
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["USERPROFILE"] = blockedHome,
+            },
+            CancellationToken.None);
+        Assert.Equal(AgentCli.ExitFailed, result.ExitCode);
+        Assert.Contains(nameof(IOException), result.StandardError, StringComparison.Ordinal);
+        Assert.Contains(AgentCli.DiagnosticLogUnavailableError, result.StandardError, StringComparison.Ordinal);
+        Assert.DoesNotContain("server log", result.StandardError, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(string.Empty, result.StandardOutput.Trim());
     }
 
     [Fact]

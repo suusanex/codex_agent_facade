@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -22,6 +24,12 @@ internal static class FacadeLogging
     public const string LoggerCategory = "CodexAgentFacade";
     public const long ArchiveAboveSizeBytes = 1024 * 1024;
     public const int MaxArchiveFiles = 4;
+
+    /// <summary>
+    /// プロセス別 CLI 診断ログの保持世代数。server.log の archive 上限と同じ数を、
+    /// ファイルが分かれる CLI ログ全体へ適用する。実行中プロセスのファイルは削除しない。
+    /// </summary>
+    public const int MaxCliLogFiles = MaxArchiveFiles;
     public const string ArchiveSuffixFormat = ".{0}";
 
     public static string GetDefaultDirectory()
@@ -120,6 +128,106 @@ internal static class FacadeLogging
         config.AddRule(NLogLevel.Info, NLogLevel.Fatal, target);
         factory.Configuration = config;
         return factory;
+    }
+
+    /// <summary>
+    /// 終了済み CLI の診断ログを <see cref="MaxCliLogFiles"/> 件まで残す。
+    /// 現在のプロセスと、まだ生きているプロセスのファイルは削除しない。
+    /// </summary>
+    public static void PruneCliLogs(string directory, int currentProcessId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(directory);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(currentProcessId);
+        if (!Directory.Exists(directory))
+        {
+            return;
+        }
+
+        var groups = new Dictionary<int, List<string>>();
+        foreach (var path in Directory.EnumerateFiles(directory))
+        {
+            if (!TryParseCliLogProcessId(Path.GetFileName(path), out var processId))
+            {
+                continue;
+            }
+
+            if (!groups.TryGetValue(processId, out var files))
+            {
+                files = [];
+                groups[processId] = files;
+            }
+
+            files.Add(path);
+        }
+
+        var protectedIds = new HashSet<int> { currentProcessId };
+        foreach (var processId in groups.Keys)
+        {
+            if (processId != currentProcessId && IsProcessAlive(processId))
+            {
+                protectedIds.Add(processId);
+            }
+        }
+
+        var keepDisposable = Math.Max(0, MaxCliLogFiles - protectedIds.Count);
+        var disposable = groups
+            .Where(pair => !protectedIds.Contains(pair.Key))
+            .Select(pair => (
+                Files: pair.Value,
+                LastWriteUtc: pair.Value.Max(File.GetLastWriteTimeUtc)))
+            .OrderByDescending(item => item.LastWriteUtc)
+            .ToList();
+        foreach (var item in disposable.Skip(keepDisposable))
+        {
+            foreach (var path in item.Files)
+            {
+                File.Delete(path);
+            }
+        }
+    }
+
+    private static bool TryParseCliLogProcessId(string fileName, out int processId)
+    {
+        processId = 0;
+        const string extension = ".log";
+        if (!fileName.StartsWith(CliFilePrefix, StringComparison.Ordinal)
+            || fileName.Length <= CliFilePrefix.Length + extension.Length)
+        {
+            return false;
+        }
+
+        var remainder = fileName[CliFilePrefix.Length..];
+        var logIndex = remainder.IndexOf(extension, StringComparison.Ordinal);
+        if (logIndex <= 0)
+        {
+            return false;
+        }
+
+        var suffix = remainder[(logIndex + extension.Length)..];
+        if (suffix.Length > 0 && (suffix[0] != '.' || !int.TryParse(suffix[1..], NumberStyles.None, CultureInfo.InvariantCulture, out _)))
+        {
+            return false;
+        }
+
+        return int.TryParse(remainder[..logIndex], NumberStyles.None, CultureInfo.InvariantCulture, out processId)
+            && processId > 0;
+    }
+
+    private static bool IsProcessAlive(int processId)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
     }
 
     public static MsLoggerFactory CreateLoggerFactory(LogFactory logFactory)
