@@ -69,12 +69,13 @@ $request = @{
   prompt = "Reply with only the word pong."
   working_directory = "D:\work\repo"
   model = "composer-2.5"
-  reasoning_effort = "high"
   fast = $false
   timeout_seconds = 600
 } | ConvertTo-Json -Compress
 $request | & "D:\Tools\Development\CodexAgentFacade\CodexAgentFacadeCli.exe"
 ```
+
+Cursor で `reasoning_effort` または `fast` を指定すると、起動直前の `cursor-agent models` から基底・effort・fast に一致する識別子を1つ選んで `--model` に渡す。`composer-2.5` に effort の兄弟は無く、`fast=$false` は `composer-2.5`、`fast=$true` は `composer-2.5-fast` になる。両方を省略した model 文字列はそのまま渡す。一致が無ければ agent は起動しない。
 
 呼び出し側は標準出力のJSONだけを結果として読む。`exit code` が0でも、作業の採否は `result.outputText` と成果物を見て決める。
 

@@ -44,7 +44,7 @@ public static class McpPublicContract
         + "Successful results expose outputKind as final_response or assistant_transcript; raw streams are not returned by MCP. "
         + "The Facade does not plan, split, or semantically rewrite the supplied worker task. "
         + "Structured options such as skills may be translated by the selected driver. "
-        + "When reasoning_effort and fast are omitted, the selected CLI receives the model id as supplied. Cursor encodes explicit execution options in its model parameter syntax without selecting another base model. "
+        + "When reasoning_effort and fast are omitted, the selected CLI receives the model id as supplied. When either is set, Cursor selects one id from the current cursor-agent model catalog for that base, effort, and fast, and fails before launch when none matches. "
         + "When model is omitted, the Facade does not pass a model argument and does not choose another model. "
         + "Model names inside the worker prompt are not launch settings. "
         + "Optional reasoning_effort is passed as a separate CLI setting; empty or unsafe values are rejected. "
@@ -100,7 +100,7 @@ public static class McpPublicContract
 
     public const string ModelDescription =
         "Optional agent-native model id. When omitted, empty, or whitespace, the Facade does not pass a model argument and does not choose, rename, or fall back to another model. "
-        + "When set, the value is forwarded unchanged as the selected CLI model. Cursor appends explicitly requested reasoning_effort/fast parameters using its documented parameterized-model syntax; it does not choose a different model. "
+        + "When set without reasoning_effort and fast, the value is forwarded unchanged. When either option is set, Cursor replaces it with the one current catalog id for that base, effort, and fast, or fails before launch. It does not synthesize bracket parameters or switch to another model family. "
         + "Model names that appear only inside the worker prompt are not launch settings. "
         + "Line breaks are rejected before launch; other control characters are rejected for a non-blank model value. Blank values retain the existing omitted-model behavior. "
         + "Pass the same value again on an exact retry. Continuing a session does not inherit a previous model.";

@@ -22,7 +22,7 @@ payload の出典は、この Skill を呼び出した実際のユーザー mess
 
 実行オプションと作業 prompt は分ける。本文先頭の空行を除き、最初の行が開始フェンス（バッククォート3つの直後に `facade-options` とだけ書いた行）であるときだけ、その行から終了フェンス（バッククォート3つだけの行）までを実行オプションとして読む。終了フェンスの直後から末尾までを一字も変更せず `prompt` にする。実行オプションが無いときは、今回の実際のユーザー本文全体が作業 prompt であり、`model`, `reasoning_effort`, `fast` は渡さない。
 
-実行オプションで有効な行は `model:`, `reasoning_effort:`, `fast:` の各1行である。値は空にせず、キーの重複・未知のキー・閉じていないフェンスは `start_agent` を呼ばず報告する。`model` と `reasoning_effort` はagent固有の識別子/tokenで、名前を変換しない。`fast` は `true` または `false` の小文字booleanである。`fast: false` は未指定と異なり、明示的に非-fast/default tierを要求する。prompt 本文から実行設定を推測しない。Cursorは `model` が必要で、モデル識別子に `effort=` / `fast=` を追加する。Cursor model内の同じ設定、effort suffix variant、`-fast` suffixとの重複は値が同じでもエラー。Copilotは `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` を受け付ける。Grok BuildはCLIが受け付けるcanonicalまたはmodel固有tokenを使い、CLIがeffortを無視したと報告した場合は失敗する。CopilotとGrok Buildは独立した `fast` を持たず、`true` / `false` の両方を拒否する。CodexとCursorは独立した `fast` を受け付ける。
+実行オプションで有効な行は `model:`, `reasoning_effort:`, `fast:` の各1行である。値は空にせず、キーの重複・未知のキー・閉じていないフェンスは `start_agent` を呼ばず報告する。`model` と `reasoning_effort` はagent固有の識別子/tokenで、名前を変換しない。`fast` は `true` または `false` の小文字booleanである。`fast: false` は未指定と異なり、明示的に非-fast/default tierを要求する。prompt 本文から実行設定を推測しない。Cursorは `model` が必要で、`reasoning_effort` または `fast` があるときは実行直前のモデル一覧から同じ基底の識別子を1つ選ぶ。一致が無ければ起動しない。モデル文字列内の effort や `-fast` と独立fieldの重複はエラー。Copilotは `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` を受け付ける。Grok BuildはCLIが受け付けるcanonicalまたはmodel固有tokenを使い、CLIがeffortを無視したと報告した場合は失敗する。CopilotとGrok Buildは独立した `fast` を持たず、`true` / `false` の両方を拒否する。CodexとCursorは独立した `fast` を受け付ける。
 
 以下は構文説明用の非実行例である。例の作業 prompt を実際の依頼として扱わず、MCP呼び出しに使わない。
 

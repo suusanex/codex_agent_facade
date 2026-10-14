@@ -150,7 +150,7 @@ distinct な agent job / distinct な `start_agent` ごとに、呼び出し側�
 | `reasoning_effort` | いいえ | provider native な effort token。未指定はCLI既定を保つ。Cursorは`model`必須、Copilotは`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`、Grok BuildはCLIが認識するcanonicalまたはmodel固有token、CodexはCLI設定へ渡す。空や安全でないtokenは起動前エラー。Grokが無視したと警告した場合も失敗 |
 | `fast` | いいえ | nullable boolean。未指定はCLIの現状を保ち、`true`はfast、`false`は明示的な非-fast/default tier。CodexとCursorは独立設定を持つ。CopilotとGrok Buildは独立設定を持たず、`true`/`false`とも起動前エラー。モデルID自体の`-fast` variantは引き続き`model`で指定できる |
 
-`reasoning_effort` と `fast` は `model` と独立した実行オプションで、prompt本文から推測しない。Codexは `model_reasoning_effort` と `service_tier` を明示し、`fast=false` は `service_tier=default` を渡す。明示した `fast=true` に対し、Codex CLIがpriority tierをomitすると報告する既知のwarningを返した場合は `option_not_applied` で失敗する。warningがないことはbackendがtierを提供した証明ではない。`auto_approve=false` はCodexで `read-only` sandboxと `approval_policy=never` を使うため、承認質問は表示されない。Cursorは `model[context=...,effort=...,fast=...]` 形式で既存model parametersを保ち、独立fieldとmodel内指定の重複は同値でも拒否する。各fieldはsession継続とexact retryでも毎回指定する。`null/null` は既存request fingerprintを維持し、新たに指定したfieldはrequest fingerprintへ含める。
+`reasoning_effort` と `fast` は `model` と独立した実行オプションで、prompt本文から推測しない。Codexは `model_reasoning_effort` と `service_tier` を明示し、`fast=false` は `service_tier=default` を渡す。明示した `fast=true` に対し、Codex CLIがpriority tierをomitすると報告する既知のwarningを返した場合は `option_not_applied` で失敗する。warningがないことはbackendがtierを提供した証明ではない。`auto_approve=false` はCodexで `read-only` sandboxと `approval_policy=never` を使うため、承認質問は表示されない。Cursorは `reasoning_effort` または `fast` を指定したとき、実行直前の `cursor-agent models` から同じ基底の識別子を1つ選ぶ。一致が無ければ起動せず、別系統のモデルへは替えない。両方を省略した `model` はそのまま渡す。モデル文字列内の effort や `-fast` と独立fieldの重複は拒否する。各fieldはsession継続とexact retryでも毎回指定する。`null/null` は既存request fingerprintを維持し、新たに指定したfieldはrequest fingerprintへ含める。
 
 戻り JSON:
 
@@ -331,7 +331,7 @@ grok --no-auto-update -p <prompt> --cwd <working_directory> --output-format stre
 Cursor CLI（プロセス cwd = `working_directory`。実行ファイル名は Unix では `cursor-agent`、Windows では `cursor-agent.ps1`）:
 
 ```text
-cursor-agent --print --output-format stream-json --trust --workspace <working_directory> [--force] [--model <model[parameters]>] [--resume <session_id>] <prompt>
+cursor-agent --print --output-format stream-json --trust --workspace <working_directory> [--force] [--model <model>] [--resume <session_id>] <prompt>
 ```
 
 Codex CLI（process cwd = `working_directory`。promptはstdinへ渡す）:
@@ -399,9 +399,9 @@ Cursor 固有の対応:
 | 新規 `sessionId` | stream-json の明示フィールド `session_id` だけを返す。`request_id` や任意 UUID は使わない |
 | `auto_approve=true` | `--force`（コマンド / ファイル変更の承認を省略。denied なものは通さない） |
 | `auto_approve=false` | `--force` を付けない。workspace 信頼ダイアログだけ `--trust` で避ける |
-| `model` | 空白以外のとき `--model <model>`。ただし独立`reasoning_effort` / `fast`指定時はCursorのparameterized-model syntaxへ合成する。重複指定は拒否する |
+| `model` | 空白以外のとき `--model <model>`。独立した `reasoning_effort` / `fast` があるときは、実行直前のモデル一覧から同じ基底の識別子を1つ選ぶ。一致が無ければ起動しない。重複指定は拒否する |
 | `reasoning_effort` | 指定時は`model`必須。model内に`effort`またはeffort suffix variantがあれば独立fieldと重複するため拒否 |
-| `fast` | 指定時は`model`必須。`true` / `false`をmodel内parameterとして合成し、`-fast` model suffixやmodel内の`fast`指定と重複すれば拒否 |
+| `fast` | 指定時は`model`必須。カタログ上の同じ基底で、`true` は `-fast` 側、`false` は非-fast側の識別子を選ぶ。`-fast` suffixやmodel内の`fast`指定と重複すれば拒否 |
 | Skills | 変換しない。Cursor は `.codex/skills` 等を native discovery する。明示 invoke は prompt の `/skill-name` |
 
 `--force` は Copilot の `--allow-all` や Grok の `--always-approve` と完全同義ではない。Cursor の permission model では「明示 deny 以外を通す」フラグであり、MCP server 承認（`--approve-mcps`）や sandbox は別スイッチである。Facade はそれらを勝手に付けない。

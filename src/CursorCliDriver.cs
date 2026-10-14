@@ -25,7 +25,8 @@ public sealed class CursorCliDriver
         Action<string>? onStdoutLine,
         CancellationToken cancellationToken)
     {
-        var arguments = BuildArguments(request);
+        var selectedModel = await ResolveSelectedModelAsync(request, cancellationToken).ConfigureAwait(false);
+        var arguments = BuildArguments(request, selectedModel);
         runLog.WriteStarted(new AgentRunStartedInfo(
             Agent: AgentFacade.CursorAgent,
             WorkingDirectory: request.WorkingDirectory,
@@ -113,15 +114,25 @@ public sealed class CursorCliDriver
     }
 
     /// <summary>
-    /// Cursor CLI 2.x（実機 2026.09.02-c22c1a3）の headless 引数。
-    /// <c>-p/--print</c> が非対話。<c>--output-format stream-json</c> が NDJSON。
+    /// Cursor CLI の headless 引数。
+    /// <c>--print</c> が非対話。<c>--output-format stream-json</c> が NDJSON。
     /// <c>--trust</c> は workspace 信頼ダイアログ回避のため常に付ける。
     /// <c>--force</c> だけが <c>auto_approve</c> に対応する。Skill は prompt 変換しない。
-    /// <c>reasoning_effort</c> / <c>fast</c> が未指定なら非空白 <c>Model</c> をそのまま渡す。
-    /// いずれかが指定されたときは <see cref="ValidateAndBuildModelArgument"/> で値を検証してmodel parameterへ合成する。
-    /// base modelは選択・置換しない。
+    /// <c>reasoning_effort</c> と <c>fast</c> を両方省略した model はそのまま渡す。
+    /// どちらかを指定したときは、呼び出し側でカタログ解決済みの識別子を <paramref name="selectedModel"/> に渡す。
     /// </summary>
     internal static List<string> BuildArguments(AgentRunRequest request)
+    {
+        if (request.ReasoningEffort is not null || request.Fast is not null)
+        {
+            throw new ArgumentException(
+                "Cursor reasoning_effort and fast must be resolved against the model catalog before building arguments.");
+        }
+
+        return BuildArguments(request, string.IsNullOrWhiteSpace(request.Model) ? null : request.Model);
+    }
+
+    internal static List<string> BuildArguments(AgentRunRequest request, string? selectedModel)
     {
         var arguments = new List<string>
         {
@@ -138,7 +149,11 @@ public sealed class CursorCliDriver
             arguments.Add("--force");
         }
 
-        AppendModelArgument(arguments, request.Model, request.ReasoningEffort, request.Fast);
+        if (!string.IsNullOrWhiteSpace(selectedModel))
+        {
+            arguments.Add("--model");
+            arguments.Add(selectedModel);
+        }
 
         if (!string.IsNullOrWhiteSpace(request.SessionId))
         {
@@ -150,121 +165,371 @@ public sealed class CursorCliDriver
         return arguments;
     }
 
-    internal static string? ValidateAndBuildModelArgument(string? model, string? reasoningEffort, bool? fast)
+    private async Task<string?> ResolveSelectedModelAsync(AgentRunRequest request, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(model))
+        if (request.ReasoningEffort is null && request.Fast is null)
         {
-            if (reasoningEffort is not null || fast is not null)
+            return string.IsNullOrWhiteSpace(request.Model) ? null : request.Model;
+        }
+
+        if (string.IsNullOrWhiteSpace(request.Model))
+        {
+            throw new ArgumentException("Cursor requires an explicit model when reasoning_effort or fast is specified.");
+        }
+
+        var catalog = await ReadModelCatalogAsync(request.WorkingDirectory, cancellationToken).ConfigureAwait(false);
+        return CursorModelCatalog.Resolve(catalog, request.Model, request.ReasoningEffort, request.Fast);
+    }
+
+    private async Task<IReadOnlyList<string>> ReadModelCatalogAsync(string workingDirectory, CancellationToken cancellationToken)
+    {
+        ProcessRunResult listed;
+        try
+        {
+            listed = await _processRunner.RunAsync(
+                new ProcessRunRequest(
+                    FileName: FileName,
+                    Arguments: ["models"],
+                    WorkingDirectory: workingDirectory),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            throw new ArgumentException("Cursor model catalog could not be read.", ex);
+        }
+
+        if (listed.ExitCode != 0)
+        {
+            var failure = new ArgumentException(
+                "Cursor model catalog could not be read. " + CliJson.FailureSummary(listed.StandardError));
+            CliJson.TraceException(failure);
+            throw failure;
+        }
+
+        var ids = CursorModelCatalog.ParseIds(listed.StandardOutput);
+        if (ids.Count == 0)
+        {
+            var failure = new ArgumentException("Cursor model catalog did not list any model ids.");
+            CliJson.TraceException(failure);
+            throw failure;
+        }
+
+        return ids;
+    }
+}
+
+/// <summary>
+/// 実行直前の <c>cursor-agent models</c> から、基底・effort・fast に一致する識別子を1つ選ぶ。
+/// 一覧に無い組み合わせは起動前に失敗し、別系統のモデルへは替えない。
+/// </summary>
+internal static class CursorModelCatalog
+{
+    private static readonly string[] SeedEfforts =
+    [
+        "extra-high",
+        "minimal",
+        "medium",
+        "xhigh",
+        "ultra",
+        "none",
+        "high",
+        "max",
+        "low",
+    ];
+
+    internal static void RejectMalformedModel(string model, string? reasoningEffort, bool? fast)
+    {
+        var requested = ParseRequestedModel(model, SeedEfforts.OrderByDescending(effort => effort.Length).ToArray());
+        if (reasoningEffort is not null && requested.Effort is not null)
+        {
+            throw new ArgumentException("reasoning_effort is specified both in the Cursor model and as an independent field.");
+        }
+
+        if (fast is not null && requested.Fast is not null)
+        {
+            throw new ArgumentException("fast is specified both in the Cursor model and as an independent field.");
+        }
+    }
+
+    internal static IReadOnlyList<string> ParseIds(string modelsOutput)
+    {
+        var ids = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var rawLine in modelsOutput.Split(['\r', '\n']))
+        {
+            var line = rawLine.Trim();
+            var separator = line.IndexOf(" - ", StringComparison.Ordinal);
+            if (separator <= 0)
             {
-                throw new ArgumentException("Cursor requires an explicit model when reasoning_effort or fast is specified.");
+                continue;
             }
 
-            return null;
+            var id = line[..separator].Trim();
+            if (!IsModelId(id) || !seen.Add(id))
+            {
+                continue;
+            }
+
+            ids.Add(id);
         }
 
-        if (reasoningEffort is null && fast is null)
+        return ids;
+    }
+
+    internal static string Resolve(
+        IReadOnlyList<string> catalogIds,
+        string model,
+        string? reasoningEffort,
+        bool? fast)
+    {
+        if (reasoningEffort is not null && !IsSafeToken(reasoningEffort))
         {
-            return model;
+            throw new ArgumentException("Cursor reasoning_effort must be a non-empty ASCII token.");
         }
 
-        var modelId = model;
-        var parameters = new List<string>();
-        var openBracket = model.LastIndexOf('[');
-        var closeBracket = model.EndsWith(']') ? model.Length - 1 : -1;
-        if (openBracket >= 0 || model.Contains(']'))
+        var efforts = DiscoverEfforts(catalogIds);
+        var requested = ParseRequestedModel(model, efforts);
+        if (reasoningEffort is not null && requested.Effort is not null)
         {
-            if (openBracket < 0
+            throw new ArgumentException("reasoning_effort is specified both in the Cursor model and as an independent field.");
+        }
+
+        if (fast is not null && requested.Fast is not null)
+        {
+            throw new ArgumentException("fast is specified both in the Cursor model and as an independent field.");
+        }
+
+        var targetEffort = reasoningEffort ?? requested.Effort;
+        var targetFast = fast ?? requested.Fast ?? false;
+        var matches = new List<CatalogModel>();
+        foreach (var candidate in SplitCatalog(catalogIds, efforts))
+        {
+            if (!string.Equals(candidate.Base, requested.Base, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!EffortEquals(candidate.Effort, targetEffort) || candidate.Fast != targetFast)
+            {
+                continue;
+            }
+
+            matches.Add(candidate);
+        }
+
+        if (matches.Count == 1)
+        {
+            return matches[0].Id;
+        }
+
+        var siblings = SplitCatalog(catalogIds, efforts)
+            .Where(candidate => string.Equals(candidate.Base, requested.Base, StringComparison.OrdinalIgnoreCase))
+            .Select(candidate => candidate.Id)
+            .ToArray();
+        var available = siblings.Length == 0 ? "none" : string.Join(", ", siblings);
+        var outcome = matches.Count == 0 ? "no id" : "multiple ids";
+        throw new ArgumentException(
+            "Cursor model catalog has "
+            + outcome
+            + " for model '"
+            + requested.Base
+            + "' with reasoning_effort '"
+            + (targetEffort ?? "")
+            + "' and fast '"
+            + (targetFast ? "true" : "false")
+            + "'. Available ids: "
+            + available
+            + ".");
+    }
+
+    private static RequestedModel ParseRequestedModel(string model, IReadOnlyList<string> efforts)
+    {
+        var modelId = model.Trim();
+        string? bracketEffort = null;
+        bool? bracketFast = null;
+        var openBracket = modelId.IndexOf('[');
+        if (openBracket >= 0 || modelId.Contains(']', StringComparison.Ordinal))
+        {
+            var closeBracket = modelId.EndsWith(']') ? modelId.Length - 1 : -1;
+            if (openBracket <= 0
                 || closeBracket < openBracket
-                || model.IndexOf('[') != openBracket
-                || model.IndexOf(']') != closeBracket)
+                || modelId.IndexOf('[', StringComparison.Ordinal) != openBracket
+                || modelId.IndexOf(']', StringComparison.Ordinal) != closeBracket)
             {
                 throw new ArgumentException("Cursor model parameter syntax is invalid.");
             }
 
-            modelId = model[..openBracket].TrimEnd();
-            var parameterText = model[(openBracket + 1)..closeBracket];
-            if (string.IsNullOrWhiteSpace(modelId))
+            var parameterText = modelId[(openBracket + 1)..closeBracket];
+            modelId = modelId[..openBracket].Trim();
+            if (modelId.Length == 0)
             {
                 throw new ArgumentException("Cursor model id must not be empty.");
             }
 
             if (parameterText.Length > 0)
             {
-                parameters.AddRange(parameterText.Split(','));
+                foreach (var parameter in parameterText.Split(','))
+                {
+                    var separator = parameter.IndexOf('=');
+                    if (separator <= 0)
+                    {
+                        throw new ArgumentException("Cursor model parameters must use key=value syntax.");
+                    }
+
+                    var key = parameter[..separator];
+                    var value = parameter[(separator + 1)..];
+                    if (!IsSafeToken(key) || !IsSafeToken(value))
+                    {
+                        throw new ArgumentException("Cursor model parameter keys and values must be non-empty ASCII tokens.");
+                    }
+
+                    if (key.Equals("effort", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (bracketEffort is not null)
+                        {
+                            throw new ArgumentException("Cursor model parameter 'effort' is specified more than once.");
+                        }
+
+                        bracketEffort = value;
+                    }
+                    else if (key.Equals("fast", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (bracketFast is not null)
+                        {
+                            throw new ArgumentException("Cursor model parameter 'fast' is specified more than once.");
+                        }
+
+                        if (!bool.TryParse(value, out var parsedFast))
+                        {
+                            throw new ArgumentException("Cursor model parameter 'fast' must be true or false.");
+                        }
+
+                        bracketFast = parsedFast;
+                    }
+                    else
+                    {
+                        throw new ArgumentException(
+                            "Cursor model parameters other than effort and fast cannot be combined with reasoning_effort or fast.");
+                    }
+                }
             }
         }
 
-        var specifiedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var parameter in parameters)
-        {
-            var separator = parameter.IndexOf('=');
-            if (separator <= 0)
-            {
-                throw new ArgumentException("Cursor model parameters must use key=value syntax.");
-            }
-
-            var key = parameter[..separator];
-            var value = parameter[(separator + 1)..];
-            if (!IsSafeParameterToken(key) || !IsSafeParameterToken(value))
-            {
-                throw new ArgumentException("Cursor model parameter keys and values must be non-empty ASCII tokens.");
-            }
-
-            if (!specifiedKeys.Add(key))
-            {
-                throw new ArgumentException($"Cursor model parameter '{key}' is specified more than once.");
-            }
-        }
-
-        if (reasoningEffort is not null)
-        {
-            if (specifiedKeys.Contains("effort") || HasEffortVariant(modelId))
-            {
-                throw new ArgumentException("reasoning_effort is specified both in the Cursor model and as an independent field.");
-            }
-
-            parameters.Add("effort=" + reasoningEffort);
-        }
-
-        if (fast is not null)
-        {
-            if (specifiedKeys.Contains("fast") || modelId.EndsWith("-fast", StringComparison.OrdinalIgnoreCase))
-            {
-                throw new ArgumentException("fast is specified both in the Cursor model and as an independent field.");
-            }
-
-            parameters.Add("fast=" + (fast.Value ? "true" : "false"));
-        }
-
-        return modelId + "[" + string.Join(',', parameters) + "]";
+        var split = SplitId(modelId, efforts);
+        return new RequestedModel(
+            split.Base,
+            bracketEffort ?? split.Effort,
+            bracketFast ?? (split.Fast ? true : null));
     }
 
-    private static bool IsSafeParameterToken(string value)
+    private static IReadOnlyList<string> DiscoverEfforts(IReadOnlyList<string> catalogIds)
+    {
+        var efforts = new HashSet<string>(SeedEfforts, StringComparer.OrdinalIgnoreCase);
+        var parentsByToken = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        var idSet = new HashSet<string>(catalogIds, StringComparer.OrdinalIgnoreCase);
+        foreach (var id in catalogIds)
+        {
+            var core = id.EndsWith("-fast", StringComparison.OrdinalIgnoreCase) ? id[..^5] : id;
+            var dash = core.LastIndexOf('-');
+            if (dash <= 0 || dash == core.Length - 1)
+            {
+                continue;
+            }
+
+            var token = core[(dash + 1)..];
+            var parent = core[..dash];
+            if (!IsSafeToken(token))
+            {
+                continue;
+            }
+
+            if (!idSet.Contains(parent + "-" + token) || !idSet.Contains(parent + "-" + token + "-fast"))
+            {
+                continue;
+            }
+
+            if (!parentsByToken.TryGetValue(token, out var parents))
+            {
+                parents = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                parentsByToken.Add(token, parents);
+            }
+
+            parents.Add(parent);
+        }
+
+        foreach (var pair in parentsByToken)
+        {
+            if (pair.Value.Count >= 2)
+            {
+                efforts.Add(pair.Key);
+            }
+        }
+
+        return efforts.OrderByDescending(effort => effort.Length).ToArray();
+    }
+
+    private static IEnumerable<CatalogModel> SplitCatalog(IReadOnlyList<string> catalogIds, IReadOnlyList<string> efforts)
+    {
+        foreach (var id in catalogIds)
+        {
+            var split = SplitId(id, efforts);
+            yield return new CatalogModel(id, split.Base, split.Effort, split.Fast);
+        }
+    }
+
+    private static (string Base, string? Effort, bool Fast) SplitId(string id, IReadOnlyList<string> efforts)
+    {
+        var fast = false;
+        var core = id;
+        if (core.EndsWith("-fast", StringComparison.OrdinalIgnoreCase))
+        {
+            fast = true;
+            core = core[..^5];
+        }
+
+        foreach (var effort in efforts)
+        {
+            var suffix = "-" + effort;
+            if (core.EndsWith(suffix, StringComparison.OrdinalIgnoreCase) && core.Length > suffix.Length)
+            {
+                return (core[..^suffix.Length], effort, fast);
+            }
+        }
+
+        return (core, null, fast);
+    }
+
+    private static bool EffortEquals(string? catalogEffort, string? requestedEffort)
+    {
+        if (requestedEffort is null)
+        {
+            return catalogEffort is null;
+        }
+
+        return catalogEffort is not null
+            && catalogEffort.Equals(requestedEffort, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsModelId(string value)
+    {
+        return value.Length > 0
+            && value.All(character => char.IsAsciiLetterOrDigit(character) || character is '.' or '_' or '-');
+    }
+
+    private static bool IsSafeToken(string value)
     {
         return value.Length > 0
             && value.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_');
     }
 
-    private static bool HasEffortVariant(string modelId)
-    {
-        var baseId = modelId.EndsWith("-fast", StringComparison.OrdinalIgnoreCase)
-            ? modelId[..^5]
-            : modelId;
-        return new[] { "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra" }
-            .Any(level => baseId.EndsWith("-" + level, StringComparison.OrdinalIgnoreCase));
-    }
+    private sealed record RequestedModel(string Base, string? Effort, bool? Fast);
 
-    private static void AppendModelArgument(List<string> arguments, string? model, string? reasoningEffort, bool? fast)
-    {
-        var selectedModel = ValidateAndBuildModelArgument(model, reasoningEffort, fast);
-        if (selectedModel is null)
-        {
-            return;
-        }
-
-        arguments.Add("--model");
-        arguments.Add(selectedModel);
-    }
+    private sealed record CatalogModel(string Id, string Base, string? Effort, bool Fast);
 }
 
 /// <summary>

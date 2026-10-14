@@ -15,6 +15,20 @@ if (string.IsNullOrWhiteSpace(capture))
 }
 
 Directory.CreateDirectory(capture);
+if (args.Length > 0 && string.Equals(args[0], "models", StringComparison.Ordinal))
+{
+    Console.Out.Write("""
+        composer-2.5 - Composer 2.5
+        composer-2.5-fast - Composer 2.5 Fast
+        claude-opus-4-8-high - Claude Opus 4.8 1M
+        claude-opus-4-8-high-fast - Claude Opus 4.8 1M Fast
+        gpt-5.3-codex - Codex 5.3
+        gpt-5.3-codex-high - Codex 5.3 High
+
+        """);
+    return 0;
+}
+
 var stdin = Console.In.ReadToEnd();
 File.WriteAllText(Path.Combine(capture, "stdin.txt"), stdin);
 File.WriteAllText(Path.Combine(capture, "args.json"), JsonSerializer.Serialize(args));

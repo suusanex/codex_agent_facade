@@ -78,6 +78,25 @@ public sealed class StubProcessLifetime : IProcessLifetime
 
 public sealed class RecordingProcessRunner : IProcessRunner
 {
+    internal const string CursorCatalogFixture = """
+        composer-2.5 - Composer 2.5
+        composer-2.5-fast - Composer 2.5 Fast
+        composer-2.5-medium - Composer 2.5 Medium
+        grok-4.7-medium - Grok 4.7 Medium
+        claude-opus-4-8-high - Claude Opus 4.8 1M
+        claude-opus-4-8-high-fast - Claude Opus 4.8 1M Fast
+        claude-opus-4-8-thinking-high - Claude Opus 4.8 1M Thinking
+        gpt-5.3-codex - Codex 5.3
+        gpt-5.3-codex-fast - Codex 5.3 Fast
+        gpt-5.3-codex-high - Codex 5.3 High
+        gpt-5.5-extra-high - GPT-5.5 Extra High
+        gpt-5.5-extra-high-fast - GPT-5.5 Extra High Fast
+        alpha-turbo - Alpha Turbo
+        alpha-turbo-fast - Alpha Turbo Fast
+        beta-turbo - Beta Turbo
+        beta-turbo-fast - Beta Turbo Fast
+
+        """;
     public ProcessRunRequest? LastRequest { get; private set; }
     public ProcessRunResult Result { get; set; } = new(0, "{}", "");
     public Exception? ExceptionToThrow { get; set; }
@@ -89,6 +108,14 @@ public sealed class RecordingProcessRunner : IProcessRunner
 
     public async Task<ProcessRunResult> RunAsync(ProcessRunRequest request, CancellationToken cancellationToken)
     {
+        if (request.Arguments.Count == 1 && request.Arguments[0] == "models")
+        {
+            Interlocked.Increment(ref _callCount);
+            LastCancellationToken = cancellationToken;
+            cancellationToken.ThrowIfCancellationRequested();
+            return new ProcessRunResult(0, CursorCatalogFixture, "");
+        }
+
         LastRequest = request;
         Interlocked.Increment(ref _callCount);
         LastCancellationToken = cancellationToken;
@@ -707,7 +734,7 @@ public class AgentJobServiceTests
             "req-options-conflict", request with { ReasoningEffort = "high" }));
         Assert.Throws<ArgumentException>(() => service.Start(
             "req-options-conflict", request with { Fast = true }));
-        Assert.Equal(1, runner.CallCount);
+        Assert.Equal(2, runner.CallCount);
         runner.Gate.SetResult(true);
         Assert.Equal(AgentJobStatus.Completed, (await WaitAsync(service, initial.JobId)).Status);
     }
@@ -1950,33 +1977,53 @@ public class CursorCliDriverTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void BuildArgumentsAppendsEffortAndExplicitFalseWithoutChangingOtherModelParameters(bool resume)
+    public void ResolveSelectsCatalogIdAndKeepsResumeSeparate(bool resume)
     {
-        var args = CursorCliDriver.BuildArguments(new AgentRunRequest(
-            AgentFacade.CursorAgent,
-            "hello",
-            @"C:\repo",
-            resume ? "cursor-session" : null,
-            null,
-            Model: "composer-2.5 [context=1m]",
-            ReasoningEffort: "high",
-            Fast: false));
-        Assert.Contains("composer-2.5[context=1m,effort=high,fast=false]", args);
+        var selected = CursorModelCatalog.Resolve(
+            CursorModelCatalog.ParseIds(RecordingProcessRunner.CursorCatalogFixture),
+            "claude-opus-4-8",
+            "high",
+            false);
+        var args = CursorCliDriver.BuildArguments(
+            new AgentRunRequest(
+                AgentFacade.CursorAgent,
+                "hello",
+                @"C:\repo",
+                resume ? "cursor-session" : null,
+                null),
+            selected);
+        Assert.Contains("claude-opus-4-8-high", args);
+        Assert.DoesNotContain("[", string.Join(" ", args));
         Assert.Equal(resume, args.Contains("--resume"));
+    }
+
+    [Fact]
+    public void ResolveMapsComposerFastAndRejectsMissingEffort()
+    {
+        var catalog = CursorModelCatalog.ParseIds(RecordingProcessRunner.CursorCatalogFixture);
+        Assert.Equal("composer-2.5", CursorModelCatalog.Resolve(catalog, "composer-2.5", null, false));
+        Assert.Equal("composer-2.5-fast", CursorModelCatalog.Resolve(catalog, "composer-2.5", null, true));
+        Assert.Equal("claude-opus-4-8-high-fast", CursorModelCatalog.Resolve(catalog, "claude-opus-4-8-high", null, true));
+        Assert.Equal("claude-opus-4-8-thinking-high", CursorModelCatalog.Resolve(catalog, "claude-opus-4-8-thinking", "high", false));
+        Assert.Equal("gpt-5.5-extra-high", CursorModelCatalog.Resolve(catalog, "gpt-5.5", "extra-high", false));
+        Assert.Equal("alpha-turbo", CursorModelCatalog.Resolve(catalog, "alpha", "turbo", false));
+        var missing = Assert.Throws<ArgumentException>(() => CursorModelCatalog.Resolve(catalog, "composer-2.5", "high", false));
+        Assert.Contains("composer-2.5-fast", missing.Message, StringComparison.Ordinal);
+        Assert.Contains("Available ids: composer-2.5, composer-2.5-fast", missing.Message, StringComparison.Ordinal);
     }
 
     [Theory]
     [InlineData("composer-2.5[effort=low]", "medium", null)]
     [InlineData("composer-2.5-fast", null, false)]
-    [InlineData("composer-2.5-high [context=1m]", "medium", null)]
-    [InlineData("composer-2.5-fast [context=1m]", null, false)]
-    [InlineData("composer-2.5-fast [context=1m]", null, true)]
-    [InlineData("composer-2.5[context=(nested)]", "high", null)]
+    [InlineData("composer-2.5-high", "medium", null)]
+    [InlineData("composer-2.5-fast", null, true)]
+    [InlineData("composer-2.5[context=1m]", "high", null)]
     [InlineData("composer-2.5[context=1m", "high", null)]
     [InlineData("[context=1m]", "high", null)]
     public void InvalidOrDuplicateModelParametersFail(string model, string? effort, bool? fast)
     {
-        Assert.Throws<ArgumentException>(() => CursorCliDriver.ValidateAndBuildModelArgument(model, effort, fast));
+        var catalog = CursorModelCatalog.ParseIds(RecordingProcessRunner.CursorCatalogFixture);
+        Assert.Throws<ArgumentException>(() => CursorModelCatalog.Resolve(catalog, model, effort, fast));
     }
 
     [Fact]
@@ -4762,7 +4809,18 @@ public class McpPublicContractTests
         session.Runner.Result = CursorStdout();
         await StartAndWaitAsync(client, "req-cursor-fast-false", AgentFacade.CursorAgent, "check",
             model: "composer-2.5", fast: false);
-        Assert.Contains("composer-2.5[fast=false]", session.Runner.LastRequest!.Arguments);
+        var cursorArguments = session.Runner.LastRequest!.Arguments;
+        var cursorModelIndex = -1;
+        for (var index = 0; index < cursorArguments.Count; index++)
+        {
+            if (cursorArguments[index] == "--model")
+            {
+                cursorModelIndex = index;
+                break;
+            }
+        }
+
+        Assert.Equal("composer-2.5", cursorArguments[cursorModelIndex + 1]);
 
         session.Runner.Result = CodexStdout();
         await StartAndWaitAsync(client, "req-codex-fast-false", AgentFacade.CodexAgent, "check",
@@ -6939,12 +6997,13 @@ public class AgentCliTests
             Agent = AgentFacade.CursorAgent,
             Prompt = "pong",
             WorkingDirectory = @"D:\work",
-            Model = "composer-2.5",
+            Model = "claude-opus-4-8",
             ReasoningEffort = "high",
             Fast = false,
         }));
         Assert.Equal(AgentCli.ExitCompleted, cursor.ExitCode);
-        Assert.Contains("composer-2.5[effort=high,fast=false]", runner.LastRequest!.Arguments);
+        Assert.Contains("claude-opus-4-8-high", runner.LastRequest!.Arguments);
+        Assert.DoesNotContain("[", string.Join(" ", runner.LastRequest.Arguments));
 
         runner.Result = new ProcessRunResult(0,
             "{\"type\":\"thread.started\",\"thread_id\":\"thread-9\"}\n"
@@ -7148,11 +7207,12 @@ public class AgentCliProcessTests
             AgentFacade.CursorAgent,
             "pong",
             sessionId: null,
-            model: "composer-2.5",
+            model: "claude-opus-4-8",
             reasoningEffort: "high",
             fast: false);
         Assert.Equal(AgentCli.ExitCompleted, cursor.ExitCode);
-        Assert.Contains("composer-2.5[effort=high,fast=false]", cursor.Arguments);
+        Assert.Contains("claude-opus-4-8-high", cursor.Arguments);
+        Assert.DoesNotContain("[", string.Join(" ", cursor.Arguments));
         Assert.Equal("pong", cursor.ResultText);
 
         var grok = await RunAsync(

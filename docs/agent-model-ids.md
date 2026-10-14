@@ -1,6 +1,6 @@
 # Agent モデル識別子一覧
 
-この一覧は、relay SKILL の `facade-options` ブロック内 `model:` 行、および MCP `start_agent` の `model` 引数へ渡す **CLI 識別子** を記録する。Codex App / Cursor IDE / GitHub Copilot App など UI 上のモデル名とは文字列が一致しない場合がある。Facade は識別子を変換せず、指定時だけ各 CLI の `--model` へそのまま渡す。
+この一覧は、relay SKILL の `facade-options` ブロック内 `model:` 行、および MCP `start_agent` の `model` 引数へ渡す **CLI 識別子** を記録する。Codex App / Cursor IDE / GitHub Copilot App など UI 上のモデル名とは文字列が一致しない場合がある。Facade は、Cursor で `reasoning_effort` または `fast` を指定したときを除き、識別子を変換せず指定時だけ各 CLI の `--model` へそのまま渡す。Cursor の選択規則は下の effort / fast 表を参照する。
 
 **スナップショット取得日:** 2026-10-06
 
@@ -336,12 +336,12 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 
 | Agent | Reasoning Effort | Independent fast | CLI変換 |
 | --- | --- | --- | --- |
-| Cursor | 選択modelが許すtoken | `true` / `false` | `--model <id[existing...,effort=...,fast=...]>` |
+| Cursor | 実行直前の `cursor-agent models` にあるtoken | `true` / `false` | 同じ基底のカタログ識別子を1つ選んで `--model` に渡す。一致が無ければ起動しない |
 | GitHub Copilot | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | 非対応。両booleanを拒否 | `--reasoning-effort <token>` |
 | Grok Build | CLI canonicalまたはmodel固有token | 非対応。両booleanを拒否 | `--reasoning-effort <token>`。CLIがeffortを無視したwarningを出せばexit 0でも失敗 |
 | Codex CLI | CLIが許すeffort token | `true` / `false` | `-c model_reasoning_effort="<token>"`; fastは `-c service_tier="priority"` / `"default"` |
 
-Cursor optionはmodel内の既存parameterを保って末尾へ追加する。model内に `effort` / `fast` がある場合、effort suffix variantまたは`-fast` model variantを使う場合は独立fieldとの重複として拒否する。値が一致しても二重指定はエラーとなる。
+Cursorは `reasoning_effort` と `fast` を両方省略したとき、渡された `model` をそのまま `--model` に渡す。どちらかを指定したときは、その実行の直前に `cursor-agent models` を読み、基底・effort・fastが一致する識別子だけを渡す。bracketは作らない。一覧の取得に失敗した場合や、一致する識別子が無い場合は起動しない。モデル文字列に既に effort や `-fast` があり、同じ項目を独立fieldでも指定した場合は重複として拒否する。
 
 `auto_approve=false` のCodexは `sandbox_mode=read-only` と `approval_policy=never` を使用する。そのためapproval promptは出ない。Codexのmodel/effort/tierをCLI引数へ渡したこと、CLI初期化ログが `service_tier=default` を記録したことはbackendがtierを提供した証拠ではない。今回 `fast=true` のCodex推論は実施していない。
 

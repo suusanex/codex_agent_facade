@@ -229,7 +229,7 @@ public sealed class AgentFacade
                 throw new ArgumentException("Cursor requires an explicit model when reasoning_effort or fast is specified.");
             }
 
-            CursorCliDriver.ValidateAndBuildModelArgument(request.Model, request.ReasoningEffort, request.Fast);
+            CursorModelCatalog.RejectMalformedModel(request.Model, request.ReasoningEffort, request.Fast);
         }
 
         if (request.Agent.Trim() == GitHubCopilotAgent
