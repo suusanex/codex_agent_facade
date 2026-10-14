@@ -589,3 +589,5 @@ dotnet run --file tests/CodexAgentFacade.Tests.cs
 
 この実行にはログイン済み `grok`、モデル `grok-4.7`、user skill `dotnet-file-based-apps` が必要である。2026-10-14 の再実行では 306 件成功（live を含む）だった。環境変数なしの実行は 305 件成功、live 1 件 skip だった。
 
+上の通常CLI実機は、子プロセスがユーザーの `.codex-agent-facade` を使った。レビュー後の live test は子プロセスの `USERPROFILE` を試験用ディレクトリにし、`.grok` と `.agents` だけをジャンクションで維持する。Facade の診断ログと viewer 設定はその試験用ディレクトリに閉じる。
+
