@@ -85,10 +85,10 @@ public sealed class GrokBuildDriver
         }
 
         if (request.ReasoningEffort is not null
-            && processResult.StandardError.Contains("model does not support reasoning effort; ignoring", StringComparison.OrdinalIgnoreCase))
+            && ReportsIgnoredReasoningEffort(processResult.StandardError))
         {
             var failure = new InvalidOperationException("Grok Build CLI did not apply the requested reasoning_effort.");
-            CliJson.MarkFailure(failure, "option_not_applied", "Grok Build CLI reported that the selected model does not support the requested reasoning effort.", processResult.ExitCode);
+            CliJson.MarkFailure(failure, "option_not_applied", "Grok Build CLI reported that the requested reasoning effort was not applied.", processResult.ExitCode);
             CliJson.TraceException(failure);
             throw failure;
         }
@@ -164,7 +164,26 @@ public sealed class GrokBuildDriver
     }
 
     /// <summary>
-    /// Grok Build は user-invocable skill を slash command として扱う。実機未確認の共通 runtime にはしない。
+    /// Grok Build 1.0.52 は、要求した reasoning effort を適用しないとき stderr に無視を書く。
+    /// exit 0 のまま成功へ落とさない。非ゼロ終了は先に <c>non_zero_exit</c> として失敗する。
+    /// </summary>
+    internal static bool ReportsIgnoredReasoningEffort(string standardError)
+    {
+        if (string.IsNullOrEmpty(standardError))
+        {
+            return false;
+        }
+
+        // 1.0.5 付近の文言と、1.0.52 で実測した "ignoring --effort/--reasoning-effort"。
+        // 同じバイナリにある "--effort/--reasoning-effort ignored" も無視通知として扱う。
+        return standardError.Contains("model does not support reasoning effort; ignoring", StringComparison.OrdinalIgnoreCase)
+            || standardError.Contains("ignoring --effort/--reasoning-effort", StringComparison.OrdinalIgnoreCase)
+            || standardError.Contains("--effort/--reasoning-effort ignored", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Grok Build は user-invocable skill を slash command として扱う。
+    /// 1.0.52 では先頭の /name が skill 本文の注入になることを実機で確認した。共通 runtime にはしない。
     /// </summary>
     internal static string ApplyGrokSkills(string prompt, IReadOnlyList<string>? skills)
     {
