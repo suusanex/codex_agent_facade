@@ -28,10 +28,13 @@ var candidateExe = Path.Combine(candidate, "CodexAgentFacade.exe");
 try
 {
     await Run("dotnet", $"publish src/CodexAgentFacade.cs -c Release -r win-x64 --self-contained false -o {Quote(candidate)} --nologo", repoRoot);
-    // viewer は console の別 File-based app。Facade の WinExe には同梱できないので、同じ配置フォルダへ publish する。
+    // viewer と通常アプリ向け CLI は console の別 File-based app。Facade の WinExe には同梱できないので、同じ配置フォルダへ publish する。
+    // タスクスケジューラの起動対象は CodexAgentFacade.exe のままにする。
     await Run("dotnet", $"publish src/RunLogViewer.cs -c Release -r win-x64 --self-contained false -o {Quote(candidate)} --nologo", repoRoot);
+    await Run("dotnet", $"publish src/CodexAgentFacadeCli.cs -c Release -r win-x64 --self-contained false -o {Quote(candidate)} --nologo", repoRoot);
     if (!File.Exists(candidateExe)) throw new InvalidOperationException("Publish did not produce CodexAgentFacade.exe.");
     if (!File.Exists(Path.Combine(candidate, "RunLogViewer.exe"))) throw new InvalidOperationException("Publish did not produce RunLogViewer.exe.");
+    if (!File.Exists(Path.Combine(candidate, "CodexAgentFacadeCli.exe"))) throw new InvalidOperationException("Publish did not produce CodexAgentFacadeCli.exe.");
 
     var taskBefore = await Run("schtasks", $"/Query /TN {Quote(config.TaskName)} /FO LIST /V", repoRoot);
     var processIds = Process.GetProcessesByName("CodexAgentFacade").Where(p => p.MainModule?.FileName is not null && string.Equals(Path.GetFullPath(p.MainModule.FileName), exe, StringComparison.OrdinalIgnoreCase)).ToArray();

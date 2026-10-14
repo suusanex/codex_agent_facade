@@ -18,6 +18,7 @@ using NLogLevel = NLog.LogLevel;
 internal static class FacadeLogging
 {
     public const string FileName = "server.log";
+    public const string CliFilePrefix = "cli.";
     public const string LoggerCategory = "CodexAgentFacade";
     public const long ArchiveAboveSizeBytes = 1024 * 1024;
     public const int MaxArchiveFiles = 4;
@@ -91,6 +92,33 @@ internal static class FacadeLogging
         var factory = new LogFactory();
         factory.ThrowConfigExceptions = true;
         factory.Configuration = CreateConfiguration(directory, archiveAboveSizeBytes, maxArchiveFiles);
+        return factory;
+    }
+
+    public static string GetCliLogFilePath(string directory, int processId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(directory);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(processId);
+        return Path.Combine(directory, CliFilePrefix + processId.ToString(System.Globalization.CultureInfo.InvariantCulture) + ".log");
+    }
+
+    /// <summary>
+    /// CLI 用の診断ログ。常駐 host は server.log を KeepFileOpen で占有するため、
+    /// CLI はプロセスごとのファイルへ書く。複数 CLI も互いのファイルをロックしない。
+    /// </summary>
+    public static LogFactory CreateCliNLogFactory(string directory, int processId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(directory);
+        var factory = new LogFactory();
+        factory.ThrowConfigExceptions = true;
+        var target = CreateFileTarget(directory, ArchiveAboveSizeBytes, MaxArchiveFiles);
+        var path = GetCliLogFilePath(directory, processId);
+        target.Name = "cli";
+        target.FileName = path;
+        target.ArchiveFileName = path;
+        var config = new LoggingConfiguration();
+        config.AddRule(NLogLevel.Info, NLogLevel.Fatal, target);
+        factory.Configuration = config;
         return factory;
     }
 

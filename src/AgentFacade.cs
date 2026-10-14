@@ -357,4 +357,37 @@ internal static class CliJson
     {
         FacadeLog.Exception(exception);
     }
+
+    internal static AgentJobFailure CreateFailure(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        if (exception.Data[FailureKindKey] is string kind)
+        {
+            var exitCode = exception.Data[FailureExitCodeKey] is int code ? code : (int?)null;
+            var summary = exception.Data[FailureSummaryKey] as string ?? exception.Message;
+            return new AgentJobFailure(
+                kind,
+                FailureSummary(summary),
+                exitCode,
+                exception.Data[FailureRunIdKey] as string,
+                exception.Data[FailureEventsLogPathKey] as string,
+                exception.Data[FailureTextLogPathKey] as string);
+        }
+
+        return new AgentJobFailure(
+            "internal_error",
+            FailureSummary(exception.Message),
+            null,
+            exception.Data[FailureRunIdKey] as string,
+            exception.Data[FailureEventsLogPathKey] as string,
+            exception.Data[FailureTextLogPathKey] as string);
+    }
+
+    internal static string FailureSummary(string summary)
+    {
+        var oneLine = SecretRedactor.RedactText(summary)
+            .Replace('\r', ' ')
+            .Replace('\n', ' ');
+        return oneLine.Length <= 512 ? oneLine : oneLine[..512];
+    }
 }
