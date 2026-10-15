@@ -2,7 +2,7 @@
 
 この一覧は、relay SKILL の `facade-options` ブロック内 `model:` 行、および MCP `start_agent` の `model` 引数へ渡す **CLI 識別子** を記録する。Codex App / Cursor IDE / GitHub Copilot App など UI 上のモデル名とは文字列が一致しない場合がある。Facade は、Cursor で `reasoning_effort` または `fast` を指定したときを除き、識別子を変換せず指定時だけ各 CLI の `--model` へそのまま渡す。Cursor の選択規則は下の effort / fast 表を参照する。
 
-**スナップショット取得日:** Cursor と GitHub Copilot は 2026-10-06。Grok Build は 2026-10-14。
+**スナップショット取得日:** Cursor と GitHub Copilot は 2026-10-06。Grok Build は 2026-10-15。
 
 ## 使い方
 
@@ -308,21 +308,42 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 
 ## Grok Build CLI
 
-- **調査日:** 2026-10-14
+- **調査日:** 2026-10-15
 - **CLI バージョン:** `grok 1.0.52 (0920c8169e27) [stable]`
 - **更新確認:** `grok update --check --json` は `currentVersion=1.0.52`、`latestVersion=1.0.52`、`updateAvailable=false`、`channel=stable`
-- **ログイン:** `grok models` は `You are logged in with grok.com.` のあとにカタログを返した
-- **取得コマンド:** `grok models`
-- **件数:** 1
-- **default model:** `grok-4.7`
+- **取得コマンド:** `grok models`（ログイン済みアカウント向けの選択可能カタログ）
+- **件数（ログイン済み）:** 1
+- **default model（ログイン済みカタログ）:** `grok-4.7`
+
+`grok models` は Cursor の `cursor-agent models` のような「識別子 - 表示名」形式ではなく、モデル ID のみを列挙する。reasoning effort はモデル ID の suffix ではなく `--reasoning-effort`（`--effort`）で指定する（下の reasoning effort 節）。
+
+### ログイン済み（2026-10-15 実機）
+
+`grok models` は `You are logged in with grok.com.` のあとに次を返した。
+
+```text
+Default model: grok-4.7
+
+Available models:
+  * grok-4.7 (default)
+```
 
 | CLI 識別子 (`model:` / `--model`) | 備考 |
 | --- | --- |
-| `grok-4.7` | `grok models` が default と表示。ログイン済みカタログの唯一の ID |
+| `grok-4.7` | ログイン済みカタログの唯一の ID。`grok models` の default 表示と一致 |
 
-2026-10-06 の未ログイン出力（`grok-4.6` / `grok-4.5`）は、この環境の現行カタログではない。
+`~/.grok/config.toml` の `[models].default` が古い値（例: `grok-4.6`）のままでも、ログイン後の `grok models` と headless 実行時の未指定 model はカタログ default（現状 `grok-4.7`）に従う。`[ui].fork_secondary_model` など UI 向け設定は `--model` の CLI カタログとは別である。
 
-### reasoning effort（2026-10-14 実機）
+### 未ログイン時の参考（2026-10-06・別スナップショット）
+
+未ログインで `grok models` を実行した当時の環境では、`grok-4.6` と `grok-4.5` が一覧に出ていた。2026-10-15 のログイン済みカタログでは選択できない。headless で `--model` を渡して推論するにはログインが必要であり、未ログイン時は exit 1（`Not signed in`）となる（[poc-observations](poc-observations.md) の 2026-10-06 観測）。
+
+| CLI 識別子（未ログイン一覧・参考） | 備考 |
+| --- | --- |
+| `grok-4.6` | 2026-10-06 未ログイン `grok models` に出ていた。現行ログイン済みカタログには無い |
+| `grok-4.5` | 同上 |
+
+### reasoning effort（2026-10-14 実機、2026-10-15 に invalid token を再確認）
 
 Facade は `reasoning_effort` を `--reasoning-effort` へそのまま渡す。Cursor のようなカタログ合成はしない。
 
@@ -375,4 +396,4 @@ Fastの利用条件と費用はproviderとmodelに依存する。OpenAIの現行
 - [GitHub Copilot CLI reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference)
 - [Grok Build CLI option handling](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/src/headless.rs)
 
-コード上の引数生成、MCP schema、mock runnerによるnew/resume/result/failure検証と、実CLIの実推論・backend tier提供確認は別の証拠である。この節の Cursor / Codex / Copilot についての実推論は、明示的な承認後に実施する。Grok Build の 2026-10-14 実機結果は上の Grok Build CLI 節に記録した。
+コード上の引数生成、MCP schema、mock runnerによるnew/resume/result/failure検証と、実CLIの実推論・backend tier提供確認は別の証拠である。この節の Cursor / Codex / Copilot についての実推論は、明示的な承認後に実施する。Grok Build のモデルカタログは 2026-10-15 に `grok models` で再取得した。reasoning effort の実機表は 2026-10-14、invalid effort の stderr は 2026-10-15 に再確認した。
