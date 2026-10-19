@@ -51,7 +51,7 @@ CLIに `CODEX_AGENT_FACADE_TOKEN` は不要である。tokenは常駐MCPホス�
 {"status":"completed","result":{"agent":"github-copilot","sessionId":"sess-copilot","exitCode":0,"outputText":"pong","runId":"20261014T000000Z-01234567","eventsLogPath":"C:\\Users\\example\\.codex-agent-facade\\runs\\20261014T000000Z-01234567.events.jsonl","textLogPath":"C:\\Users\\example\\.codex-agent-facade\\runs\\20261014T000000Z-01234567.log","outputKind":"final_response"}}
 ```
 
-`result` はMCPの公開resultと同じ項目である。`rawOutput` は含めない。`outputKind` は `final_response` または `assistant_transcript`。`completed` は外部CLIが終了したことだけを示し、生成物の受入判断は呼び出し側が行う。
+`result` はMCPの公開resultと同じ項目である。`rawOutput` は含めない。`outputKind` は `final_response` または `assistant_transcript`。`completed` は Facade が worker の成功結果を確定したことを示す。GitHub Copilot、Cursor、Codex では外部 CLI の終了に対応する。Grok Build では、プロセスが残っていても内部ログで今回の prompt 完了を確認できた場合に `completionReason` が `grok_internal_prompt_done` となり、`completionEvidence` と `processTermination` が付く。`exitCode` は取得できた子プロセスの終了コードだけを含み、未取得なら省略する。0 は作らない。CLI 自身の終了コードは job の `status` から決まり、子プロセスを強制終了したコードとは別である。生成物の受入判断は呼び出し側が行う。
 
 失敗例:
 

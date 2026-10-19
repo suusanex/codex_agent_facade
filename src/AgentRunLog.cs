@@ -320,13 +320,20 @@ internal sealed class AgentRunLog : IAgentRunLog
                 result.OutputText,
                 result.RunId,
                 result.EventsLogPath,
-                result.TextLogPath),
+                result.TextLogPath,
+                result.CompletionReason,
+                result.CompletionEvidence,
+                result.ProcessTermination),
             AgentJson.Options);
+        var exitCode = result.ExitCode?.ToString(CultureInfo.InvariantCulture) ?? "omitted";
+        var reason = result.CompletionReason is null
+            ? string.Empty
+            : " completionReason=" + result.CompletionReason;
         WriteEnvelope(
             "facade",
             "completed",
             data,
-            "completed exitCode=" + result.ExitCode.ToString(CultureInfo.InvariantCulture) + " sessionId=" + result.SessionId);
+            "completed exitCode=" + exitCode + " sessionId=" + result.SessionId + reason);
     }
 
     public void WriteFailed(Exception exception)
@@ -764,12 +771,15 @@ internal sealed class AgentRunLog : IAgentRunLog
     private sealed record ProcessLinePayload(string Stream, string Line);
 
     private sealed record CompletedPayload(
-        int ExitCode,
+        int? ExitCode,
         string SessionId,
         string OutputText,
         string RunId,
         string EventsLogPath,
-        string TextLogPath);
+        string TextLogPath,
+        string? CompletionReason = null,
+        GrokCompletionEvidence? CompletionEvidence = null,
+        ProcessTerminationInfo? ProcessTermination = null);
 
     private sealed record FailedPayload(string ExceptionType, string Message, string Detail);
 

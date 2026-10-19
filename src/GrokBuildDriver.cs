@@ -6,11 +6,27 @@ using System.Text.Json;
 /// </summary>
 public sealed class GrokBuildDriver
 {
+    internal const string InternalPromptDoneReason = "grok_internal_prompt_done";
+    internal static readonly TimeSpan IdleBeforeLogCheck = TimeSpan.FromMinutes(5);
+    internal static readonly TimeSpan LogRecheckInterval = TimeSpan.FromSeconds(15);
+
     private readonly IProcessRunner _processRunner;
+    private readonly TimeProvider _timeProvider;
+    private readonly IGrokUnifiedLogReader _logReader;
 
     public GrokBuildDriver(IProcessRunner processRunner)
+        : this(processRunner, TimeProvider.System, FileGrokUnifiedLogReader.CreateDefault())
     {
+    }
+
+    internal GrokBuildDriver(IProcessRunner processRunner, TimeProvider timeProvider, IGrokUnifiedLogReader logReader)
+    {
+        ArgumentNullException.ThrowIfNull(processRunner);
+        ArgumentNullException.ThrowIfNull(timeProvider);
+        ArgumentNullException.ThrowIfNull(logReader);
         _processRunner = processRunner;
+        _timeProvider = timeProvider;
+        _logReader = logReader;
     }
 
     public async Task<AgentRunResult> RunAsync(
@@ -35,7 +51,27 @@ public sealed class GrokBuildDriver
             Fast: request.Fast));
 
         var accumulator = new GrokStreamAccumulator(runLog);
-        ProcessRunResult processResult;
+        var signal = new ProcessCompletionSignal();
+        var watch = new GrokCompletionWatch(
+            _timeProvider,
+            _logReader,
+            accumulator,
+            signal,
+            request.SessionId,
+            request.ReasoningEffort);
+        GrokLogCursor cursor;
+        try
+        {
+            cursor = _logReader.CaptureCursor();
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            cursor = new GrokLogCursor(0, Array.Empty<byte>(), true, "unreadable");
+        }
+        using var monitorCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        Task? monitor = null;
+        ProcessRunResult? processResult = null;
         try
         {
             processResult = await _processRunner.RunAsync(
@@ -45,13 +81,36 @@ public sealed class GrokBuildDriver
                     WorkingDirectory: request.WorkingDirectory,
                     StdoutLineCallback: line =>
                     {
-                        accumulator.OnStdoutLine(line);
+                        if (accumulator.OnStdoutLine(line))
+                        {
+                            watch.MarkProgress(_timeProvider.GetUtcNow());
+                        }
+
                         onStdoutLine?.Invoke(line);
                     },
-                    StderrLineCallback: line => runLog.WriteProcessLine("stderr", line),
-                    OnProcessStarted: runLog.AttachProcess,
-                    OnLaunchResolved: runLog.WriteLaunch),
+                    StderrLineCallback: line =>
+                    {
+                        watch.AppendStderr(line);
+                        runLog.WriteProcessLine("stderr", line);
+                    },
+                    OnProcessStarted: lifetime =>
+                    {
+                        runLog.AttachProcess(lifetime);
+                        monitor = watch.Start(lifetime, cursor, monitorCancellation.Token);
+                    },
+                    OnLaunchResolved: runLog.WriteLaunch,
+                    Completion: signal),
                 cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException ex) when (watch.Confirmed)
+        {
+            // 救済確定後の内部停止は、利用者キャンセルとして返さない。
+            CliJson.TraceException(ex);
+            processResult = new ProcessRunResult(
+                null,
+                string.Empty,
+                watch.CopyStderr(),
+                new ProcessTerminationInfo(ProcessTerminationStatus.Unconfirmed, false));
         }
         catch (OperationCanceledException)
         {
@@ -69,8 +128,39 @@ public sealed class GrokBuildDriver
             CliJson.MarkFailure(ex, "internal_error");
             throw;
         }
+        finally
+        {
+            try
+            {
+                monitorCancellation.Cancel();
+            }
+            catch (Exception ex)
+            {
+                CliJson.TraceException(ex);
+            }
 
-        if (processResult.ExitCode != 0)
+            if (monitor is not null)
+            {
+                try
+                {
+                    await monitor.ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    CliJson.TraceException(ex);
+                }
+            }
+        }
+
+        if (processResult is null)
+        {
+            var failure = new InvalidOperationException("Grok Build CLI did not return a process result.");
+            CliJson.MarkFailure(failure, "internal_error");
+            CliJson.TraceException(failure);
+            throw failure;
+        }
+
+        if (!watch.Confirmed && processResult.ExitCode != 0)
         {
             var message = SecretRedactor.RedactText(
                 $"Grok Build CLI exited with code {processResult.ExitCode}. stdout: {processResult.StandardOutput} stderr: {processResult.StandardError}");
@@ -96,7 +186,7 @@ public sealed class GrokBuildDriver
         ParsedCliOutput parsed;
         try
         {
-            parsed = accumulator.Complete();
+            parsed = accumulator.Complete(watch.Confirmed ? watch.Evidence?.SessionId : null);
         }
         catch (Exception ex)
         {
@@ -104,6 +194,15 @@ public sealed class GrokBuildDriver
             CliJson.MarkFailure(ex, "output_parse_failed");
             throw;
         }
+
+        var termination = processResult.Termination;
+        if (watch.Confirmed && termination is null)
+        {
+            termination = new ProcessTerminationInfo(
+                processResult.ExitCode is null ? ProcessTerminationStatus.Unconfirmed : ProcessTerminationStatus.Exited,
+                processResult.ExitCode is not null);
+        }
+
         return new AgentRunResult(
             Agent: AgentFacade.GrokBuildAgent,
             SessionId: parsed.SessionId,
@@ -113,7 +212,10 @@ public sealed class GrokBuildDriver
             RawOutput: processResult.StandardOutput,
             RunId: runLog.RunId,
             EventsLogPath: runLog.EventsPath,
-            TextLogPath: runLog.TextLogPath);
+            TextLogPath: runLog.TextLogPath,
+            CompletionReason: watch.Confirmed ? InternalPromptDoneReason : null,
+            CompletionEvidence: watch.Confirmed ? watch.Evidence : null,
+            ProcessTermination: watch.Confirmed ? termination : null);
     }
 
     internal static List<string> BuildArguments(AgentRunRequest request)
@@ -227,95 +329,486 @@ internal sealed class GrokStreamAccumulator
 {
     private readonly IAgentRunLog _runLog;
     private readonly StringBuilder _text = new();
+    private readonly object _gate = new();
     private string _sessionId = string.Empty;
     private int _jsonEventCount;
     private bool _sawNonWhitespace;
+    private bool _frozen;
+    private string? _frozenText;
 
     public GrokStreamAccumulator(IAgentRunLog runLog)
     {
         _runLog = runLog;
     }
 
-    public void OnStdoutLine(string line)
+    public bool OnStdoutLine(string line)
     {
-        if (string.IsNullOrWhiteSpace(line))
+        lock (_gate)
         {
-            return;
-        }
-
-        _sawNonWhitespace = true;
-        JsonElement root;
-        try
-        {
-            root = JsonSerializer.Deserialize<JsonElement>(line);
-        }
-        catch (JsonException ex)
-        {
-            CliJson.TraceException(ex);
-            _runLog.WriteProcessLine("stdout", line);
-            return;
-        }
-
-        if (root.ValueKind != JsonValueKind.Object)
-        {
-            _runLog.WriteProcessLine("stdout", line);
-            return;
-        }
-
-        _jsonEventCount++;
-        var type = CliJson.FindFirstString(root, "type") ?? "unknown";
-        if (string.Equals(type, "thought", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(type, "text", StringComparison.OrdinalIgnoreCase))
-        {
-            _runLog.WriteAgentEvent(type, root, humanSummary: null);
-            var chunk = ReadDataString(root);
-            if (!string.IsNullOrEmpty(chunk))
+            if (_frozen || string.IsNullOrWhiteSpace(line))
             {
-                var kind = string.Equals(type, "thought", StringComparison.OrdinalIgnoreCase)
-                    ? "thought"
-                    : "assistant";
-                _runLog.AppendHumanFragment(kind, chunk);
-                if (string.Equals(type, "text", StringComparison.OrdinalIgnoreCase))
+                return false;
+            }
+
+            _sawNonWhitespace = true;
+            JsonElement root;
+            try
+            {
+                root = JsonSerializer.Deserialize<JsonElement>(line);
+            }
+            catch (JsonException ex)
+            {
+                CliJson.TraceException(ex);
+                _runLog.WriteProcessLine("stdout", line);
+                return false;
+            }
+
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                _runLog.WriteProcessLine("stdout", line);
+                return false;
+            }
+
+            _jsonEventCount++;
+            var type = CliJson.FindFirstString(root, "type") ?? "unknown";
+            if (string.Equals(type, "thought", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(type, "text", StringComparison.OrdinalIgnoreCase))
+            {
+                _runLog.WriteAgentEvent(type, root, humanSummary: null);
+                var chunk = ReadDataString(root);
+                if (!string.IsNullOrEmpty(chunk))
                 {
-                    _text.Append(chunk);
+                    var kind = string.Equals(type, "thought", StringComparison.OrdinalIgnoreCase)
+                        ? "thought"
+                        : "assistant";
+                    _runLog.AppendHumanFragment(kind, chunk);
+                    if (string.Equals(type, "text", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _text.Append(chunk);
+                    }
                 }
             }
-        }
-        else
-        {
-            _runLog.WriteAgentEvent(type, root, GrokBuildHumanSummary.Format(type, root));
-        }
+            else
+            {
+                _runLog.WriteAgentEvent(type, root, GrokBuildHumanSummary.Format(type, root));
+            }
 
-        if (string.Equals(type, "end", StringComparison.OrdinalIgnoreCase))
-        {
-            _sessionId = CliJson.FindExplicitSessionId(root) ?? _sessionId;
+            if (string.Equals(type, "end", StringComparison.OrdinalIgnoreCase))
+            {
+                _sessionId = CliJson.FindExplicitSessionId(root) ?? _sessionId;
+            }
+
+            return IsProgress(type, root);
         }
     }
 
-    public ParsedCliOutput Complete()
+    public string? FreezeIfNonEmpty()
     {
-        if (!_sawNonWhitespace)
+        lock (_gate)
         {
-            throw new InvalidOperationException("Grok Build CLI returned empty stdout.");
+            if (_frozen)
+            {
+                return string.IsNullOrWhiteSpace(_frozenText) ? null : _frozenText;
+            }
+
+            var text = _text.ToString();
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return null;
+            }
+
+            _frozen = true;
+            _frozenText = text;
+            return text;
+        }
+    }
+
+    public ParsedCliOutput Complete(string? sessionId = null)
+    {
+        lock (_gate)
+        {
+            if (!_sawNonWhitespace)
+            {
+                throw new InvalidOperationException("Grok Build CLI returned empty stdout.");
+            }
+
+            if (_jsonEventCount == 0)
+            {
+                throw new InvalidOperationException("Grok Build CLI stdout did not contain JSON objects.");
+            }
+
+            var outputText = _frozenText ?? _text.ToString();
+            if (string.IsNullOrWhiteSpace(outputText))
+            {
+                throw new InvalidOperationException("Grok Build CLI JSON did not contain a recognized response field.");
+            }
+
+            return new ParsedCliOutput(sessionId ?? _sessionId, outputText);
+        }
+    }
+
+    private static bool IsProgress(string type, JsonElement root)
+    {
+        if (string.Equals(type, "available_commands", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(type, "usage", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
         }
 
-        if (_jsonEventCount == 0)
+        if (string.Equals(type, "text", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(type, "thought", StringComparison.OrdinalIgnoreCase))
         {
-            throw new InvalidOperationException("Grok Build CLI stdout did not contain JSON objects.");
+            return !string.IsNullOrWhiteSpace(ReadDataString(root));
         }
 
-        var outputText = _text.ToString();
-        if (string.IsNullOrWhiteSpace(outputText))
-        {
-            throw new InvalidOperationException("Grok Build CLI JSON did not contain a recognized response field.");
-        }
-
-        return new ParsedCliOutput(_sessionId, outputText);
+        return string.Equals(type, "tool_call", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(type, "tool_call_update", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(type, "tool", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(type, "plan", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string? ReadDataString(JsonElement root)
     {
         return CliJson.FindFirstString(root, "data", "text", "content");
+    }
+}
+
+/// <summary>
+/// 処理進捗が止まってから Grok 内部ログを照合する。判断は Driver 側に置き、停止そのものは process runner へ通知する。
+/// </summary>
+internal sealed class GrokCompletionWatch
+{
+    private readonly object _stderrGate = new();
+    private readonly StringBuilder _stderr = new();
+    private readonly TimeProvider _timeProvider;
+    private readonly IGrokUnifiedLogReader _logReader;
+    private readonly GrokStreamAccumulator _accumulator;
+    private readonly ProcessCompletionSignal _signal;
+    private readonly GrokActivityClock _activity = new();
+    private readonly GrokPromptCorrelation _correlation = new();
+    private readonly string? _resumeSessionId;
+    private readonly string? _reasoningEffort;
+    private GrokLogCursor? _cursor;
+    private int _confirmed;
+    private bool _stopped;
+
+    public GrokCompletionWatch(
+        TimeProvider timeProvider,
+        IGrokUnifiedLogReader logReader,
+        GrokStreamAccumulator accumulator,
+        ProcessCompletionSignal signal,
+        string? resumeSessionId,
+        string? reasoningEffort)
+    {
+        _timeProvider = timeProvider;
+        _logReader = logReader;
+        _accumulator = accumulator;
+        _signal = signal;
+        _resumeSessionId = resumeSessionId;
+        _reasoningEffort = reasoningEffort;
+    }
+
+    public bool Confirmed => Volatile.Read(ref _confirmed) == 1;
+
+    public GrokCompletionEvidence? Evidence { get; private set; }
+
+    public void MarkProgress(DateTimeOffset now)
+    {
+        _activity.Mark(now);
+    }
+
+    public void AppendStderr(string line)
+    {
+        lock (_stderrGate)
+        {
+            _stderr.AppendLine(line);
+        }
+    }
+
+    public string CopyStderr()
+    {
+        lock (_stderrGate)
+        {
+            return _stderr.ToString();
+        }
+    }
+
+    public Task Start(IProcessLifetime process, GrokLogCursor cursor, CancellationToken cancellationToken)
+    {
+        // 監視を始めた時刻だと、その前に出た今回の session 記録を過去分として落とす。
+        var launchedAt = process.StartedAt;
+        _activity.Start(launchedAt);
+        if (process.Id <= 0)
+        {
+            Stop("Grok process id was not available. Internal completion recovery is disabled.");
+            return Task.CompletedTask;
+        }
+
+        if (cursor.Abandoned)
+        {
+            Stop("Grok internal log could not be read before launch: " + (cursor.Problem ?? "unreadable"));
+            return Task.CompletedTask;
+        }
+
+        _cursor = cursor;
+        return WatchAsync(process.Id, launchedAt, cancellationToken);
+    }
+
+    private async Task WatchAsync(int processId, DateTimeOffset launchedAt, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var nextCheck = launchedAt + GrokBuildDriver.IdleBeforeLogCheck;
+            while (!cancellationToken.IsCancellationRequested && !_signal.IsSignaled && !_stopped)
+            {
+                if (HasIgnoredEffort())
+                {
+                    Stop("Grok internal completion recovery was not used because reasoning effort was reported as ignored.");
+                    return;
+                }
+
+                var now = _timeProvider.GetUtcNow();
+                var wait = nextCheck - now;
+                if (wait < TimeSpan.Zero)
+                {
+                    wait = TimeSpan.Zero;
+                }
+
+                if (wait > TimeSpan.Zero)
+                {
+                    using var waitCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    // このターゲットの TimeProvider は Delay を持たない。FakeTimeProvider は CreateTimer を進める。
+                    var delay = DelayUntil(_timeProvider, wait, waitCancellation.Token);
+                    var finished = await Task.WhenAny(delay, _activity.Pulse).ConfigureAwait(false);
+                    if (finished != delay)
+                    {
+                        waitCancellation.Cancel();
+                        try
+                        {
+                            await delay.ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            // 処理進捗で待ちをやり直す。失敗ではない。
+                        }
+
+                        nextCheck = _activity.LastProgress + GrokBuildDriver.IdleBeforeLogCheck;
+                        continue;
+                    }
+
+                    await delay.ConfigureAwait(false);
+                }
+
+                if (cancellationToken.IsCancellationRequested || _signal.IsSignaled || _stopped)
+                {
+                    return;
+                }
+
+                now = _timeProvider.GetUtcNow();
+                if (now - _activity.LastProgress < GrokBuildDriver.IdleBeforeLogCheck)
+                {
+                    nextCheck = _activity.LastProgress + GrokBuildDriver.IdleBeforeLogCheck;
+                    continue;
+                }
+
+                if (TryRescue(processId, launchedAt, cancellationToken))
+                {
+                    return;
+                }
+
+                nextCheck = _timeProvider.GetUtcNow() + GrokBuildDriver.LogRecheckInterval;
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // 実行終了に伴う監視停止。失敗ではない。
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            FacadeLog.Information("Grok internal completion watch stopped because reading the log failed.");
+        }
+    }
+
+    private bool TryRescue(int processId, DateTimeOffset launchedAt, CancellationToken cancellationToken)
+    {
+        if (_stopped || _cursor is null)
+        {
+            return true;
+        }
+
+        if (HasIgnoredEffort())
+        {
+            Stop("Grok internal completion recovery was not used because reasoning effort was reported as ignored.");
+            return true;
+        }
+
+        GrokLogRead read;
+        try
+        {
+            read = _logReader.Read(_cursor);
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            Stop("Grok internal log read failed.");
+            return true;
+        }
+
+        _cursor = read.Cursor;
+        if (read.Cursor.Abandoned)
+        {
+            Stop("Grok internal log correlation stopped: " + (read.Cursor.Problem ?? "unreadable"));
+            return true;
+        }
+
+        foreach (var line in read.Lines)
+        {
+            _correlation.Observe(line, processId, launchedAt, _resumeSessionId);
+            if (_correlation.IsAbandoned)
+            {
+                Stop("Grok internal log correlation stopped: " + (_correlation.AbandonReason ?? "inconsistent"));
+                return true;
+            }
+        }
+
+        var success = _correlation.Success;
+        if (success is null || cancellationToken.IsCancellationRequested)
+        {
+            return success is not null;
+        }
+
+        if (_accumulator.FreezeIfNonEmpty() is null)
+        {
+            return false;
+        }
+
+        if (Interlocked.Exchange(ref _confirmed, 1) == 1)
+        {
+            return true;
+        }
+
+        Evidence = success;
+        _signal.Notify();
+        return true;
+    }
+
+    private static Task DelayUntil(TimeProvider timeProvider, TimeSpan delay, CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return Task.FromCanceled(cancellationToken);
+        }
+
+        if (delay <= TimeSpan.Zero)
+        {
+            return Task.CompletedTask;
+        }
+
+        var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var timer = timeProvider.CreateTimer(
+            _ => completed.TrySetResult(),
+            state: null,
+            delay,
+            Timeout.InfiniteTimeSpan);
+        var registration = cancellationToken.Register(() => completed.TrySetCanceled(cancellationToken));
+        return completed.Task.ContinueWith(
+            task =>
+            {
+                registration.Dispose();
+                timer.Dispose();
+                if (task.IsCanceled)
+                {
+                    throw new OperationCanceledException(cancellationToken);
+                }
+
+                if (task.IsFaulted)
+                {
+                    throw task.Exception?.GetBaseException() ?? new InvalidOperationException("Grok idle wait failed.");
+                }
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private bool HasIgnoredEffort()
+    {
+        return _reasoningEffort is not null
+            && GrokBuildDriver.ReportsIgnoredReasoningEffort(CopyStderr());
+    }
+
+    private void Stop(string reason)
+    {
+        if (_stopped)
+        {
+            return;
+        }
+
+        _stopped = true;
+        FacadeLog.Information(reason);
+    }
+}
+
+internal sealed class GrokActivityClock
+{
+    private readonly object _gate = new();
+    private DateTimeOffset _lastProgress;
+    private bool _started;
+    private TaskCompletionSource _pulse = CreatePulse();
+
+    public void Start(DateTimeOffset now)
+    {
+        lock (_gate)
+        {
+            _lastProgress = now;
+            _started = true;
+        }
+    }
+
+    public void Mark(DateTimeOffset now)
+    {
+        TaskCompletionSource pulse;
+        lock (_gate)
+        {
+            if (!_started)
+            {
+                return;
+            }
+
+            _lastProgress = now;
+            pulse = _pulse;
+            _pulse = CreatePulse();
+        }
+
+        pulse.TrySetResult();
+    }
+
+    public DateTimeOffset LastProgress
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _lastProgress;
+            }
+        }
+    }
+
+    public Task Pulse
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _pulse.Task;
+            }
+        }
+    }
+
+    private static TaskCompletionSource CreatePulse()
+    {
+        return new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 }
 

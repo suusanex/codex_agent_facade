@@ -4,11 +4,15 @@
 #:property PublishAot=false
 #:property PackAsTool=false
 #:property NoWarn=CA2266
+#:package NLog.Extensions.Logging@6.2.0
 #:include AgentFacade.cs
 #:include ProcessRunner.cs
 #:include AgentRunLog.cs
 #:include SecretRedactor.cs
+#:include FacadeLogging.cs
+#:include AgentJob.cs
 #:include GitHubCopilotDriver.cs
+#:include GrokInternalLog.cs
 #:include GrokBuildDriver.cs
 #:include CursorCliDriver.cs
 #:include CodexCliDriver.cs
