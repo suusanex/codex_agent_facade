@@ -14,6 +14,7 @@
 #:include SecretRedactor.cs
 #:include FacadeLogging.cs
 #:include GitHubCopilotDriver.cs
+#:include GrokInternalLog.cs
 #:include GrokBuildDriver.cs
 #:include CursorCliDriver.cs
 #:include CodexCliDriver.cs

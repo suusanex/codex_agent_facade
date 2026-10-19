@@ -15,6 +15,7 @@
 #:include ../src/SecretRedactor.cs
 #:include ../src/FacadeLogging.cs
 #:include ../src/GitHubCopilotDriver.cs
+#:include ../src/GrokInternalLog.cs
 #:include ../src/GrokBuildDriver.cs
 #:include ../src/CursorCliDriver.cs
 #:include ../src/CodexCliDriver.cs
@@ -26,6 +27,7 @@
 #:include ../src/RunLogViewerSession.cs
 #:include ../src/McpHttpHost.cs
 #:include ../src/AgentCli.cs
+#:include GrokInternalCompletionTests.cs
 
 using System.Diagnostics;
 using System.Security.Cryptography;
@@ -74,6 +76,7 @@ public sealed class StubProcessLifetime : IProcessLifetime
 {
     public int Id { get; set; } = 42;
     public bool HasExited { get; set; }
+    public DateTimeOffset StartedAt { get; set; }
 }
 
 public sealed class RecordingProcessRunner : IProcessRunner
@@ -102,9 +105,44 @@ public sealed class RecordingProcessRunner : IProcessRunner
     public Exception? ExceptionToThrow { get; set; }
     public TaskCompletionSource<bool>? Gate { get; set; }
     public CancellationToken LastCancellationToken { get; private set; }
+    public bool HoldForCompletion { get; set; }
+    public ProcessRunResult? CompletionResult { get; set; }
+    public IReadOnlyList<string> LinesAfterSignal { get; set; } = Array.Empty<string>();
+    public Exception? ExceptionAfterSignal { get; set; }
+    public Task StartedTask => _started.Task;
+    private TaskCompletionSource _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource<ProcessRunResult> _natural = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private Action<string>? _stdout;
+    private Action<string>? _stderr;
+
+    public void EmitStdout(string line)
+    {
+        _stdout?.Invoke(line);
+    }
+
+    public void EmitStderr(string line)
+    {
+        _stderr?.Invoke(line);
+    }
+
+    public void CompleteNaturally(ProcessRunResult result)
+    {
+        foreach (var line in SplitLines(result.StandardOutput))
+        {
+            _stdout?.Invoke(line);
+        }
+
+        foreach (var line in SplitLines(result.StandardError))
+        {
+            _stderr?.Invoke(line);
+        }
+
+        _natural.TrySetResult(result);
+    }
     private int _callCount;
     public int CallCount => _callCount;
     public StubProcessLifetime ProcessLifetime { get; } = new();
+    public Func<DateTimeOffset> StartedAtClock { get; set; } = static () => TimeProvider.System.GetUtcNow();
 
     public async Task<ProcessRunResult> RunAsync(ProcessRunRequest request, CancellationToken cancellationToken)
     {
@@ -125,6 +163,7 @@ public sealed class RecordingProcessRunner : IProcessRunner
             throw ExceptionToThrow;
         }
 
+        ProcessLifetime.StartedAt = StartedAtClock();
         request.OnProcessStarted?.Invoke(ProcessLifetime);
         request.OnLaunchResolved?.Invoke(new ProcessLaunchInfo(
             request.FileName,
@@ -133,6 +172,40 @@ public sealed class RecordingProcessRunner : IProcessRunner
             request.Arguments,
             request.Arguments,
             UsedWindowsCmdWrapper: false));
+        _stdout = request.StdoutLineCallback;
+        _stderr = request.StderrLineCallback;
+        _started.TrySetResult();
+
+        if (HoldForCompletion)
+        {
+            using var registration = cancellationToken.Register(() => _natural.TrySetCanceled(cancellationToken));
+            var signal = request.Completion?.Task ?? Task.Delay(Timeout.Infinite, cancellationToken);
+            while (true)
+            {
+                await Task.WhenAny(signal, _natural.Task).ConfigureAwait(false);
+                if (_natural.Task.IsCompleted)
+                {
+                    return await _natural.Task.ConfigureAwait(false);
+                }
+
+                if (request.Completion?.IsSignaled == true)
+                {
+                    if (ExceptionAfterSignal is not null)
+                    {
+                        throw ExceptionAfterSignal;
+                    }
+
+                    foreach (var line in LinesAfterSignal)
+                    {
+                        request.StdoutLineCallback?.Invoke(line);
+                    }
+
+                    return CompletionResult ?? Result;
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+        }
 
         if (Gate is not null)
         {
@@ -4439,6 +4512,8 @@ internal sealed class ThrowingProcessLifetime : IProcessLifetime
     public int Id => throw new InvalidOperationException("heartbeat process probe failed");
 
     public bool HasExited => throw new InvalidOperationException("heartbeat process probe failed");
+
+    public DateTimeOffset StartedAt => throw new InvalidOperationException("heartbeat process probe failed");
 }
 
 public class AgentRunLogDirectoryTests
@@ -4661,7 +4736,8 @@ public class McpPublicContractTests
         Assert.Contains("同じ Codex thread や同じ外部 agent `session_id` を継続することは、`request_id` の再利用理由にならない", readme, StringComparison.Ordinal);
         Assert.Contains("呼び出しごとに完全な引数セットを渡す RPC", readme, StringComparison.Ordinal);
         Assert.Contains("前回の `working_directory` 等は MCP / Facade 側で暗黙継承されない", readme, StringComparison.Ordinal);
-        Assert.Contains("`completed` は CLI 実行が完了したことだけを示す", readme, StringComparison.Ordinal);
+        Assert.Contains("`completed` は Facade が worker の成功結果を確定したことを示す", readme, StringComparison.Ordinal);
+        Assert.Contains("grok_internal_prompt_done", readme, StringComparison.Ordinal);
         Assert.Contains("`failure.kind`", readme, StringComparison.Ordinal);
         Assert.Contains("outputKind", readme, StringComparison.Ordinal);
         Assert.DoesNotContain("pollAfterMs", readme, StringComparison.Ordinal);

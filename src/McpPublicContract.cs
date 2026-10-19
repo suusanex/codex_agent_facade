@@ -27,7 +27,7 @@ public static class McpPublicContract
         + "Do not use short-interval get_agent_job polling to wait out a long-running worker. "
         + "Use get_agent_job only for explicit status checks, recovery, or diagnosis. "
         + "wait_agent_job does not start, restart, or cancel the worker. "
-        + "A completed job means only that the external CLI finished; review the reported response, diff, tests, and other evidence before accepting the work. "
+        + "A completed job means the Facade accepted a worker result. For GitHub Copilot, Cursor, and Codex that follows CLI termination. For Grok Build it can also follow a correlated internal prompt completion when the CLI does not exit; exitCode is present only when a real process code was observed and is omitted otherwise. "
         + "Distinguish failed jobs, lost responses, and wait timeouts. A recovery retry reuses the same request_id and must not start a second job. "
         + "Successful results expose outputKind as final_response or assistant_transcript; raw streams are available only in run logs. "
         + "Reuse session_id from a completed result to continue the same external agent session.";
@@ -39,7 +39,7 @@ public static class McpPublicContract
         + "Reuse that request_id only if this start_agent result is lost. "
         + "Then normally call wait_agent_job with only the returned jobId until the job is terminal. "
         + "Omit timeout_seconds to use the 300-second default unless diagnosis, testing, or another explicit constraint requires an override. "
-        + "Completed means only CLI execution completed; the caller must review the response, diff, tests, and evidence before accepting the work. "
+        + "Completed means the Facade accepted a worker result, not that every CLI process exited by itself. Grok Build can complete from its internal prompt log while the process is still running; exitCode is omitted until a real process code is observed. The caller must review the response, diff, tests, and evidence before accepting the work. "
         + "A lost response is recovered with the same request_id; do not start a new job for recovery. "
         + "Successful results expose outputKind as final_response or assistant_transcript; raw streams are not returned by MCP. "
         + "The Facade does not plan, split, or semantically rewrite the supplied worker task. "

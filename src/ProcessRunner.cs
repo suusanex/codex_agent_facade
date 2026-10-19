@@ -17,6 +17,11 @@ public interface IProcessLifetime
 {
     int Id { get; }
     bool HasExited { get; }
+
+    /// <summary>
+    /// プロセス起動直前に採取した時刻。今回の記録と、それより前の記録を分ける。
+    /// </summary>
+    DateTimeOffset StartedAt { get; }
 }
 
 public sealed record ProcessLaunchInfo(
@@ -40,9 +45,31 @@ public sealed record ProcessRunRequest(
     Action<string>? StderrLineCallback = null,
     Action<IProcessLifetime>? OnProcessStarted = null,
     Action<ProcessLaunchInfo>? OnLaunchResolved = null,
-    string? StandardInputText = null);
+    string? StandardInputText = null,
+    ProcessCompletionSignal? Completion = null);
 
-public sealed record ProcessRunResult(int ExitCode, string StandardOutput, string StandardError);
+/// <summary>
+/// Driver が実行中のプロセスへ完了を通知する。Grok 以外は渡さない。
+/// </summary>
+public sealed class ProcessCompletionSignal
+{
+    private readonly TaskCompletionSource _completed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public bool IsSignaled => _completed.Task.IsCompletedSuccessfully;
+
+    public Task Task => _completed.Task;
+
+    public void Notify()
+    {
+        _completed.TrySetResult();
+    }
+}
+
+public sealed record ProcessRunResult(
+    int? ExitCode,
+    string StandardOutput,
+    string StandardError,
+    ProcessTerminationInfo? Termination = null);
 
 /// <summary>
 /// CLI processを開始できず、workerの処理が実行されていないことを示す。
@@ -68,8 +95,12 @@ public interface IProcessJobGuard
 /// </summary>
 public sealed class ProcessRunner : IProcessRunner
 {
+    internal static readonly TimeSpan ForcedTerminationBudget = TimeSpan.FromSeconds(10);
+
     private readonly IProcessJobGuard _jobGuard;
     private readonly IProcessEncodingProvider _encodingProvider;
+    private readonly TimeProvider _timeProvider;
+    private readonly Action<Process> _killTree;
 
     public ProcessRunner()
         : this(
@@ -84,11 +115,23 @@ public sealed class ProcessRunner : IProcessRunner
     }
 
     internal ProcessRunner(IProcessJobGuard jobGuard, IProcessEncodingProvider encodingProvider)
+        : this(jobGuard, encodingProvider, TimeProvider.System, null)
+    {
+    }
+
+    internal ProcessRunner(
+        IProcessJobGuard jobGuard,
+        IProcessEncodingProvider encodingProvider,
+        TimeProvider timeProvider,
+        Action<Process>? killTree)
     {
         ArgumentNullException.ThrowIfNull(jobGuard);
         ArgumentNullException.ThrowIfNull(encodingProvider);
+        ArgumentNullException.ThrowIfNull(timeProvider);
         _jobGuard = jobGuard;
         _encodingProvider = encodingProvider;
+        _timeProvider = timeProvider;
+        _killTree = killTree ?? KillProcessTree;
     }
 
     public async Task<ProcessRunResult> RunAsync(ProcessRunRequest request, CancellationToken cancellationToken)
@@ -139,6 +182,9 @@ public sealed class ProcessRunner : IProcessRunner
         var stdout = new StringBuilder();
         var stderr = new StringBuilder();
 
+        // 子は OnProcessStarted より前に session 記録を書くことがある。
+        // 境界は監視開始時刻ではなく、起動直前の時刻にする。
+        var launchedAt = _timeProvider.GetUtcNow();
         try
         {
             if (!process.Start())
@@ -168,7 +214,7 @@ public sealed class ProcessRunner : IProcessRunner
 
         using (killOnClose)
         {
-        request.OnProcessStarted?.Invoke(new ProcessLifetime(process));
+        request.OnProcessStarted?.Invoke(new ProcessLifetime(process, launchedAt));
 
         await using var killOnCancel = cancellationToken.Register(() =>
         {
@@ -185,17 +231,19 @@ public sealed class ProcessRunner : IProcessRunner
             }
         });
 
-        var stdoutTask = ReadTextLinesAsync(process.StandardOutput, stdout, request.StdoutLineCallback, cancellationToken);
+        using var ioCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var stdoutTask = ReadTextLinesAsync(process.StandardOutput, stdout, request.StdoutLineCallback, ioCancellation.Token);
         var stderrTask = ReadLinesAsync(
             process.StandardError.BaseStream,
             stderr,
             request.StderrLineCallback,
             wrapperKind == ProcessWrapperKind.WindowsCmd,
             _encodingProvider,
-            cancellationToken);
-        var stdinTask = WriteStandardInputAsync(process, request.StandardInputText, cancellationToken);
+            ioCancellation.Token);
+        var stdinTask = WriteStandardInputAsync(process, request.StandardInputText, ioCancellation.Token);
         var ioTasks = new[] { stdoutTask, stderrTask, stdinTask };
-        var waitTask = process.WaitForExitAsync(cancellationToken);
+        var exitTask = process.WaitForExitAsync(ioCancellation.Token);
+        var completionTask = request.Completion?.Task;
 
         try
         {
@@ -203,8 +251,35 @@ public sealed class ProcessRunner : IProcessRunner
             var pendingIoTasks = new HashSet<Task>(ioTasks);
             while (pendingIoTasks.Count > 0)
             {
-                var finished = await Task.WhenAny([waitTask, .. pendingIoTasks]).ConfigureAwait(false);
-                if (finished == waitTask)
+                var finished = completionTask is null
+                    ? await Task.WhenAny([exitTask, .. pendingIoTasks]).ConfigureAwait(false)
+                    : await Task.WhenAny([exitTask, completionTask, .. pendingIoTasks]).ConfigureAwait(false);
+                if (completionTask is not null && finished == completionTask)
+                {
+                    if (request.Completion!.IsSignaled
+                        && !exitTask.IsCompletedSuccessfully
+                        && !HasExited(process))
+                    {
+                        return await CompleteFromInternalSignalAsync(
+                            process,
+                            stdout,
+                            stderr,
+                            stdoutTask,
+                            stderrTask,
+                            exitTask,
+                            ioCancellation).ConfigureAwait(false);
+                    }
+
+                    if (exitTask.IsCompleted || HasExited(process))
+                    {
+                        break;
+                    }
+
+                    completionTask = null;
+                    continue;
+                }
+
+                if (finished == exitTask)
                 {
                     break;
                 }
@@ -217,7 +292,30 @@ public sealed class ProcessRunner : IProcessRunner
                 }
             }
 
-            await waitTask.ConfigureAwait(false);
+            // 標準ストリームが先に閉じても、内部完了の通知が来るまでは終了だけを待たない。
+            if (completionTask is not null && !exitTask.IsCompleted)
+            {
+                if (!request.Completion!.IsSignaled)
+                {
+                    await Task.WhenAny(exitTask, completionTask).ConfigureAwait(false);
+                }
+
+                if (request.Completion.IsSignaled
+                    && !exitTask.IsCompletedSuccessfully
+                    && !HasExited(process))
+                {
+                    return await CompleteFromInternalSignalAsync(
+                        process,
+                        stdout,
+                        stderr,
+                        stdoutTask,
+                        stderrTask,
+                        exitTask,
+                        ioCancellation).ConfigureAwait(false);
+                }
+            }
+
+            await exitTask.ConfigureAwait(false);
             await Task.WhenAll(ioTasks).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -229,6 +327,113 @@ public sealed class ProcessRunner : IProcessRunner
 
         return new ProcessRunResult(process.ExitCode, stdout.ToString(), stderr.ToString());
         }
+    }
+
+    private async Task<ProcessRunResult> CompleteFromInternalSignalAsync(
+        Process process,
+        StringBuilder stdout,
+        StringBuilder stderr,
+        Task stdoutTask,
+        Task stderrTask,
+        Task exitTask,
+        CancellationTokenSource ioCancellation)
+    {
+        var waitForExit = process.WaitForExitAsync(CancellationToken.None);
+        var outcome = await ForcedProcessStop.ExecuteAsync(
+            () =>
+            {
+                if (!HasExited(process))
+                {
+                    _killTree(process);
+                }
+            },
+            waitForExit,
+            stdoutTask,
+            stderrTask,
+            _timeProvider).ConfigureAwait(false);
+        if (!waitForExit.IsCompleted)
+        {
+            ObserveAbandoned(waitForExit);
+        }
+
+        try
+        {
+            ioCancellation.Cancel();
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+        }
+
+        ObserveAbandoned(exitTask);
+        if (!outcome.OutputRecoveryCompleted)
+        {
+            ObserveAbandoned(stdoutTask);
+            ObserveAbandoned(stderrTask);
+        }
+
+        int? exitCode = null;
+        var status = outcome.Status;
+        if (outcome.ExitObserved)
+        {
+            try
+            {
+                exitCode = process.ExitCode;
+            }
+            catch (Exception ex)
+            {
+                CliJson.TraceException(ex);
+                exitCode = null;
+                if (status == ProcessTerminationStatus.Exited)
+                {
+                    status = ProcessTerminationStatus.Unconfirmed;
+                }
+            }
+        }
+
+        return new ProcessRunResult(
+            exitCode,
+            stdout.ToString(),
+            stderr.ToString(),
+            new ProcessTerminationInfo(status, outcome.OutputRecoveryCompleted));
+    }
+
+    private static bool HasExited(Process process)
+    {
+        try
+        {
+            return process.HasExited;
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            return false;
+        }
+    }
+
+    private static void ObserveAbandoned(Task task)
+    {
+        if (task.IsCompleted)
+        {
+            if (task.IsFaulted)
+            {
+                CliJson.TraceException((Exception?)task.Exception ?? new InvalidOperationException("Abandoned process task failed."));
+            }
+
+            return;
+        }
+
+        _ = task.ContinueWith(
+            completed =>
+            {
+                if (completed.IsFaulted)
+                {
+                    CliJson.TraceException((Exception?)completed.Exception ?? new InvalidOperationException("Abandoned process task failed."));
+                }
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     private static ProcessStartInfo CreateStartInfo(
@@ -434,10 +639,13 @@ public sealed class ProcessRunner : IProcessRunner
     {
         private readonly Process _process;
 
-        public ProcessLifetime(Process process)
+        public ProcessLifetime(Process process, DateTimeOffset startedAt)
         {
             _process = process;
+            StartedAt = startedAt;
         }
+
+        public DateTimeOffset StartedAt { get; }
 
         public int Id
         {
@@ -491,18 +699,108 @@ public sealed class ProcessRunner : IProcessRunner
         return flattened[0];
     }
 
-    private static void TryKill(Process process)
+    private void TryKill(Process process)
     {
         try
         {
-            if (!process.HasExited)
+            if (!HasExited(process))
             {
-                process.Kill(entireProcessTree: true);
+                _killTree(process);
             }
         }
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
+        }
+    }
+
+    private static void KillProcessTree(Process process)
+    {
+        process.Kill(entireProcessTree: true);
+    }
+}
+
+internal readonly record struct ForcedStopOutcome(string Status, bool ExitObserved, bool OutputRecoveryCompleted);
+
+/// <summary>
+/// 完了通知後の強制終了。終了確認と出力回収の待ちは合計で <see cref="ProcessRunner.ForcedTerminationBudget"/> まで。
+/// </summary>
+internal static class ForcedProcessStop
+{
+    public static async Task<ForcedStopOutcome> ExecuteAsync(
+        Action kill,
+        Task waitForExit,
+        Task stdoutTask,
+        Task stderrTask,
+        TimeProvider timeProvider)
+    {
+        ArgumentNullException.ThrowIfNull(kill);
+        ArgumentNullException.ThrowIfNull(waitForExit);
+        ArgumentNullException.ThrowIfNull(stdoutTask);
+        ArgumentNullException.ThrowIfNull(stderrTask);
+        ArgumentNullException.ThrowIfNull(timeProvider);
+
+        Exception? killError = null;
+        try
+        {
+            kill();
+        }
+        catch (Exception ex)
+        {
+            killError = ex;
+            CliJson.TraceException(ex);
+        }
+
+        var budgetCompleted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var budgetTimer = timeProvider.CreateTimer(
+            _ => budgetCompleted.TrySetResult(),
+            state: null,
+            ProcessRunner.ForcedTerminationBudget,
+            Timeout.InfiniteTimeSpan);
+        var budget = budgetCompleted.Task;
+        var exitObserved = false;
+        if (!waitForExit.IsCompleted)
+        {
+            var finished = await Task.WhenAny(waitForExit, budget).ConfigureAwait(false);
+            if (finished == waitForExit)
+            {
+                exitObserved = await ObserveExitAsync(waitForExit).ConfigureAwait(false);
+            }
+        }
+        else
+        {
+            exitObserved = await ObserveExitAsync(waitForExit).ConfigureAwait(false);
+        }
+
+        if (!budget.IsCompleted)
+        {
+            var reads = Task.WhenAll(stdoutTask, stderrTask);
+            if (!reads.IsCompleted)
+            {
+                await Task.WhenAny(reads, budget).ConfigureAwait(false);
+            }
+        }
+
+        var outputDone = stdoutTask.IsCompletedSuccessfully && stderrTask.IsCompletedSuccessfully;
+        var status = killError is not null
+            ? ProcessTerminationStatus.Failed
+            : exitObserved
+                ? ProcessTerminationStatus.Exited
+                : ProcessTerminationStatus.Unconfirmed;
+        return new ForcedStopOutcome(status, exitObserved, outputDone);
+    }
+
+    private static async Task<bool> ObserveExitAsync(Task waitForExit)
+    {
+        try
+        {
+            await waitForExit.ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            return false;
         }
     }
 }

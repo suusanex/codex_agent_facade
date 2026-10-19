@@ -170,9 +170,12 @@ distinct な agent job / distinct な `start_agent` ごとに、呼び出し側�
 
 - `agent`
 - `sessionId`（CLI が明示した session フィールド、または Copilot の `--resume=` hint。任意 UUID は使わない。読めなければ空）
-- `exitCode`
+- `exitCode`（取得できた子プロセスの終了コードだけ。未取得なら省略し、0 は作らない）
 - `outputText`
 - `outputKind`（`final_response` または `assistant_transcript`）
+- `completionReason`（Grok Build を内部ログで回収したときだけ `grok_internal_prompt_done`。それ以外は省略）
+- `completionEvidence`（回収時の PID、session ID、prompt ID、完了時刻、Grok バージョン）
+- `processTermination`（回収時の停止状態 `exited` / `failed` / `unconfirmed` と、stdout/stderr の回収が終わったかを示す boolean）
 - `runId`（`jobId` と同じ）
 - `eventsLogPath`
 - `textLogPath`
@@ -192,7 +195,7 @@ Cursor は terminal `result.result` とassistantイベントの対応を確認�
 
 通常の完了待ちは `wait_agent_job(job_id)` とし、`timeout_seconds` を省略する。診断・テスト・上位環境の明示的な制約など、既定値を上書きする理由がある場合だけ指定する。新しい worker を開始・再実行しない。既に terminal なら即時に返す。running なら terminal 化または待機上限まで待つ。timeout 時は `status=running` の snapshot を返し、worker は継続する。wait 呼び出しのキャンセル・切断・timeout だけでは worker を cancel しない。worker 停止は `cancel_agent_job` の責務である。
 
-`completed` は CLI 実行が完了したことだけを示す。親エージェントは応答、差分、テスト、run log などをレビューしてから受入判断を行う。`failed`、応答喪失、wait timeout は別状態として扱い、応答喪失の回収 retry は同じ `request_id` を使って既存 job を取得する。
+`completed` は Facade が worker の成功結果を確定したことを示す。GitHub Copilot、Cursor、Codex では外部 CLI の終了に対応する。Grok Build では、正式な `end` が無くプロセスが残っていても、起動した PID・session・最初の prompt に対応する内部ログの完了を確認でき、取得済みの非空本文がある場合は `completed` になる。そのとき `completionReason` は `grok_internal_prompt_done` であり、`exitCode` は実際に取得できたコードだけを返す。この経路は Grok の内部ログ形式に依存する暫定措置で、他の agent には適用しない。親エージェントは応答、差分、テスト、run log などをレビューしてから受入判断を行う。`failed`、応答喪失、wait timeout は別状態として扱い、応答喪失の回収 retry は同じ `request_id` を使って既存 job を取得する。
 
 ### `cancel_agent_job`
 

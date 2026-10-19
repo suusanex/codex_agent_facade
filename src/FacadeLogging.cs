@@ -302,6 +302,13 @@ internal static class FacadeLog
         logger.LogError("{Exception}", SecretRedactor.RedactText(exception.ToString()));
     }
 
+    public static void Information(string message)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(message);
+        var logger = CreateLogger(FacadeLogging.LoggerCategory);
+        logger.LogInformation("{Message}", SecretRedactor.RedactText(message));
+    }
+
     private sealed class Restore : IDisposable
     {
         private readonly MsLoggerFactory _previous;

@@ -21,18 +21,49 @@ public sealed record AgentRunRequest(
     bool? Fast = null);
 
 /// <summary>
+/// 強制終了の公開状態。例外本文やログ行は含めない。
+/// </summary>
+public static class ProcessTerminationStatus
+{
+    public const string Exited = "exited";
+    public const string Failed = "failed";
+    public const string Unconfirmed = "unconfirmed";
+}
+
+/// <summary>
+/// 子プロセスを止めた結果。outputRecoveryCompleted は stdout/stderr の読取が終わったことだけを示す。
+/// </summary>
+public sealed record ProcessTerminationInfo(
+    string Status,
+    bool OutputRecoveryCompleted);
+
+/// <summary>
+/// Grok 内部ログで照合した完了根拠。識別子と時刻とバージョンだけを公開する。
+/// </summary>
+public sealed record GrokCompletionEvidence(
+    int Pid,
+    string SessionId,
+    string PromptId,
+    DateTimeOffset CompletedAt,
+    string GrokVersion);
+
+/// <summary>
 /// CLI から得た結果。独自セマンティクスは持たせず、Driver が読めた範囲だけを返す。
+/// ExitCode は取得できたプロセス終了コードだけを入れる。未取得の 0 は作らない。
 /// </summary>
 public sealed record AgentRunResult(
     string Agent,
     string SessionId,
-    int ExitCode,
+    int? ExitCode,
     string OutputText,
     string RawOutput,
     string RunId,
     string EventsLogPath,
     string TextLogPath,
-    string OutputKind = "assistant_transcript");
+    string OutputKind = "assistant_transcript",
+    string? CompletionReason = null,
+    GrokCompletionEvidence? CompletionEvidence = null,
+    ProcessTerminationInfo? ProcessTermination = null);
 
 internal sealed record ParsedCliOutput(
     string SessionId,

@@ -38,12 +38,15 @@ public sealed record AgentJobPublicSnapshot(
 public sealed record AgentRunPublicResult(
     string Agent,
     string SessionId,
-    int ExitCode,
+    int? ExitCode,
     string OutputText,
     string RunId,
     string EventsLogPath,
     string TextLogPath,
-    string OutputKind = "assistant_transcript");
+    string OutputKind = "assistant_transcript",
+    string? CompletionReason = null,
+    GrokCompletionEvidence? CompletionEvidence = null,
+    ProcessTerminationInfo? ProcessTermination = null);
 
 /// <summary>
 /// 失敗時に親が復旧判断へ使う、公開可能な最小限の診断情報。
@@ -81,7 +84,10 @@ internal static class AgentJobPublicProjection
             result.RunId,
             result.EventsLogPath,
             result.TextLogPath,
-            result.OutputKind);
+            result.OutputKind,
+            result.CompletionReason,
+            result.CompletionEvidence,
+            result.ProcessTermination);
     }
 }
 
