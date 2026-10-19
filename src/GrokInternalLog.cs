@@ -1,9 +1,11 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
 /// <summary>
-/// Grok Build の unified.jsonl を差分で読む。公開された相関 API は無いため、
-/// 読取位置と未完行の保持だけをこの境界に置く。照合そのものは <see cref="GrokPromptCorrelation"/> が行う。
+/// Grok Build の unified.jsonl を差分で読む。公開された相関 API もファイル同一性の API も無いため、
+/// 読取位置、消費済み先頭の SHA-256、未完行の保持だけをこの境界に置く。
+/// 照合そのものは <see cref="GrokPromptCorrelation"/> が行う。
 /// </summary>
 internal interface IGrokUnifiedLogReader
 {
@@ -12,7 +14,7 @@ internal interface IGrokUnifiedLogReader
     GrokLogRead Read(GrokLogCursor cursor);
 }
 
-internal sealed record GrokLogCursor(long Offset, byte[] Pending, bool Abandoned, string? Problem)
+internal sealed record GrokLogCursor(long Offset, byte[] Pending, bool Abandoned, string? Problem, string? Continuity = null)
 {
     public static GrokLogCursor At(long offset)
     {
@@ -58,7 +60,13 @@ internal sealed class FileGrokUnifiedLogReader : IGrokUnifiedLogReader
             }
 
             using var stream = Open();
-            return GrokLogCursor.At(stream.Length);
+            if (stream.Length == 0)
+            {
+                return GrokLogCursor.At(0);
+            }
+
+            // 長さだけでは同サイズの置換を見分けられない。消費済み先頭の SHA-256 を連続性にする。
+            return new GrokLogCursor(stream.Length, Array.Empty<byte>(), false, null, HashConsumed(stream, stream.Length));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -90,6 +98,13 @@ internal sealed class FileGrokUnifiedLogReader : IGrokUnifiedLogReader
 
             using var stream = Open();
             if (stream.Length < cursor.Offset)
+            {
+                return Stop(cursor, "replaced");
+            }
+
+            // 短縮だけでなく、同サイズ以上への置換や truncate 後の再成長もここで捨てる。
+            if (cursor.Offset > 0
+                && !string.Equals(HashConsumed(stream, cursor.Offset), cursor.Continuity, StringComparison.Ordinal))
             {
                 return Stop(cursor, "replaced");
             }
@@ -157,7 +172,15 @@ internal sealed class FileGrokUnifiedLogReader : IGrokUnifiedLogReader
             }
 
             var pending = pendingLength == 0 ? Array.Empty<byte>() : combined[start..];
-            var next = new GrokLogCursor(cursor.Offset + fresh.Length, pending, false, null);
+            var nextOffset = cursor.Offset + fresh.Length;
+            if (cursor.Offset > 0
+                && !string.Equals(HashConsumed(stream, cursor.Offset), cursor.Continuity, StringComparison.Ordinal))
+            {
+                return Stop(cursor, "replaced");
+            }
+
+            var continuity = nextOffset == 0 ? null : HashConsumed(stream, cursor.Offset, fresh);
+            var next = new GrokLogCursor(nextOffset, pending, false, null, continuity);
             return new GrokLogRead(lines, next);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DecoderFallbackException)
@@ -165,6 +188,32 @@ internal sealed class FileGrokUnifiedLogReader : IGrokUnifiedLogReader
             CliJson.TraceException(ex);
             return Stop(cursor, "unreadable");
         }
+    }
+
+    private static string HashConsumed(Stream stream, long prefixLength, byte[]? suffix = null)
+    {
+        stream.Position = 0;
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var buffer = new byte[81920];
+        var remaining = prefixLength;
+        while (remaining > 0)
+        {
+            var count = stream.Read(buffer, 0, (int)Math.Min(buffer.Length, remaining));
+            if (count == 0)
+            {
+                throw new EndOfStreamException("The Grok log ended before the consumed prefix.");
+            }
+
+            hash.AppendData(buffer, 0, count);
+            remaining -= count;
+        }
+
+        if (suffix is { Length: > 0 })
+        {
+            hash.AppendData(suffix);
+        }
+
+        return Convert.ToHexString(hash.GetHashAndReset());
     }
 
     private FileStream Open()
