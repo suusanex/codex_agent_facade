@@ -2652,6 +2652,16 @@ public class FacadeDelegationSkillContractTests
         "独自回答を追加しない",
         "この Skill の役割は relay である",
         "ユーザーへの主たる応答である",
+        "委譲ヘッダ",
+        "委譲本文",
+        "委譲先 SKILL",
+        "親がこの relay を開始する呼び出し",
+        "この Skill が指定されたこと自体は、委譲先へ同じ Skill を渡す理由にならない",
+        "`skills` は Facade options のキーではない",
+        "新規 job と継続では `skills` を渡さない",
+        "委譲本文から Skill 名を抽出して `skills` へ複製しない",
+        "半角スペース1つか改行",
+        "`agent` はこの relay の agent 名であり、同じ名前を `skills` へ重ねない",
     ];
 
     private static readonly string[] RequiredHeadings =
@@ -2735,6 +2745,22 @@ public class FacadeDelegationSkillContractTests
             Assert.Contains("- `agent`: `" + skill.Name + "`", skill.Text, StringComparison.Ordinal);
             Assert.Contains("通常は `timeout_seconds` を指定せず", skill.Text, StringComparison.Ordinal);
             Assert.Contains("上書きする理由がある場合だけ指定する", skill.Text, StringComparison.Ordinal);
+            Assert.Contains(
+                "委譲ヘッダは `$" + skill.Name + "` である",
+                skill.Text,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "`prompt` に `$" + skill.Name + "` や `/" + skill.Name + "` を追加しない",
+                skill.Text,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "`skills` に `" + skill.Name + "` を入れない",
+                skill.Text,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "ユーザーが通し指定した Skill 名だけ。Codex 形式のまま渡す",
+                skill.Text,
+                StringComparison.Ordinal);
         }
     }
 
@@ -2826,6 +2852,8 @@ public class FacadeDelegationSkillContractTests
             Assert.Contains("required fields を毎回指定する", text, StringComparison.Ordinal);
             Assert.Contains("facade-options", text, StringComparison.Ordinal);
             Assert.Contains("本文中のモデル名は起動設定にしない", text, StringComparison.Ordinal);
+            Assert.Contains("委譲ヘッダ", text, StringComparison.Ordinal);
+            Assert.Contains("新規 job と継続では `skills` を渡さない", text, StringComparison.Ordinal);
         }
     }
 
@@ -2876,8 +2904,12 @@ public class FacadeDelegationSkillContractTests
 
         foreach (var other in KnownFacadeDelegationSkillNames.Where(name => name is not "cursor" and not "codex"))
         {
-            Assert.Contains(
+            Assert.DoesNotContain(
                 "ユーザーが通し指定した Skill 名だけ。Codex 形式のまま渡す",
+                skills[other].Text,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "新規 job と継続では `skills` を渡さない",
                 skills[other].Text,
                 StringComparison.Ordinal);
         }
@@ -2937,6 +2969,109 @@ public class FacadeDelegationSkillContractTests
             AssertContains(skill.Name, followUpActions, "`session_id`");
             Assert.DoesNotContain("同じ `request_id`", followUpActions, StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public void RelayInvocationKeepsHeaderOptionsBodyAndDelegateSkillsApart()
+    {
+        // 親の委譲ヘッダを skills や prompt 先頭へ混ぜると、Driver が /name を足して再委譲になる。
+        // 防止は Facade の個別禁止ではなく、relay 入力の領域分割である。
+        foreach (var agent in KnownFacadeDelegationSkillNames)
+        {
+            var withOptions = "$" + agent + "\n"
+                + "```facade-options\n"
+                + "model: grok-4.7\n"
+                + "reasoning_effort: high\n"
+                + "```\n"
+                + "\n"
+                + "Implement issue #123.\n";
+            var parsed = RelayInvocationParser.Parse(agent, withOptions);
+            Assert.True(parsed.Succeeded, agent + " options parse failed: " + parsed.Error);
+            Assert.Equal(agent, parsed.Agent);
+            Assert.Equal("grok-4.7", parsed.Model);
+            Assert.Equal("high", parsed.ReasoningEffort);
+            Assert.Null(parsed.Fast);
+            Assert.Null(parsed.Skills);
+            Assert.Equal("\nImplement issue #123.\n", parsed.Prompt);
+            Assert.Contains("Implement issue #123.", parsed.Prompt, StringComparison.Ordinal);
+            Assert.DoesNotContain("$" + agent, parsed.Prompt, StringComparison.Ordinal);
+            Assert.DoesNotContain("facade-options", parsed.Prompt, StringComparison.Ordinal);
+            Assert.False(parsed.Prompt.StartsWith("/" + agent, StringComparison.Ordinal));
+
+            var withoutOptions = "$" + agent + "\n\nImplement issue #123.\n";
+            var plain = RelayInvocationParser.Parse(agent, withoutOptions);
+            Assert.True(plain.Succeeded, agent + " plain parse failed: " + plain.Error);
+            Assert.Null(plain.Model);
+            Assert.Null(plain.ReasoningEffort);
+            Assert.Null(plain.Fast);
+            Assert.Null(plain.Skills);
+            Assert.Equal("\nImplement issue #123.\n", plain.Prompt);
+            Assert.False(plain.Prompt.StartsWith("/" + agent, StringComparison.Ordinal));
+
+            var sameLine = "$" + agent + " Implement issue #123.";
+            var inline = RelayInvocationParser.Parse(agent, sameLine);
+            Assert.True(inline.Succeeded, agent + " inline parse failed: " + inline.Error);
+            Assert.Equal("Implement issue #123.", inline.Prompt);
+            Assert.Null(inline.Skills);
+
+            var mentionedSkill = "$" + agent + "\n\nUse the /review skill.\n";
+            var mentioned = RelayInvocationParser.Parse(agent, mentionedSkill);
+            Assert.True(mentioned.Succeeded, agent + " mentioned-skill parse failed: " + mentioned.Error);
+            Assert.Null(mentioned.Skills);
+            Assert.Equal("\nUse the /review skill.\n", mentioned.Prompt);
+            Assert.False(mentioned.Prompt.StartsWith("/" + agent, StringComparison.Ordinal));
+
+            var skillsKey = "$" + agent + "\n```facade-options\nskills: review\n```\n\nImplement issue #123.\n";
+            var rejected = RelayInvocationParser.Parse(agent, skillsKey);
+            Assert.False(rejected.Succeeded, agent + " accepted a skills key");
+        }
+
+        var grokMessage = "$grok-build\n```facade-options\nmodel: grok-4.7\nreasoning_effort: high\n```\n\nImplement issue #123.\n";
+        var grok = RelayInvocationParser.Parse("grok-build", grokMessage);
+        var grokDelivered = GrokBuildDriver.ApplyGrokSkills(grok.Prompt, grok.Skills);
+        Assert.Equal(grok.Prompt, grokDelivered);
+        Assert.False(grokDelivered.StartsWith("/grok-build", StringComparison.Ordinal));
+        var grokIfRoutingSkillWerePassed = GrokBuildDriver.ApplyGrokSkills(grok.Prompt, ["grok-build"]);
+        Assert.StartsWith("/grok-build\n", grokIfRoutingSkillWerePassed, StringComparison.Ordinal);
+
+        var copilotMessage = "$github-copilot\n```facade-options\nmodel: grok-4.7\nreasoning_effort: high\n```\n\nImplement issue #123.\n";
+        var copilot = RelayInvocationParser.Parse("github-copilot", copilotMessage);
+        var copilotDelivered = GitHubCopilotDriver.ApplyCopilotSkills(copilot.Prompt, copilot.Skills);
+        Assert.Equal(copilot.Prompt, copilotDelivered);
+        Assert.DoesNotContain("Use the /github-copilot skill.", copilotDelivered, StringComparison.Ordinal);
+
+        var grokFast = RelayInvocationParser.Parse(
+            "grok-build",
+            "$grok-build\n```facade-options\nmodel: grok-4.7\nfast: false\n```\n\nImplement issue #123.\n");
+        Assert.False(grokFast.Succeeded);
+        var copilotFast = RelayInvocationParser.Parse(
+            "github-copilot",
+            "$github-copilot\n```facade-options\nmodel: gpt-5\nfast: true\n```\n\nImplement issue #123.\n");
+        Assert.False(copilotFast.Succeeded);
+
+        var cursorFast = RelayInvocationParser.Parse(
+            "cursor",
+            "$cursor\n```facade-options\nmodel: composer-2.5\nfast: false\n```\n\nImplement issue #123.\n");
+        Assert.True(cursorFast.Succeeded, cursorFast.Error);
+        Assert.Equal("composer-2.5", cursorFast.Model);
+        Assert.True(cursorFast.Fast == false);
+        Assert.Null(cursorFast.Skills);
+        Assert.Equal("\nImplement issue #123.\n", cursorFast.Prompt);
+
+        var cursorEffortWithoutModel = RelayInvocationParser.Parse(
+            "cursor",
+            "$cursor\n```facade-options\nreasoning_effort: high\n```\n\nImplement issue #123.\n");
+        Assert.False(cursorEffortWithoutModel.Succeeded);
+
+        var unclosed = RelayInvocationParser.Parse(
+            "codex",
+            "$codex\n```facade-options\nmodel: gpt-6-luna\nImplement issue #123.\n");
+        Assert.False(unclosed.Succeeded);
+
+        var duplicate = RelayInvocationParser.Parse(
+            "codex",
+            "$codex\n```facade-options\nmodel: gpt-6-luna\nmodel: gpt-6-sol\n```\n\nImplement issue #123.\n");
+        Assert.False(duplicate.Succeeded);
     }
 
     private static void AssertContains(string skillName, string text, string phrase)
@@ -3107,6 +3242,245 @@ public class FacadeDelegationSkillContractTests
     }
 
     private sealed record FacadeDelegationSkillFile(string Path, string Name, string Description, string Text);
+
+    /// <summary>
+    /// relay SKILL の入力領域を実行可能な仕様として分ける。
+    /// Facade 本体の特別扱いではなく、親が SKILL の契約どおりに start_agent 引数を作った結果を表す。
+    /// </summary>
+    private static class RelayInvocationParser
+    {
+        internal static RelayInvocation Parse(string agent, string message)
+        {
+            if (!TrySkipBlankLines(message, 0, out var headerIndex))
+            {
+                return RelayInvocation.Fail(agent, "Delegation header is missing.");
+            }
+
+            var header = "$" + agent;
+            if (headerIndex + header.Length > message.Length
+                || !message.AsSpan(headerIndex, header.Length).SequenceEqual(header))
+            {
+                return RelayInvocation.Fail(agent, "Delegation header is missing.");
+            }
+
+            var afterHeader = headerIndex + header.Length;
+            if (afterHeader >= message.Length)
+            {
+                return RelayInvocation.Fail(agent, "Delegated body is empty.");
+            }
+
+            int candidateIndex;
+            if (message[afterHeader] == ' ')
+            {
+                candidateIndex = afterHeader + 1;
+            }
+            else if (message[afterHeader] == '\n')
+            {
+                candidateIndex = afterHeader + 1;
+            }
+            else if (message[afterHeader] == '\r'
+                && afterHeader + 1 < message.Length
+                && message[afterHeader + 1] == '\n')
+            {
+                candidateIndex = afterHeader + 2;
+            }
+            else
+            {
+                return RelayInvocation.Fail(agent, "Delegation header is not separated from the body.");
+            }
+
+            var candidate = message[candidateIndex..];
+            if (!TryReadOptions(candidate, out var prompt, out var model, out var reasoningEffort, out var fast, out var error))
+            {
+                return RelayInvocation.Fail(agent, error ?? "Facade options are invalid.");
+            }
+
+            if (string.IsNullOrWhiteSpace(prompt))
+            {
+                return RelayInvocation.Fail(agent, "Delegated body is empty.");
+            }
+
+            if ((agent is "grok-build" or "github-copilot") && fast is not null)
+            {
+                return RelayInvocation.Fail(agent, "Independent fast is not supported.");
+            }
+
+            if (agent == "cursor"
+                && (reasoningEffort is not null || fast is not null)
+                && string.IsNullOrWhiteSpace(model))
+            {
+                return RelayInvocation.Fail(agent, "Cursor requires model when reasoning_effort or fast is set.");
+            }
+
+            return new RelayInvocation(agent, prompt, model, reasoningEffort, fast, Skills: null, Error: null);
+        }
+
+        private static bool TryReadOptions(
+            string candidate,
+            out string prompt,
+            out string? model,
+            out string? reasoningEffort,
+            out bool? fast,
+            out string? error)
+        {
+            prompt = candidate;
+            model = null;
+            reasoningEffort = null;
+            fast = null;
+            error = null;
+
+            if (!TrySkipBlankLines(candidate, 0, out var contentIndex))
+            {
+                return true;
+            }
+
+            if (!TryReadLine(candidate, contentIndex, out var firstLine, out var nextIndex)
+                || firstLine != "```facade-options")
+            {
+                return true;
+            }
+
+            var seenModel = false;
+            var seenEffort = false;
+            var seenFast = false;
+            while (TryReadLine(candidate, nextIndex, out var line, out var lineEnd))
+            {
+                nextIndex = lineEnd;
+                if (line == "```")
+                {
+                    prompt = candidate[nextIndex..];
+                    return true;
+                }
+
+                var colon = line.IndexOf(':');
+                if (colon <= 0)
+                {
+                    error = "Facade option line is invalid.";
+                    return false;
+                }
+
+                var key = line[..colon];
+                var value = line[(colon + 1)..].Trim();
+                if (value.Length == 0)
+                {
+                    error = "Facade option value is empty.";
+                    return false;
+                }
+
+                switch (key)
+                {
+                    case "model":
+                        if (seenModel)
+                        {
+                            error = "Facade option model is duplicated.";
+                            return false;
+                        }
+
+                        seenModel = true;
+                        model = value;
+                        break;
+                    case "reasoning_effort":
+                        if (seenEffort)
+                        {
+                            error = "Facade option reasoning_effort is duplicated.";
+                            return false;
+                        }
+
+                        seenEffort = true;
+                        reasoningEffort = value;
+                        break;
+                    case "fast":
+                        if (seenFast)
+                        {
+                            error = "Facade option fast is duplicated.";
+                            return false;
+                        }
+
+                        if (value is not ("true" or "false"))
+                        {
+                            error = "Facade option fast is invalid.";
+                            return false;
+                        }
+
+                        seenFast = true;
+                        fast = value == "true";
+                        break;
+                    default:
+                        error = "Facade option key is unknown.";
+                        return false;
+                }
+            }
+
+            error = "Facade options fence is not closed.";
+            return false;
+        }
+
+        private static bool TrySkipBlankLines(string text, int index, out int contentIndex)
+        {
+            contentIndex = index;
+            while (TryReadLine(text, contentIndex, out var line, out var next))
+            {
+                if (line.Length != 0)
+                {
+                    return true;
+                }
+
+                if (next == contentIndex)
+                {
+                    return false;
+                }
+
+                contentIndex = next;
+            }
+
+            return false;
+        }
+
+        private static bool TryReadLine(string text, int index, out string line, out int nextIndex)
+        {
+            if (index >= text.Length)
+            {
+                line = string.Empty;
+                nextIndex = index;
+                return false;
+            }
+
+            var newline = text.IndexOf('\n', index);
+            if (newline < 0)
+            {
+                line = text[index..].TrimEnd('\r');
+                nextIndex = text.Length;
+                return true;
+            }
+
+            var raw = text[index..newline];
+            if (raw.EndsWith('\r'))
+            {
+                raw = raw[..^1];
+            }
+
+            line = raw;
+            nextIndex = newline + 1;
+            return true;
+        }
+    }
+
+    private sealed record RelayInvocation(
+        string Agent,
+        string Prompt,
+        string? Model,
+        string? ReasoningEffort,
+        bool? Fast,
+        IReadOnlyList<string>? Skills,
+        string? Error)
+    {
+        internal bool Succeeded => Error is null;
+
+        internal static RelayInvocation Fail(string agent, string error)
+        {
+            return new RelayInvocation(agent, string.Empty, null, null, null, null, error);
+        }
+    }
 }
 
 public class ProcessRunnerTests
