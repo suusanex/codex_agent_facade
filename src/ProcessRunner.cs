@@ -54,13 +54,24 @@ public sealed record ProcessRunRequest(
 public sealed class ProcessCompletionSignal
 {
     private readonly TaskCompletionSource _completed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private long _signaledAtTicks = -1;
 
     public bool IsSignaled => _completed.Task.IsCompletedSuccessfully;
+
+    public DateTimeOffset? SignaledAt
+    {
+        get
+        {
+            var ticks = Volatile.Read(ref _signaledAtTicks);
+            return ticks < 0 ? null : new DateTimeOffset(ticks, TimeSpan.Zero);
+        }
+    }
 
     public Task Task => _completed.Task;
 
     public void Notify()
     {
+        Interlocked.CompareExchange(ref _signaledAtTicks, DateTimeOffset.UtcNow.UtcTicks, -1);
         _completed.TrySetResult();
     }
 }
@@ -70,6 +81,36 @@ public sealed record ProcessRunResult(
     string StandardOutput,
     string StandardError,
     ProcessTerminationInfo? Termination = null);
+
+/// <summary>
+/// 打ち切ったあとも読取が残る。書き込みとスナップショットは同じロックで行い、未完了の読取は待たない。
+/// </summary>
+internal sealed class ProcessOutputBuffer
+{
+    private readonly object _gate = new();
+    private readonly StringBuilder _builder = new();
+
+    public void Append(string line)
+    {
+        lock (_gate)
+        {
+            if (_builder.Length > 0)
+            {
+                _builder.Append('\n');
+            }
+
+            _builder.Append(line);
+        }
+    }
+
+    public string Snapshot()
+    {
+        lock (_gate)
+        {
+            return _builder.ToString();
+        }
+    }
+}
 
 /// <summary>
 /// CLI processを開始できず、workerの処理が実行されていないことを示す。
@@ -179,8 +220,8 @@ public sealed class ProcessRunner : IProcessRunner
                         .GetByteCount(request.StandardInputText)));
 
         using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
-        var stdout = new StringBuilder();
-        var stderr = new StringBuilder();
+        var stdout = new ProcessOutputBuffer();
+        var stderr = new ProcessOutputBuffer();
 
         // 子は OnProcessStarted より前に session 記録を書くことがある。
         // 境界は監視開始時刻ではなく、起動直前の時刻にする。
@@ -251,14 +292,24 @@ public sealed class ProcessRunner : IProcessRunner
             var pendingIoTasks = new HashSet<Task>(ioTasks);
             while (pendingIoTasks.Count > 0)
             {
+                if (AcceptsInternalCompletion(request.Completion, process, exitTask))
+                {
+                    return await CompleteFromInternalSignalAsync(
+                        process,
+                        stdout,
+                        stderr,
+                        stdoutTask,
+                        stderrTask,
+                        exitTask,
+                        ioCancellation).ConfigureAwait(false);
+                }
+
                 var finished = completionTask is null
                     ? await Task.WhenAny([exitTask, .. pendingIoTasks]).ConfigureAwait(false)
                     : await Task.WhenAny([exitTask, completionTask, .. pendingIoTasks]).ConfigureAwait(false);
                 if (completionTask is not null && finished == completionTask)
                 {
-                    if (request.Completion!.IsSignaled
-                        && !exitTask.IsCompletedSuccessfully
-                        && !HasExited(process))
+                    if (AcceptsInternalCompletion(request.Completion, process, exitTask))
                     {
                         return await CompleteFromInternalSignalAsync(
                             process,
@@ -281,6 +332,18 @@ public sealed class ProcessRunner : IProcessRunner
 
                 if (finished == exitTask)
                 {
+                    if (AcceptsInternalCompletion(request.Completion, process, exitTask))
+                    {
+                        return await CompleteFromInternalSignalAsync(
+                            process,
+                            stdout,
+                            stderr,
+                            stdoutTask,
+                            stderrTask,
+                            exitTask,
+                            ioCancellation).ConfigureAwait(false);
+                    }
+
                     break;
                 }
 
@@ -293,26 +356,21 @@ public sealed class ProcessRunner : IProcessRunner
             }
 
             // 標準ストリームが先に閉じても、内部完了の通知が来るまでは終了だけを待たない。
-            if (completionTask is not null && !exitTask.IsCompleted)
+            if (completionTask is not null && !exitTask.IsCompleted && request.Completion?.IsSignaled != true)
             {
-                if (!request.Completion!.IsSignaled)
-                {
-                    await Task.WhenAny(exitTask, completionTask).ConfigureAwait(false);
-                }
+                await Task.WhenAny(exitTask, completionTask).ConfigureAwait(false);
+            }
 
-                if (request.Completion.IsSignaled
-                    && !exitTask.IsCompletedSuccessfully
-                    && !HasExited(process))
-                {
-                    return await CompleteFromInternalSignalAsync(
-                        process,
-                        stdout,
-                        stderr,
-                        stdoutTask,
-                        stderrTask,
-                        exitTask,
-                        ioCancellation).ConfigureAwait(false);
-                }
+            if (AcceptsInternalCompletion(request.Completion, process, exitTask))
+            {
+                return await CompleteFromInternalSignalAsync(
+                    process,
+                    stdout,
+                    stderr,
+                    stdoutTask,
+                    stderrTask,
+                    exitTask,
+                    ioCancellation).ConfigureAwait(false);
             }
 
             await exitTask.ConfigureAwait(false);
@@ -325,14 +383,48 @@ public sealed class ProcessRunner : IProcessRunner
             throw UnwrapProcessException(ex);
         }
 
-        return new ProcessRunResult(process.ExitCode, stdout.ToString(), stderr.ToString());
+        return new ProcessRunResult(process.ExitCode, stdout.Snapshot(), stderr.Snapshot());
+        }
+    }
+
+    /// <summary>
+    /// 通知がプロセス終了より先なら、終了済みでも出力回収は10秒で打ち切る。
+    /// 終了の方が先なら受理しない。
+    /// </summary>
+    private static bool AcceptsInternalCompletion(ProcessCompletionSignal? completion, Process process, Task exitTask)
+    {
+        if (completion is not { IsSignaled: true, SignaledAt: DateTimeOffset signaledAt })
+        {
+            return false;
+        }
+
+        if (!exitTask.IsCompleted && !HasExited(process))
+        {
+            return true;
+        }
+
+        if (!HasExited(process))
+        {
+            return false;
+        }
+
+        try
+        {
+            var exitAt = new DateTimeOffset(DateTime.SpecifyKind(process.ExitTime, DateTimeKind.Local)).ToUniversalTime();
+            return signaledAt <= exitAt;
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            // 終了時刻を確定できないときは、パイプ待ちを無期限にしない。
+            return true;
         }
     }
 
     private async Task<ProcessRunResult> CompleteFromInternalSignalAsync(
         Process process,
-        StringBuilder stdout,
-        StringBuilder stderr,
+        ProcessOutputBuffer stdout,
+        ProcessOutputBuffer stderr,
         Task stdoutTask,
         Task stderrTask,
         Task exitTask,
@@ -393,8 +485,8 @@ public sealed class ProcessRunner : IProcessRunner
 
         return new ProcessRunResult(
             exitCode,
-            stdout.ToString(),
-            stderr.ToString(),
+            stdout.Snapshot(),
+            stderr.Snapshot(),
             new ProcessTerminationInfo(status, outcome.OutputRecoveryCompleted));
     }
 
@@ -540,7 +632,7 @@ public sealed class ProcessRunner : IProcessRunner
 
     private static async Task ReadLinesAsync(
         Stream stream,
-        StringBuilder sink,
+        ProcessOutputBuffer sink,
         Action<string>? onLine,
         bool windowsCmdWrapper,
         IProcessEncodingProvider encodingProvider,
@@ -596,7 +688,7 @@ public sealed class ProcessRunner : IProcessRunner
 
     private static async Task ReadTextLinesAsync(
         StreamReader reader,
-        StringBuilder sink,
+        ProcessOutputBuffer sink,
         Action<string>? onLine,
         CancellationToken cancellationToken)
     {
@@ -608,11 +700,6 @@ public sealed class ProcessRunner : IProcessRunner
                 break;
             }
 
-            if (sink.Length > 0)
-            {
-                sink.Append('\n');
-            }
-
             sink.Append(line);
             onLine?.Invoke(line);
         }
@@ -620,17 +707,12 @@ public sealed class ProcessRunner : IProcessRunner
 
     private static void AppendDecodedLine(
         List<byte> lineBuffer,
-        StringBuilder sink,
+        ProcessOutputBuffer sink,
         Action<string>? onLine,
         bool windowsCmdWrapper,
         IProcessEncodingProvider encodingProvider)
     {
         var line = StderrDecoder.Decode(lineBuffer.ToArray(), windowsCmdWrapper, encodingProvider);
-        if (sink.Length > 0)
-        {
-            sink.Append('\n');
-        }
-
         sink.Append(line);
         onLine?.Invoke(line);
     }

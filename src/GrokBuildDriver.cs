@@ -160,6 +160,9 @@ public sealed class GrokBuildDriver
             throw failure;
         }
 
+        // runner が通知を受理しなかった自然終了は、救済確定で上書きしない。
+        watch.RevokeIfRunnerDidNotAccept(processResult.Termination);
+
         if (!watch.Confirmed && processResult.ExitCode != 0)
         {
             var message = SecretRedactor.RedactText(
@@ -195,14 +198,6 @@ public sealed class GrokBuildDriver
             throw;
         }
 
-        var termination = processResult.Termination;
-        if (watch.Confirmed && termination is null)
-        {
-            termination = new ProcessTerminationInfo(
-                processResult.ExitCode is null ? ProcessTerminationStatus.Unconfirmed : ProcessTerminationStatus.Exited,
-                processResult.ExitCode is not null);
-        }
-
         return new AgentRunResult(
             Agent: AgentFacade.GrokBuildAgent,
             SessionId: parsed.SessionId,
@@ -215,7 +210,7 @@ public sealed class GrokBuildDriver
             TextLogPath: runLog.TextLogPath,
             CompletionReason: watch.Confirmed ? InternalPromptDoneReason : null,
             CompletionEvidence: watch.Confirmed ? watch.Evidence : null,
-            ProcessTermination: watch.Confirmed ? termination : null);
+            ProcessTermination: watch.Confirmed ? processResult.Termination : null);
     }
 
     internal static List<string> BuildArguments(AgentRunRequest request)
@@ -489,6 +484,7 @@ internal sealed class GrokCompletionWatch
     private readonly string? _resumeSessionId;
     private readonly string? _reasoningEffort;
     private GrokLogCursor? _cursor;
+    private IProcessLifetime? _process;
     private int _confirmed;
     private bool _stopped;
 
@@ -511,6 +507,17 @@ internal sealed class GrokCompletionWatch
     public bool Confirmed => Volatile.Read(ref _confirmed) == 1;
 
     public GrokCompletionEvidence? Evidence { get; private set; }
+
+    public void RevokeIfRunnerDidNotAccept(ProcessTerminationInfo? termination)
+    {
+        if (termination is not null || Volatile.Read(ref _confirmed) == 0)
+        {
+            return;
+        }
+
+        Volatile.Write(ref _confirmed, 0);
+        Evidence = null;
+    }
 
     public void MarkProgress(DateTimeOffset now)
     {
@@ -537,6 +544,7 @@ internal sealed class GrokCompletionWatch
     {
         // 監視を始めた時刻だと、その前に出た今回の session 記録を過去分として落とす。
         var launchedAt = process.StartedAt;
+        _process = process;
         _activity.Start(launchedAt);
         if (process.Id <= 0)
         {
@@ -678,6 +686,12 @@ internal sealed class GrokCompletionWatch
             return success is not null;
         }
 
+        if (ProcessAlreadyExited())
+        {
+            Stop("Grok internal completion recovery was not used because the process had already exited.");
+            return true;
+        }
+
         if (_accumulator.FreezeIfNonEmpty() is null)
         {
             return false;
@@ -730,6 +744,24 @@ internal sealed class GrokCompletionWatch
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
+    }
+
+    private bool ProcessAlreadyExited()
+    {
+        if (_process is null)
+        {
+            return true;
+        }
+
+        try
+        {
+            return _process.HasExited;
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            return true;
+        }
     }
 
     private bool HasIgnoredEffort()

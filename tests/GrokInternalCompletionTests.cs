@@ -198,6 +198,32 @@ public class GrokInternalCompletionTests
     }
 
     [Fact]
+    public async Task AlreadyExitedProcessIsNotRescued()
+    {
+        using var harness = new GrokRescueHarness();
+        harness.Runner.ProcessLifetime.HasExited = true;
+        var run = harness.Start(Request());
+        await harness.StartedAsync();
+        harness.EmitReport();
+        harness.Append(MeasuredLog());
+        await harness.AdvanceUntilReadAsync(run, 1);
+        Assert.False(harness.Runner.LastRequest!.Completion!.IsSignaled);
+        harness.Runner.CompleteNaturally(new ProcessRunResult(1, """{"type":"text","data":"natural"}""", "exited"));
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => harness.AwaitRunAsync(run));
+        Assert.Equal("non_zero_exit", ex.Data[CliJson.FailureKindKey]);
+    }
+
+    [Fact]
+    public async Task UnacceptedRescueKeepsNaturalNonZeroExit()
+    {
+        using var harness = new GrokRescueHarness();
+        harness.Runner.CompletionResult = new ProcessRunResult(1, string.Empty, "exited");
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => harness.RescueAsync(Request(), MeasuredLog()));
+        Assert.Equal("non_zero_exit", ex.Data[CliJson.FailureKindKey]);
+        Assert.True(harness.Runner.LastRequest!.Completion!.IsSignaled);
+    }
+
+    [Fact]
     public async Task StopFailureKeepsTheReportAndOmitsExitCode()
     {
         using var harness = new GrokRescueHarness();
@@ -847,6 +873,21 @@ public class GrokUnifiedLogReaderTests
         var replaced = reader.Read(replacedCursor);
         Assert.Equal("replaced", replaced.Cursor.Problem);
 
+        File.WriteAllText(path, "alpha\n");
+        var sameLengthCursor = new FileGrokUnifiedLogReader(path).CaptureCursor();
+        Assert.NotNull(sameLengthCursor.Continuity);
+        File.WriteAllText(path, "bravo\n");
+        var sameLength = new FileGrokUnifiedLogReader(path).Read(sameLengthCursor);
+        Assert.Equal("replaced", sameLength.Cursor.Problem);
+        Assert.Empty(sameLength.Lines);
+
+        File.WriteAllText(path, "start\n");
+        var regrowthCursor = new FileGrokUnifiedLogReader(path).CaptureCursor();
+        File.WriteAllText(path, "other-session-start\ndone-for-old-prompt\n");
+        var regrown = new FileGrokUnifiedLogReader(path).Read(regrowthCursor);
+        Assert.Equal("replaced", regrown.Cursor.Problem);
+        Assert.Empty(regrown.Lines);
+
         File.WriteAllBytes(path, [0xFF, (byte)'\n']);
         var undecodable = new FileGrokUnifiedLogReader(path).Read(GrokLogCursor.At(0));
         Assert.Equal("unreadable", undecodable.Cursor.Problem);
@@ -935,6 +976,52 @@ public class GrokForcedStopTests
         Assert.Equal(ProcessTerminationStatus.Exited, outcome.Status);
         Assert.True(outcome.ExitObserved);
         Assert.False(outcome.OutputRecoveryCompleted);
+    }
+
+    [Fact]
+    public void SnapshotDuringAppendDoesNotTearOrThrow()
+    {
+        var buffer = new ProcessOutputBuffer();
+        var errors = 0;
+        var writers = Enumerable.Range(0, 8).Select(worker => Task.Run(() =>
+        {
+            for (var index = 0; index < 200; index++)
+            {
+                try
+                {
+                    buffer.Append($"line-{worker}-{index}");
+                }
+                catch (Exception ex)
+                {
+                    CliJson.TraceException(ex);
+                    Interlocked.Increment(ref errors);
+                }
+            }
+        })).ToArray();
+        var reader = Task.Run(() =>
+        {
+            for (var index = 0; index < 400; index++)
+            {
+                try
+                {
+                    foreach (var line in buffer.Snapshot().Split('\n', StringSplitOptions.RemoveEmptyEntries))
+                    {
+                        if (!line.StartsWith("line-", StringComparison.Ordinal) || line.Split('-').Length != 3)
+                        {
+                            Interlocked.Increment(ref errors);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    CliJson.TraceException(ex);
+                    Interlocked.Increment(ref errors);
+                }
+            }
+        });
+        Task.WaitAll([.. writers, reader]);
+        Assert.Equal(0, errors);
+        Assert.Equal(1600, buffer.Snapshot().Split('\n', StringSplitOptions.RemoveEmptyEntries).Length);
     }
 
     [Fact]
@@ -1150,6 +1237,106 @@ public class GrokProcessStopTests
         var result = await run.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Null(result.Termination);
         Assert.Equal(0, result.ExitCode);
+    }
+
+    [Fact]
+    public async Task RescueBeforeExitStillCapsOpenPipes()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var directory = Directory.CreateTempSubdirectory("caf-grok-rescue-first-").FullName;
+        var script = Path.Combine(directory, "hold.ps1");
+        await File.WriteAllTextAsync(script, """
+            Write-Output 'tick'
+            $pwsh = (Get-Process -Id $PID).Path
+            Start-Process -FilePath $pwsh -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30' -NoNewWindow
+            Start-Sleep -Seconds 30
+            exit 1
+            """, new UTF8Encoding(false));
+        var signal = new ProcessCompletionSignal();
+        var pid = 0;
+        var runner = new ProcessRunner(NullProcessJobGuard.Instance);
+        try
+        {
+            var result = await runner.RunAsync(
+                new ProcessRunRequest(
+                    script,
+                    [],
+                    directory,
+                    OnProcessStarted: process =>
+                    {
+                        pid = process.Id;
+                        signal.Notify();
+                    },
+                    Completion: signal),
+                CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(15));
+            Assert.NotNull(result.Termination);
+        }
+        finally
+        {
+            KillPid(pid);
+        }
+    }
+
+    [Fact]
+    public async Task ExitBeforeRescueKeepsTheNaturalNonZeroResult()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var directory = Directory.CreateTempSubdirectory("caf-grok-exit-first-").FullName;
+        var script = Path.Combine(directory, "hold.ps1");
+        await File.WriteAllTextAsync(script, """
+            Write-Output 'tick'
+            Start-Sleep -Seconds 1
+            $pwsh = (Get-Process -Id $PID).Path
+            Start-Process -FilePath $pwsh -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 4' -NoNewWindow
+            exit 1
+            """, new UTF8Encoding(false));
+        IProcessLifetime? lifetime = null;
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var signal = new ProcessCompletionSignal();
+        var pid = 0;
+        var runner = new ProcessRunner(NullProcessJobGuard.Instance);
+        try
+        {
+            var run = runner.RunAsync(
+                new ProcessRunRequest(
+                    script,
+                    [],
+                    directory,
+                    OnProcessStarted: process =>
+                    {
+                        lifetime = process;
+                        pid = process.Id;
+                        started.TrySetResult();
+                    },
+                    Completion: signal),
+                CancellationToken.None);
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var deadline = DateTime.UtcNow.AddSeconds(8);
+            while (lifetime is not null && !lifetime.HasExited && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(20);
+            }
+
+            Assert.True(lifetime!.HasExited);
+            // ExitTime の分解能より後に通知し、終了が先だったことを残す。
+            await Task.Delay(TimeSpan.FromSeconds(2));
+            signal.Notify();
+            var result = await run.WaitAsync(TimeSpan.FromSeconds(15));
+            Assert.Null(result.Termination);
+            Assert.Equal(1, result.ExitCode);
+        }
+        finally
+        {
+            KillPid(pid);
+        }
     }
 
     private static void KillPid(int pid)
