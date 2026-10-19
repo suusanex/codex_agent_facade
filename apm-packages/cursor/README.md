@@ -26,11 +26,13 @@ apm install "C:\path\to\codex_agent_facade\apm-packages\cursor" --target codex,a
 
 Codex 上で対象リポジトリを開いた状態で、Skill を指定して作業本文を書く。Skill より後の本文は Cursor CLI へ渡す作業 payload であり、Codex 自身への作業実行指示ではない。`working_directory` は今開いているリポジトリのパスにする。同じ Codex thread で続けて委譲するときは、新しい `request_id` を生成し、前回 completed result の `sessionId` を `session_id` に渡し、`working_directory` を含む required fields を毎回指定する。Cursor Driver は現在 `skills` を明示 invoke へ変換しないため、Cursor で Skill を明示実行させる場合はユーザー本文側に Cursor native 形式の `/skill-name` を含める。
 
+`$cursor` は親の委譲ヘッダであり、worker prompt にも `skills` にも入れない。`/cursor` を prompt へ追加しない。`facade-options` の有効キーは `model`, `reasoning_effort`, `fast` だけで、`skills` は未知キーとしてエラーにする。この relay は新規 job と継続では `skills` を渡さない。
+
 ```text
 $cursor このリポジトリの README に使い方を追記して。
 ```
 
-実行オプションは作業本文の前にある先頭 `facade-options` blockで指定する。先頭空行の後の最初の行が開始fenceである場合だけ、閉じるfenceまでをoptionとして読み、直後から末尾までをworker promptとして変更せず渡す。有効な行は `model: <識別子>`, `reasoning_effort: <token>`, `fast: true|false` の各1行まで。実行オプションが無い本文はすべて作業 prompt であり、本文中のモデル名は起動設定にしない。未知key、重複、空値、不正なboolean、未閉鎖fenceはtoolを呼ばずエラーとして扱う。`fast: false` は未指定と異なる明示値。Cursorはmodel必須で、effortまたはfastがあるときは実行直前のモデル一覧から識別子を1つ選び、重複は拒否する。Copilot/Grok Buildは独立fast指定をtrue/falseとも拒否する。agentごとのtokenとCLI mappingはrepository READMEを参照。
+実行オプションは作業本文の前にある先頭 `facade-options` blockで指定する。先頭空行の後の最初の行が開始fenceである場合だけ、閉じるfenceまでをoptionとして読み、直後から末尾までをworker promptとして変更せず渡す。有効な行は `model: <識別子>`, `reasoning_effort: <token>`, `fast: true|false` の各1行まで。実行オプションが無いときは委譲ヘッダより後ろの本文が作業 prompt であり、本文中のモデル名は起動設定にしない。未知key、重複、空値、不正なboolean、未閉鎖fenceはtoolを呼ばずエラーとして扱う。`fast: false` は未指定と異なる明示値。Cursorはmodel必須で、effortまたはfastがあるときは実行直前のモデル一覧から識別子を1つ選び、重複は拒否する。Copilot/Grok Buildは独立fast指定をtrue/falseとも拒否する。agentごとのtokenとCLI mappingはrepository READMEを参照。
 
     ```facade-options
     model: <model-id>
