@@ -29,7 +29,8 @@ public sealed class AgentTools
         [Description(McpPublicContract.AutoApproveDescription)] bool auto_approve = true,
         [Description(McpPublicContract.ModelDescription)] string? model = null,
         [Description(McpPublicContract.ReasoningEffortDescription)] string? reasoning_effort = null,
-        [Description(McpPublicContract.FastDescription)] bool? fast = null)
+        [Description(McpPublicContract.FastDescription)] bool? fast = null,
+        [Description(McpPublicContract.RunModeDescription)] string? run_mode = null)
     {
         var invocationId = Guid.NewGuid().ToString("N");
         var startedAt = Stopwatch.GetTimestamp();
@@ -47,7 +48,8 @@ public sealed class AgentTools
                     AutoApprove: auto_approve,
                     Model: model,
                     ReasoningEffort: reasoning_effort,
-                    Fast: fast));
+                    Fast: fast,
+                    RunMode: run_mode));
             LogCompleted("start_agent", invocationId, startedAt, snapshot, includeRequestId: true, agent: agent);
             return SerializePublic(snapshot);
         }

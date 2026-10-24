@@ -40,7 +40,8 @@ public sealed record AgentRunStartedInfo(
     IReadOnlyList<string> Arguments,
     string? Model = null,
     string? ReasoningEffort = null,
-    bool? Fast = null);
+    bool? Fast = null,
+    string? RunMode = null);
 
 /// <summary>
 /// ユーザー領域へ run log を作る。テストではディレクトリと TimeProvider を注入する。
@@ -211,7 +212,8 @@ internal sealed class AgentRunLog : IAgentRunLog
                 info.Arguments,
                 info.Model,
                 info.ReasoningEffort,
-                info.Fast),
+                info.Fast,
+                info.RunMode),
             AgentJson.Options);
         var skills = info.Skills is null || info.Skills.Count == 0
             ? ""
@@ -224,6 +226,7 @@ internal sealed class AgentRunLog : IAgentRunLog
             + " model=" + (info.Model ?? "")
             + " reasoning_effort=" + (info.ReasoningEffort ?? "")
             + " fast=" + (info.Fast?.ToString(CultureInfo.InvariantCulture) ?? "")
+            + " runMode=" + (info.RunMode ?? "")
             + " fileName=" + info.FileName
             + " prompt=" + info.Prompt;
         WriteEnvelope("facade", "started", data, human);
@@ -323,17 +326,22 @@ internal sealed class AgentRunLog : IAgentRunLog
                 result.TextLogPath,
                 result.CompletionReason,
                 result.CompletionEvidence,
-                result.ProcessTermination),
+                result.ProcessTermination,
+                result.OutputKind,
+                result.PlanPath),
             AgentJson.Options);
         var exitCode = result.ExitCode?.ToString(CultureInfo.InvariantCulture) ?? "omitted";
         var reason = result.CompletionReason is null
             ? string.Empty
             : " completionReason=" + result.CompletionReason;
+        var planPath = result.PlanPath is null
+            ? string.Empty
+            : " planPath=" + result.PlanPath;
         WriteEnvelope(
             "facade",
             "completed",
             data,
-            "completed exitCode=" + exitCode + " sessionId=" + result.SessionId + reason);
+            "completed exitCode=" + exitCode + " sessionId=" + result.SessionId + reason + " outputKind=" + result.OutputKind + planPath);
     }
 
     public void WriteFailed(Exception exception)
@@ -766,7 +774,8 @@ internal sealed class AgentRunLog : IAgentRunLog
         IReadOnlyList<string> Arguments,
         string? Model,
         string? ReasoningEffort,
-        bool? Fast);
+        bool? Fast,
+        string? RunMode);
 
     private sealed record ProcessLinePayload(string Stream, string Line);
 
@@ -779,7 +788,9 @@ internal sealed class AgentRunLog : IAgentRunLog
         string TextLogPath,
         string? CompletionReason = null,
         GrokCompletionEvidence? CompletionEvidence = null,
-        ProcessTerminationInfo? ProcessTermination = null);
+        ProcessTerminationInfo? ProcessTermination = null,
+        string? OutputKind = null,
+        string? PlanPath = null);
 
     private sealed record FailedPayload(string ExceptionType, string Message, string Detail);
 

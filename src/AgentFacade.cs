@@ -8,6 +8,7 @@ using System.Text.RegularExpressions;
 /// Model は agent 固有のモデル識別子である。null、空、空白のみは未指定で、Driver はモデル引数を付けない。
 /// Facade はモデル名の対応表、自動選択、別モデルへの置換を持たない。
 /// ReasoningEffort と Fast は起動設定であり、prompt 本文からは推測しない。
+/// RunMode が null のときは従来の通常実行である。指定できる値は plan だけである。
 /// </summary>
 public sealed record AgentRunRequest(
     string Agent,
@@ -18,7 +19,8 @@ public sealed record AgentRunRequest(
     bool AutoApprove = true,
     string? Model = null,
     string? ReasoningEffort = null,
-    bool? Fast = null);
+    bool? Fast = null,
+    string? RunMode = null);
 
 /// <summary>
 /// 強制終了の公開状態。例外本文やログ行は含めない。
@@ -63,7 +65,8 @@ public sealed record AgentRunResult(
     string OutputKind = "assistant_transcript",
     string? CompletionReason = null,
     GrokCompletionEvidence? CompletionEvidence = null,
-    ProcessTerminationInfo? ProcessTermination = null);
+    ProcessTerminationInfo? ProcessTermination = null,
+    string? PlanPath = null);
 
 internal sealed record ParsedCliOutput(
     string SessionId,
@@ -268,6 +271,19 @@ public sealed class AgentFacade
             && !GitHubCopilotDriver.SupportedReasoningEfforts.Contains(request.ReasoningEffort, StringComparer.Ordinal))
         {
             throw new ArgumentException("GitHub Copilot reasoning_effort must be one of: none, minimal, low, medium, high, xhigh, max.");
+        }
+
+        if (request.RunMode is not null)
+        {
+            if (!string.Equals(request.RunMode, "plan", StringComparison.Ordinal))
+            {
+                throw new ArgumentException("run_mode must be omitted or \"plan\".");
+            }
+
+            if (request.Agent.Trim() != GrokBuildAgent)
+            {
+                throw new ArgumentException("The " + request.Agent.Trim() + " agent does not support run_mode plan.");
+            }
         }
     }
 }

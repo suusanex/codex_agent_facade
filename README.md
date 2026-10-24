@@ -149,8 +149,9 @@ distinct な agent job / distinct な `start_agent` ごとに、呼び出し側�
 | `model` | いいえ | agent固有のmodel ID。指定時に各CLIのmodel選択へ渡す。省略、空、空白のみではCLI model optionを付けない。Cursorは独立した`reasoning_effort` / `fast`を指定された場合に既存parameter形式のmodel IDを合成する。prompt本文中のモデル名は起動設定にしない。改行を含む値は起動前エラー。空白以外のmodelに含まれるその他の制御文字も拒否する。session継続時も前回のmodelは継承しない |
 | `reasoning_effort` | いいえ | provider native な effort token。未指定はCLI既定を保つ。Cursorは`model`必須、Copilotは`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`、Grok BuildはCLIが認識するcanonicalまたはmodel固有token、CodexはCLI設定へ渡す。空や安全でないtokenは起動前エラー。Grokが無視したと警告した場合も失敗 |
 | `fast` | いいえ | nullable boolean。未指定はCLIの現状を保ち、`true`はfast、`false`は明示的な非-fast/default tier。CodexとCursorは独立設定を持つ。CopilotとGrok Buildは独立設定を持たず、`true`/`false`とも起動前エラー。モデルID自体の`-fast` variantは引き続き`model`で指定できる |
+| `run_mode` | いいえ | 省略時は従来の通常実行。指定できる値は `plan` だけ。Grok Build の native plan mode でプランを作り、実装には進まない。他の agent は起動前に失敗する。prompt 本文からは推測しない。`auto_approve` とは独立 |
 
-`reasoning_effort` と `fast` は `model` と独立した実行オプションで、prompt本文から推測しない。Codexは `model_reasoning_effort` と `service_tier` を明示し、`fast=false` は `service_tier=default` を渡す。明示した `fast=true` に対し、Codex CLIがpriority tierをomitすると報告する既知のwarningを返した場合は `option_not_applied` で失敗する。warningがないことはbackendがtierを提供した証明ではない。`auto_approve=false` はCodexで `read-only` sandboxと `approval_policy=never` を使うため、承認質問は表示されない。Cursorは `reasoning_effort` または `fast` を指定したとき、実行直前の `cursor-agent models` から同じ基底の識別子を1つ選ぶ。一致が無ければ起動せず、別系統のモデルへは替えない。両方を省略した `model` はそのまま渡す。モデル文字列内の effort や `-fast` と独立fieldの重複は拒否する。各fieldはsession継続とexact retryでも毎回指定する。`null/null` は既存request fingerprintを維持し、新たに指定したfieldはrequest fingerprintへ含める。
+`reasoning_effort` と `fast` は `model` と独立した実行オプションで、prompt本文から推測しない。Codexは `model_reasoning_effort` と `service_tier` を明示し、`fast=false` は `service_tier=default` を渡す。明示した `fast=true` に対し、Codex CLIがpriority tierをomitすると報告する既知のwarningを返した場合は `option_not_applied` で失敗する。warningがないことはbackendがtierを提供した証明ではない。`auto_approve=false` はCodexで `read-only` sandboxと `approval_policy=never` を使うため、承認質問は表示されない。Cursorは `reasoning_effort` または `fast` を指定したとき、実行直前の `cursor-agent models` から同じ基底の識別子を1つ選ぶ。一致が無ければ起動せず、別系統のモデルへは替えない。両方を省略した `model` はそのまま渡す。モデル文字列内の effort や `-fast` と独立fieldの重複は拒否する。各fieldはsession継続とexact retryでも毎回指定する。`null/null` は既存request fingerprintを維持し、新たに指定したfieldはrequest fingerprintへ含める。`run_mode` 未指定は既存 fingerprint を維持する。同じ `request_id` で `run_mode` だけが違う再試行は別 request として拒否する。
 
 戻り JSON:
 
@@ -172,7 +173,8 @@ distinct な agent job / distinct な `start_agent` ごとに、呼び出し側�
 - `sessionId`（CLI が明示した session フィールド、または Copilot の `--resume=` hint。任意 UUID は使わない。読めなければ空）
 - `exitCode`（取得できた子プロセスの終了コードだけ。未取得なら省略し、0 は作らない）
 - `outputText`
-- `outputKind`（`final_response` または `assistant_transcript`）
+- `outputKind`（`final_response`、`assistant_transcript`、または plan 成功時の `plan`）
+- `planPath`（`outputKind` が `plan` のとき。`working_directory` からの相対パス `.codex-agent-facade/plans/<sessionId>.md`。workspace 上のファイルが正本）
 - `completionReason`（Grok Build を内部ログで回収したときだけ `grok_internal_prompt_done`。それ以外は省略）
 - `completionEvidence`（回収時の PID、session ID、prompt ID、完了時刻、Grok バージョン）
 - `processTermination`（回収時の停止状態 `exited` / `failed` / `unconfirmed` と、stdout/stderr の回収が終わったかを示す boolean）
@@ -305,7 +307,7 @@ apm install "C:\path\to\codex_agent_facade\apm-packages\cursor" --target codex,a
 apm install "C:\path\to\codex_agent_facade\apm-packages\codex" --target codex,agent-skills
 ```
 
-展開先は `.agents/skills/github-copilot/`、`.agents/skills/grok-build/`、`.agents/skills/cursor/`、`.agents/skills/codex/`。Codex 上では対応する `$github-copilot` / `$grok-build` / `$cursor` / `$codex` Skill から本文をFacadeへ渡し、結果を中継する。ユーザー message は委譲ヘッダ、Facade options、委譲本文、委譲先 SKILL に分かれる。`$github-copilot` 等の呼び出しトークンは親が relay を開始する委譲ヘッダであり、worker prompt にも `skills` にも入れない。同じ名前を `agent` に指定することと `skills` に入れることは別であり、relay は後者をしない。作業本文の前に実行オプションを置く場合は、委譲ヘッダより後ろで先頭の空行を除く最初の行を `facade-options` 開始フェンスとし、閉じるフェンスまでに `model`, `reasoning_effort`, `fast` を各1行まで記述する。`skills` はこのフェンスのキーではない。フェンス後の本文だけがworker promptで、内容を変更しない。実行オプションが無ければ委譲ヘッダより後ろの本文をpromptとして渡し、設定をpromptから推測しない。relay は新規 job と継続では `skills` を渡さない。直接 `start_agent` を呼ぶときの `skills` は、呼び出し側が引数で明示した場合だけ既存の Driver 変換に従う。prompt 本文に現れたモデル名から起動設定を推測しない。`fast: false` は明示値である。agent別の対応値・重複・エラー条件は各Skillおよび上記 `start_agent` 表を参照。`model:` に指定するCLI識別子一覧は [Agent モデル識別子一覧](docs/agent-model-ids.md) を参照。Skill 無しで `start_agent` / `wait_agent_job` を直接呼ぶ場合、呼び出し側は限定したworker promptを作り、設定を各引数で渡してよい。`get_agent_job` は明示照会・復旧・診断用である。
+展開先は `.agents/skills/github-copilot/`、`.agents/skills/grok-build/`、`.agents/skills/cursor/`、`.agents/skills/codex/`。Codex 上では対応する `$github-copilot` / `$grok-build` / `$cursor` / `$codex` Skill から本文をFacadeへ渡し、結果を中継する。ユーザー message は委譲ヘッダ、Facade options、委譲本文、委譲先 SKILL に分かれる。`$github-copilot` 等の呼び出しトークンは親が relay を開始する委譲ヘッダであり、worker prompt にも `skills` にも入れない。同じ名前を `agent` に指定することと `skills` に入れることは別であり、relay は後者をしない。作業本文の前に実行オプションを置く場合は、委譲ヘッダより後ろで先頭の空行を除く最初の行を `facade-options` 開始フェンスとし、閉じるフェンスまでに `model`, `reasoning_effort`, `fast` を各1行まで記述する。コロンを含まない行はカンマ区切りの presence flag で、`plan` と `fast` を書ける。`fast` フラグは在るときだけ true で、無いときは送らない。`plan` は Grok Build では `run_mode=plan` になり、他の agent では `start_agent` を呼ばない。`plan` が無いときは `run_mode` を渡さない。`skills` はこのフェンスのキーではない。フェンス後の本文だけがworker promptで、内容を変更しない。実行オプションが無ければ委譲ヘッダより後ろの本文をpromptとして渡し、設定をpromptから推測しない。relay は新規 job と継続では `skills` を渡さない。直接 `start_agent` を呼ぶときの `skills` は、呼び出し側が引数で明示した場合だけ既存の Driver 変換に従う。prompt 本文に現れたモデル名から起動設定を推測しない。`fast: false` は明示値である。agent別の対応値・重複・エラー条件は各Skillおよび上記 `start_agent` 表を参照。`model:` に指定するCLI識別子一覧は [Agent モデル識別子一覧](docs/agent-model-ids.md) を参照。Skill 無しで `start_agent` / `wait_agent_job` を直接呼ぶ場合、呼び出し側は限定したworker promptを作り、設定を各引数で渡してよい。`get_agent_job` は明示照会・復旧・診断用である。
 
 更新・削除:
 
@@ -325,10 +327,16 @@ GitHub Copilot（プロセス cwd = `working_directory`）:
 <UTF-8 prompt source> | copilot --output-format json [--allow-all] [--model <model>] [--resume <session_id>]
 ```
 
-Grok Build:
+Grok Build（`run_mode` 未指定）:
 
 ```text
 grok --no-auto-update -p <prompt> --cwd <working_directory> --output-format streaming-json [--always-approve] [--model <model>] [--resume <session_id>]
+```
+
+Grok Build（`run_mode=plan`）:
+
+```text
+grok agent --no-leader [--always-approve] [--model <model>] stdio
 ```
 
 Cursor CLI（プロセス cwd = `working_directory`。実行ファイル名は Unix では `cursor-agent`、Windows では `cursor-agent.ps1`）:
@@ -343,7 +351,7 @@ Codex CLI（process cwd = `working_directory`。promptはstdinへ渡す）:
 codex exec [resume] --json --skip-git-repo-check -c approval_policy="never" -c sandbox_mode="workspace-write|read-only" [--model <model>] [-c model_reasoning_effort="<effort>"] [-c service_tier="priority|default"] -
 ```
 
-GitHub Copilotは指定時に `--reasoning-effort <token>`、Grok Buildは `--reasoning-effort <token>`、Codexは `codex exec [resume] --json -c model_reasoning_effort="<token>" -c service_tier="priority|default"` を使う。Codexへのpromptはstdinから渡し、resumeでもworking directoryはprocess cwdで指定する。resume時にCLIが返したsession IDと要求したIDが異なる場合は `session_mismatch` で失敗し、新規sessionの成功へfallbackしない。未指定のoptionはCLIへ渡さない。Codex CLIを含む実推論で `fast=true` の有効性や提供tierはこの変更では実測していない。`fast=false` のCLI設定値はテストとCodex CLI初期化ログで確認するが、backendが実際に提供したtierの証明ではない。Fast tierはモデル/プランごとに料金・利用条件が異なりうるため、指定モデルのprovider表示を確認する。
+GitHub Copilotは指定時に `--reasoning-effort <token>`、Grok Buildの通常実行は `--reasoning-effort <token>`、Codexは `codex exec [resume] --json -c model_reasoning_effort="<token>" -c service_tier="priority|default"` を使う。`run_mode=plan` の Grok Build は headless の `-p` を使わない。`grok agent stdio` で native plan mode を指定し、`_x.ai/exit_plan_mode` の `planContent` を受け取って `abandoned` を返し、実装ターンへ進まない。プランは `<working_directory>/.codex-agent-facade/plans/<sessionId>.md` に保存する。model と reasoning_effort は `session/set_config_option` の文字列値で適用し、currentValue が要求と違えば `option_not_applied` で失敗する。プラン本文を得られない場合は成功にせず、既存ファイルを空で上書きしない。Codexへのpromptはstdinから渡し、resumeでもworking directoryはprocess cwdで指定する。resume時にCLIが返したsession IDと要求したIDが異なる場合は `session_mismatch` で失敗し、新規sessionの成功へfallbackしない。未指定のoptionはCLIへ渡さない。Codex CLIを含む実推論で `fast=true` の有効性や提供tierはこの変更では実測していない。`fast=false` のCLI設定値はテストとCodex CLI初期化ログで確認するが、backendが実際に提供したtierの証明ではない。Fast tierはモデル/プランごとに料金・利用条件が異なりうるため、指定モデルのprovider表示を確認する。
 
 `--allow-all` / `--always-approve` / `--force` は `auto_approve=true` のときだけ付ける。Copilot は全OSで PATH 上の `copilot` を選び、`--prompt` は使わず、Skill付き完全promptをUTF-8 stdinへ渡す。GitHub公式の [programmatic usage](https://docs.github.com/en/copilot/how-tos/copilot-cli/automate-copilot-cli/run-cli-programmatically) に従う。Windowsの`copilot.CMD`は汎用cmd経路でstdin handleをchildへ継承し、PATH上で`copilot.exe`が先に解決される環境では通常のnative経路を使う。npm shim内容やnpm loaderの解析は行わない。Cursor は PATH 上の `cursor-agent` を使う。同梱の `agent` は Grok Build の `agent` と衝突するため使わない。Windows では公式の `cursor-agent.ps1` を `pwsh -File` で起動する。`cursor-agent.cmd` は cmd が CR/LF を引数へ渡せないため使わない。
 
