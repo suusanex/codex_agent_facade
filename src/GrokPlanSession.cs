@@ -132,7 +132,7 @@ internal static class GrokPlanArtifact
 internal readonly record struct GrokPlanOutcome(string SessionId, string Content);
 
 /// <summary>
-/// initialize、session/new または session/load、config、plan mode、prompt、exit_plan_mode の abandoned までを行う。
+/// initialize、session/new または session/load、config、plan mode、prompt、exit_plan_mode のあと session/cancel までを行う。
 /// 1.0.70 の session/set_config_option は value を JSON 文字列で受け、object 形式は Invalid params で拒否する。
 /// session/load の result は sessionId を返さないことがある。返った値が要求と違えば失敗する。
 /// </summary>
@@ -421,7 +421,7 @@ internal static class GrokPlanSession
                 cancellationToken).ConfigureAwait(false);
 
             string? plan = null;
-            var abandoned = false;
+            var cancelSent = false;
             while (true)
             {
                 var incoming = await ReadRequiredAsync(cancellationToken).ConfigureAwait(false);
@@ -431,12 +431,12 @@ internal static class GrokPlanSession
                 {
                     if (root.TryGetProperty("id", out var reverseId) && reverseId.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined)
                     {
-                        plan = await HandleReverseAsync(root, plan, abandoned, cancellationToken).ConfigureAwait(false);
-                        abandoned = true;
+                        plan = await HandleReverseAsync(root, sessionId, cancelSent, cancellationToken).ConfigureAwait(false);
+                        cancelSent = true;
                     }
                     else
                     {
-                        RejectToolCallAfterAbandon(root, abandoned);
+                        RejectToolCallAfterCancel(root, cancelSent);
                     }
 
                     continue;
@@ -455,7 +455,7 @@ internal static class GrokPlanSession
                 if (!root.TryGetProperty("result", out var result)
                     || !result.TryGetProperty("stopReason", out var stopReason)
                     || stopReason.ValueKind != JsonValueKind.String
-                    || stopReason.GetString() != "end_turn")
+                    || stopReason.GetString() != "cancelled")
                 {
                     var observed = result.ValueKind == JsonValueKind.Object
                         && result.TryGetProperty("stopReason", out var actual)
@@ -475,21 +475,23 @@ internal static class GrokPlanSession
 
         private async Task<string?> HandleReverseAsync(
             JsonElement root,
-            string? plan,
-            bool abandoned,
+            string sessionId,
+            bool cancelSent,
             CancellationToken cancellationToken)
         {
             var method = root.GetProperty("method").GetString();
             if (method is ExitPlanMethod or ExitPlanMethodAlias)
             {
-                if (abandoned)
+                if (cancelSent)
                 {
-                    await WriteAsync(Abandoned(root.GetProperty("id")), cancellationToken).ConfigureAwait(false);
+                    // abandoned を返すと 1.0.70 は同じ prompt を default mode で続ける。二度目も答えずに失敗させる。
                     throw Fail("internal_error", "Grok Build plan mode requested exit_plan_mode more than once.");
                 }
 
                 var content = ReadPlanContent(root);
-                await WriteAsync(Abandoned(root.GetProperty("id")), cancellationToken).ConfigureAwait(false);
+                // 1.0.70 は id 付き session/cancel を -32601 で拒否する。notification だけが
+                // 未応答の exit_plan_mode を残したまま stopReason cancelled で prompt を終える。
+                await WriteAsync(Cancel(sessionId), cancellationToken).ConfigureAwait(false);
                 return content;
             }
 
@@ -500,14 +502,14 @@ internal static class GrokPlanSession
             throw Fail("internal_error", "Grok Build plan mode made an unsupported request '" + (method ?? "") + "'.");
         }
 
-        private static void RejectToolCallAfterAbandon(JsonElement root, bool abandoned)
+        private static void RejectToolCallAfterCancel(JsonElement root, bool cancelSent)
         {
-            if (!abandoned || !IsNewToolCall(root))
+            if (!cancelSent || !IsNewToolCall(root))
             {
                 return;
             }
 
-            throw Fail("internal_error", "Grok Build plan mode started a tool call after the plan was abandoned.");
+            throw Fail("internal_error", "Grok Build plan mode started a tool call after the plan was cancelled.");
         }
 
         private async Task RejectReverseOrIgnoreAsync(JsonElement root, CancellationToken cancellationToken)
@@ -627,9 +629,9 @@ internal static class GrokPlanSession
                 + ",\"params\":" + paramsJson + "}";
         }
 
-        private static string Abandoned(JsonElement id)
+        private static string Cancel(string sessionId)
         {
-            return "{\"jsonrpc\":\"2.0\",\"id\":" + id.GetRawText() + ",\"result\":{\"outcome\":\"abandoned\"}}";
+            return "{\"jsonrpc\":\"2.0\",\"method\":\"session/cancel\",\"params\":{\"sessionId\":" + Quote(sessionId) + "}}";
         }
 
         private static bool IdEquals(JsonElement root, int expected)
