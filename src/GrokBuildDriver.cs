@@ -314,10 +314,15 @@ public sealed class GrokBuildDriver
             throw PlanFailure("internal_error", "Grok session id is not a safe path segment.");
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         IGrokAcpProcess process;
         try
         {
-            process = _acpProcesses.Start(new GrokAcpStartInfo("grok", arguments, request.WorkingDirectory));
+            process = _acpProcesses.Start(new GrokAcpStartInfo(
+                "grok",
+                arguments,
+                request.WorkingDirectory,
+                line => runLog.WriteProcessLine("stderr", line)));
         }
         catch (ProcessStartException ex)
         {
@@ -326,6 +331,7 @@ public sealed class GrokBuildDriver
             throw;
         }
 
+        AgentRunResult result;
         await using (process)
         {
             runLog.WriteLaunch(process.Launch);
@@ -349,7 +355,7 @@ public sealed class GrokBuildDriver
 
             cancellationToken.ThrowIfCancellationRequested();
             GrokPlanArtifact.Write(request.WorkingDirectory, outcome.SessionId, outcome.Content);
-            return new AgentRunResult(
+            result = new AgentRunResult(
                 Agent: AgentFacade.GrokBuildAgent,
                 SessionId: outcome.SessionId,
                 ExitCode: null,
@@ -361,6 +367,13 @@ public sealed class GrokBuildDriver
                 TextLogPath: runLog.TextLogPath,
                 PlanPath: GrokPlanArtifact.RelativePath(outcome.SessionId));
         }
+
+        if (!process.ExitObserved)
+        {
+            throw PlanFailure("internal_error", "Grok Build plan mode did not exit after termination.");
+        }
+
+        return result;
     }
 
     private static InvalidOperationException PlanFailure(string kind, string message)

@@ -1110,6 +1110,29 @@ public class AgentJobServiceTests
     }
 
     [Fact]
+    public async Task TerminalPersistFailureKeepsTheJobRegistered()
+    {
+        var store = Directory.CreateTempSubdirectory("caf-jobs-").FullName;
+        var service = CreateService(out var runner, grokText: "done", store);
+        runner.Gate = NewGate();
+        var started = service.Start("req-terminal-persist", Grok("hello"));
+        var path = Directory.EnumerateFiles(store, "req-*.json").Single();
+        File.Delete(path);
+        Directory.CreateDirectory(path);
+        runner.Gate.SetResult(true);
+
+        var finished = await service.WaitAsync(started.JobId, 30, CancellationToken.None);
+        Assert.Equal(AgentJobStatus.Failed, finished.Status);
+        Assert.NotEqual(AgentJobService.InterruptedError, finished.Error);
+        Assert.Equal(started.JobId, service.Get(started.JobId).JobId);
+
+        var retry = service.Start("req-terminal-persist", Grok("hello"));
+        Assert.Equal(started.JobId, retry.JobId);
+        Assert.Equal(AgentJobStatus.Failed, retry.Status);
+        Assert.Equal(1, runner.CallCount);
+    }
+
+    [Fact]
     public async Task CancelWithoutDiskRecordKeepsRequestFingerprint()
     {
         var store = Directory.CreateTempSubdirectory("caf-jobs-").FullName;

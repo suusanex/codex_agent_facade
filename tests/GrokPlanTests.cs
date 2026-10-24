@@ -246,6 +246,87 @@ public class GrokPlanSessionTests
     }
 
     [Fact]
+    public async Task ModelChangeUsesTheUpdatedReasoningEffortList()
+    {
+        using var directory = new TempWorkspace();
+        var refreshed = new ScriptedGrokAcpFactory
+        {
+            Script = new ScriptedGrokPlanScript { Effort = "low", EffortAfterModelSet = "high" },
+        };
+        await RunAsync(Request(directory.Path, model: "grok-4.5", effort: "low"), refreshed, new RecordingProcessRunner());
+        var written = string.Join("\n", refreshed.Last!.Written);
+        Assert.Contains("\"configId\":\"model\"", written, StringComparison.Ordinal);
+        Assert.Contains("\"configId\":\"reasoning_effort\"", written, StringComparison.Ordinal);
+        Assert.Contains("\"value\":\"low\"", written, StringComparison.Ordinal);
+
+        var dropped = new ScriptedGrokAcpFactory
+        {
+            Script = new ScriptedGrokPlanScript { OmitEffortAfterModel = true },
+        };
+        var droppedDirectory = Directory.CreateTempSubdirectory("caf-plan-effort-");
+        try
+        {
+            var droppedFailure = await Assert.ThrowsAsync<InvalidOperationException>(() => RunAsync(
+                Request(droppedDirectory.FullName, model: "grok-4.5", effort: "low"),
+                dropped,
+                new RecordingProcessRunner()));
+            Assert.Equal("option_not_applied", droppedFailure.Data[CliJson.FailureKindKey]);
+            Assert.Contains("reasoning_effort", droppedFailure.Message, StringComparison.Ordinal);
+            Assert.False(Directory.Exists(Path.Combine(droppedDirectory.FullName, ".codex-agent-facade")));
+        }
+        finally
+        {
+            droppedDirectory.Delete(true);
+        }
+    }
+
+    [Fact]
+    public async Task CancelledPlanDoesNotStartTheProcess()
+    {
+        using var directory = new TempWorkspace();
+        var factory = new ScriptedGrokAcpFactory();
+        var runner = new RecordingProcessRunner();
+        var driver = new GrokBuildDriver(runner, TimeProvider.System, FileGrokUnifiedLogReader.CreateDefault(), factory);
+        await using var log = TestRunLogs.CreateLog();
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => driver.RunAsync(
+            Request(directory.Path),
+            log,
+            null,
+            cancelled.Token));
+        Assert.Empty(factory.Starts);
+        Assert.False(File.Exists(directory.PlanFile(SessionA)));
+    }
+
+    [Fact]
+    public async Task PlanFailureWritesStderrToTheRunLog()
+    {
+        using var directory = new TempWorkspace();
+        var factory = new ScriptedGrokAcpFactory
+        {
+            Script = new ScriptedGrokPlanScript
+            {
+                PlanContent = " ",
+                StandardError = "not authenticated",
+            },
+        };
+        var runner = new RecordingProcessRunner();
+        var driver = new GrokBuildDriver(runner, TimeProvider.System, FileGrokUnifiedLogReader.CreateDefault(), factory);
+        await using var log = TestRunLogs.CreateLog();
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => driver.RunAsync(
+            Request(directory.Path),
+            log,
+            null,
+            CancellationToken.None));
+        Assert.Equal("internal_error", failure.Data[CliJson.FailureKindKey]);
+        Assert.Contains("not authenticated", TestRunLogs.ReadShared(log.EventsPath), StringComparison.Ordinal);
+        Assert.False(File.Exists(directory.PlanFile(SessionA)));
+    }
+
+    [Fact]
     public async Task CliPlanJsonReturnsPlanFieldsAndUnknownModeIsInvalid()
     {
         using var directory = new TempWorkspace();
@@ -397,6 +478,10 @@ internal sealed class ScriptedGrokPlanScript
 
     public bool OmitEffortOption { get; set; }
 
+    public string? EffortAfterModelSet { get; set; }
+
+    public bool OmitEffortAfterModel { get; set; }
+
     public bool MismatchAppliedValue { get; set; }
 
     public string StandardError { get; set; } = "";
@@ -413,7 +498,7 @@ internal sealed class ScriptedGrokAcpFactory : IGrokAcpProcessFactory
     public IGrokAcpProcess Start(GrokAcpStartInfo info)
     {
         Starts.Add(info);
-        Last = new ScriptedGrokAcpPeer(Script);
+        Last = new ScriptedGrokAcpPeer(Script, info.OnStandardError);
         return Last;
     }
 }
@@ -421,13 +506,15 @@ internal sealed class ScriptedGrokAcpFactory : IGrokAcpProcessFactory
 internal sealed class ScriptedGrokAcpPeer : IGrokAcpProcess
 {
     private readonly ScriptedGrokPlanScript _script;
+    private readonly Action<string>? _onStandardError;
     private readonly Channel<string> _inbound = Channel.CreateUnbounded<string>();
     private readonly List<string> _responses = new();
     private string? _promptId;
 
-    public ScriptedGrokAcpPeer(ScriptedGrokPlanScript script)
+    public ScriptedGrokAcpPeer(ScriptedGrokPlanScript script, Action<string>? onStandardError)
     {
         _script = script;
+        _onStandardError = onStandardError;
     }
 
     public List<string> Written { get; } = new();
@@ -441,6 +528,8 @@ internal sealed class ScriptedGrokAcpPeer : IGrokAcpProcess
         ["agent", "stdio"],
         ["agent", "stdio"],
         false);
+
+    public bool ExitObserved => true;
 
     public Task WriteLineAsync(string line, CancellationToken cancellationToken)
     {
@@ -497,8 +586,13 @@ internal sealed class ScriptedGrokAcpPeer : IGrokAcpProcess
                 var requested = root.GetProperty("params").GetProperty("value").GetString() ?? string.Empty;
                 var applied = _script.MismatchAppliedValue ? "wrong" : requested;
                 var model = configId == "model" ? applied : _script.Model;
-                var effort = configId == "reasoning_effort" ? applied : _script.Effort;
-                Enqueue("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{\"configOptions\":[{\"id\":\"model\",\"currentValue\":" + GrokPlanSession.Quote(model) + "},{\"id\":\"reasoning_effort\",\"currentValue\":" + GrokPlanSession.Quote(effort) + "}]}}");
+                var effort = configId == "reasoning_effort"
+                    ? applied
+                    : _script.EffortAfterModelSet ?? _script.Effort;
+                var options = configId == "model" && _script.OmitEffortAfterModel
+                    ? "[{\"id\":\"model\",\"currentValue\":" + GrokPlanSession.Quote(model) + "}]"
+                    : "[{\"id\":\"model\",\"currentValue\":" + GrokPlanSession.Quote(model) + "},{\"id\":\"reasoning_effort\",\"currentValue\":" + GrokPlanSession.Quote(effort) + "}]";
+                Enqueue("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{\"configOptions\":" + options + "}}");
                 break;
             case "session/set_mode":
                 Enqueue("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{}}");
@@ -544,6 +638,14 @@ internal sealed class ScriptedGrokAcpPeer : IGrokAcpProcess
 
     public ValueTask DisposeAsync()
     {
+        if (!string.IsNullOrEmpty(_script.StandardError))
+        {
+            foreach (var line in _script.StandardError.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
+            {
+                _onStandardError?.Invoke(line);
+            }
+        }
+
         _inbound.Writer.TryComplete();
         return ValueTask.CompletedTask;
     }

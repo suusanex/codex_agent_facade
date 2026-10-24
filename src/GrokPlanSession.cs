@@ -12,11 +12,17 @@ using System.Threading.Channels;
 public sealed record GrokAcpStartInfo(
     string FileName,
     IReadOnlyList<string> Arguments,
-    string WorkingDirectory);
+    string WorkingDirectory,
+    Action<string>? OnStandardError = null);
 
 public interface IGrokAcpProcess : IAsyncDisposable
 {
     ProcessLaunchInfo Launch { get; }
+
+    /// <summary>
+    /// Dispose が終了確認できたとき true。未確認の停止を成功として返さない。
+    /// </summary>
+    bool ExitObserved { get; }
 
     Task WriteLineAsync(string line, CancellationToken cancellationToken);
 
@@ -196,12 +202,12 @@ internal static class GrokPlanSession
 
             if (!string.IsNullOrWhiteSpace(request.Model))
             {
-                await session.ApplyConfigAsync(sessionId, configSource, "model", request.Model, cancellationToken).ConfigureAwait(false);
+                configSource = await session.ApplyConfigAsync(sessionId, configSource, "model", request.Model, cancellationToken).ConfigureAwait(false);
             }
 
             if (request.ReasoningEffort is not null)
             {
-                await session.ApplyConfigAsync(sessionId, configSource, "reasoning_effort", request.ReasoningEffort, cancellationToken).ConfigureAwait(false);
+                configSource = await session.ApplyConfigAsync(sessionId, configSource, "reasoning_effort", request.ReasoningEffort, cancellationToken).ConfigureAwait(false);
             }
 
             using (await session.SendAsync(
@@ -333,7 +339,7 @@ internal static class GrokPlanSession
             _runLog = runLog;
         }
 
-        public async Task ApplyConfigAsync(
+        public async Task<JsonElement> ApplyConfigAsync(
             string sessionId,
             JsonElement sessionResult,
             string configId,
@@ -347,10 +353,11 @@ internal static class GrokPlanSession
 
             if (string.Equals(current, requested, StringComparison.Ordinal))
             {
-                return;
+                return sessionResult;
             }
 
             // 1.0.70 は value の JSON 文字列だけを受け付ける。{"value":"low"} は成功し、object 形式は拒否された。
+            // 返った configOptions を次の option に使う。モデル変更前の一覧で effort を判断しない。
             using var updated = await SendAsync(
                 "session/set_config_option",
                 "{\"sessionId\":" + Quote(sessionId) + ",\"configId\":" + Quote(configId) + ",\"value\":" + Quote(requested) + "}",
@@ -361,6 +368,8 @@ internal static class GrokPlanSession
             {
                 throw Fail("option_not_applied", "Grok Build plan mode did not apply " + configId + ".");
             }
+
+            return updated.RootElement.Clone();
         }
 
         public async Task<JsonDocument> SendAsync(
@@ -692,6 +701,7 @@ internal sealed class GrokAcpProcess : IGrokAcpProcess
     private static readonly Encoding Utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
     private readonly Process _process;
     private readonly IDisposable? _job;
+    private readonly Action<string>? _onStandardError;
     private readonly Channel<string> _lines = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
     {
         SingleReader = true,
@@ -699,16 +709,21 @@ internal sealed class GrokAcpProcess : IGrokAcpProcess
     });
     private readonly StringBuilder _standardError = new();
     private readonly object _errorGate = new();
+    private Task _stdoutTask = Task.CompletedTask;
+    private Task _stderrTask = Task.CompletedTask;
     private int _killed;
 
-    private GrokAcpProcess(Process process, IDisposable? job, ProcessLaunchInfo launch)
+    private GrokAcpProcess(Process process, IDisposable? job, ProcessLaunchInfo launch, Action<string>? onStandardError)
     {
         _process = process;
         _job = job;
+        _onStandardError = onStandardError;
         Launch = launch;
     }
 
     public ProcessLaunchInfo Launch { get; }
+
+    public bool ExitObserved { get; private set; }
 
     public static GrokAcpProcess Start(GrokAcpStartInfo info, IProcessJobGuard jobGuard)
     {
@@ -796,9 +811,9 @@ internal sealed class GrokAcpProcess : IGrokAcpProcess
             Wrapper: "none",
             HasStandardInput: true,
             StandardInputByteCount: null);
-        var started = new GrokAcpProcess(process, job, launch);
-        _ = started.ReadStdoutAsync();
-        _ = started.ReadStderrAsync();
+        var started = new GrokAcpProcess(process, job, launch, info.OnStandardError);
+        started._stdoutTask = started.ReadStdoutAsync();
+        started._stderrTask = started.ReadStderrAsync();
         return started;
     }
 
@@ -844,20 +859,71 @@ internal sealed class GrokAcpProcess : IGrokAcpProcess
     {
         Kill();
         _lines.Writer.TryComplete();
+        // Kill が失敗しても無期限に待たない。予算は通常実行の ForcedProcessStop と同じ。
+        // ここでは例外を出さない。session 側の失敗を Dispose の例外で潰さないため。
+        var exitTask = WaitForExitOrCompleted();
+        var outcome = await ForcedProcessStop.ExecuteAsync(
+            () => TryKill(_process),
+            exitTask,
+            _stdoutTask,
+            _stderrTask,
+            TimeProvider.System).ConfigureAwait(false);
+        if (!exitTask.IsCompleted)
+        {
+            _ = exitTask.ContinueWith(
+                task =>
+                {
+                    if (task.IsFaulted)
+                    {
+                        CliJson.TraceException(task.Exception!);
+                    }
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+
         try
         {
-            if (!_process.HasExited)
-            {
-                await _process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
-            }
+            _job?.Dispose();
         }
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
         }
 
-        _job?.Dispose();
-        _process.Dispose();
+        try
+        {
+            _process.Dispose();
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+        }
+
+        ExitObserved = outcome.ExitObserved;
+        if (!outcome.ExitObserved)
+        {
+            CliJson.TraceException(new InvalidOperationException("Grok Build plan mode did not exit after termination."));
+        }
+    }
+
+    private Task WaitForExitOrCompleted()
+    {
+        try
+        {
+            if (_process.HasExited)
+            {
+                return Task.CompletedTask;
+            }
+
+            return _process.WaitForExitAsync(CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            return Task.FromException(ex);
+        }
     }
 
     private async Task ReadStdoutAsync()
@@ -903,6 +969,15 @@ internal sealed class GrokAcpProcess : IGrokAcpProcess
                     }
 
                     _standardError.Append(line);
+                }
+
+                try
+                {
+                    _onStandardError?.Invoke(line);
+                }
+                catch (Exception ex)
+                {
+                    CliJson.TraceException(ex);
                 }
             }
         }

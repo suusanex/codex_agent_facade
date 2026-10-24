@@ -233,6 +233,7 @@ public sealed class AgentJobService
         finally
         {
             // 保存に失敗して terminal になっていないときも、waiter を running のまま残さない。
+            // この Fail は保存しない。Evict は保存済みのときだけ登録を外す。
             if (!job.IsTerminal)
             {
                 job.Fail("agent job failed. See the server log for details.");
@@ -279,7 +280,9 @@ public sealed class AgentJobService
 
     private void Evict(AgentJob job)
     {
-        if (!job.IsTerminal)
+        // 保存済みの terminal だけ登録から外す。未保存の失敗を外すと、
+        // 次の Get が disk の running を facade_interrupted として上書きする。
+        if (!job.IsTerminal || !job.TerminalPersisted)
         {
             return;
         }
