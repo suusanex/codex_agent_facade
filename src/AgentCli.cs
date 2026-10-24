@@ -97,7 +97,8 @@ public static class AgentCli
             parsed.AutoApprove,
             parsed.Model,
             parsed.ReasoningEffort,
-            parsed.Fast);
+            parsed.Fast,
+            parsed.RunMode);
 
         try
         {
@@ -307,6 +308,8 @@ public static class AgentCli
         public string? ReasoningEffort { get; set; }
 
         public bool? Fast { get; set; }
+
+        public string? RunMode { get; set; }
 
         public int? TimeoutSeconds { get; set; }
     }

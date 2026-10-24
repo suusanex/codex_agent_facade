@@ -16,6 +16,7 @@
 #:include ../src/FacadeLogging.cs
 #:include ../src/GitHubCopilotDriver.cs
 #:include ../src/GrokInternalLog.cs
+#:include ../src/GrokPlanSession.cs
 #:include ../src/GrokBuildDriver.cs
 #:include ../src/CursorCliDriver.cs
 #:include ../src/CodexCliDriver.cs
@@ -28,6 +29,7 @@
 #:include ../src/McpHttpHost.cs
 #:include ../src/AgentCli.cs
 #:include GrokInternalCompletionTests.cs
+#:include GrokPlanTests.cs
 
 using System.Diagnostics;
 using System.Security.Cryptography;
@@ -790,6 +792,53 @@ public class AgentJobServiceTests
         Assert.NotEqual(legacy, fastFalse);
         Assert.NotEqual(fastFalse, fastTrue);
         Assert.NotEqual(effort, AgentJobService.ComputeRequestFingerprint(request with { ReasoningEffort = "high" }));
+    }
+
+    [Fact]
+    public void UnspecifiedRunModeKeepsExistingFingerprint()
+    {
+        var request = Grok("hello");
+        var legacy = HistoricalFingerprintWithoutModel(request);
+        Assert.Equal(legacy, AgentJobService.ComputeRequestFingerprint(request));
+        Assert.Equal(legacy, AgentJobService.ComputeRequestFingerprint(request with { RunMode = null }));
+        var effort = request with { ReasoningEffort = "medium" };
+        Assert.Equal(
+            AgentJobService.ComputeRequestFingerprint(effort),
+            AgentJobService.ComputeRequestFingerprint(effort with { RunMode = null }));
+        var plan = AgentJobService.ComputeRequestFingerprint(request with { RunMode = "plan" });
+        Assert.NotEqual(legacy, plan);
+        Assert.NotEqual(plan, AgentJobService.ComputeRequestFingerprint(effort with { RunMode = "plan" }));
+    }
+
+    [Fact]
+    public async Task ExactRetryWithDifferentRunModeFailsWithoutSecondRun()
+    {
+        var service = CreateService(out var runner, grokText: "ok");
+        runner.Gate = NewGate();
+        var first = service.Start("req-run-mode", Grok("hello"));
+        var ex = Assert.Throws<ArgumentException>(() => service.Start("req-run-mode", Grok("hello") with { RunMode = "plan" }));
+        Assert.Contains("already bound", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(1, runner.CallCount);
+        runner.Gate.SetResult(true);
+        Assert.Equal(AgentJobStatus.Completed, (await WaitAsync(service, first.JobId)).Status);
+    }
+
+    [Fact]
+    public void PlanRunModeIsRejectedBeforeLaunchForOtherAgentsAndInvalidValues()
+    {
+        var service = CreateService(out var runner, grokText: "ok");
+        foreach (var agent in new[] { AgentFacade.GitHubCopilotAgent, AgentFacade.CursorAgent, AgentFacade.CodexAgent })
+        {
+            var ex = Assert.Throws<ArgumentException>(() => service.Start(
+                "req-plan-" + agent,
+                new AgentRunRequest(agent, "hello", Path.GetTempPath(), null, null, RunMode: "plan")));
+            Assert.Contains("run_mode", ex.Message, StringComparison.Ordinal);
+        }
+
+        Assert.Equal(0, runner.CallCount);
+        Assert.Throws<ArgumentException>(() => AgentFacade.Validate(Grok("hello") with { RunMode = "execute" }));
+        Assert.Throws<ArgumentException>(() => AgentFacade.Validate(Grok("hello") with { RunMode = "" }));
+        Assert.Throws<ArgumentException>(() => AgentFacade.Validate(Grok("hello") with { RunMode = " " }));
     }
 
     [Fact]
@@ -3147,6 +3196,73 @@ public class FacadeDelegationSkillContractTests
         Assert.False(duplicate.Succeeded);
     }
 
+    [Fact]
+    public void RelayInvocationAcceptsPlanPresenceFlag()
+    {
+        var plan = RelayInvocationParser.Parse(
+            "grok-build",
+            "$grok-build\n```facade-options\nplan\n```\n\nWrite a plan.\n");
+        Assert.True(plan.Succeeded, plan.Error);
+        Assert.Equal("plan", plan.RunMode);
+        Assert.Null(plan.Fast);
+        Assert.Equal("\nWrite a plan.\n", plan.Prompt);
+
+        var planAndFast = RelayInvocationParser.Parse(
+            "grok-build",
+            "$grok-build\n```facade-options\nplan, fast\n```\n\nWrite a plan.\n");
+        Assert.False(planAndFast.Succeeded);
+
+        var fastFlag = RelayInvocationParser.Parse(
+            "cursor",
+            "$cursor\n```facade-options\nmodel: composer-2.5\nfast\n```\n\nWrite a plan.\n");
+        Assert.True(fastFlag.Succeeded, fastFlag.Error);
+        Assert.True(fastFlag.Fast == true);
+        Assert.Null(fastFlag.RunMode);
+
+        var cursorPlan = RelayInvocationParser.Parse(
+            "cursor",
+            "$cursor\n```facade-options\nplan\n```\n\nWrite a plan.\n");
+        Assert.False(cursorPlan.Succeeded);
+
+        var copilotPlan = RelayInvocationParser.Parse(
+            "github-copilot",
+            "$github-copilot\n```facade-options\nplan\n```\n\nWrite a plan.\n");
+        Assert.False(copilotPlan.Succeeded);
+
+        var codexPlan = RelayInvocationParser.Parse(
+            "codex",
+            "$codex\n```facade-options\nplan\n```\n\nWrite a plan.\n");
+        Assert.False(codexPlan.Succeeded);
+
+        var grokFastFlag = RelayInvocationParser.Parse(
+            "grok-build",
+            "$grok-build\n```facade-options\nfast\n```\n\nWrite a plan.\n");
+        Assert.False(grokFastFlag.Succeeded);
+
+        var unknown = RelayInvocationParser.Parse(
+            "grok-build",
+            "$grok-build\n```facade-options\nPlan\n```\n\nWrite a plan.\n");
+        Assert.False(unknown.Succeeded);
+
+        var duplicatePlan = RelayInvocationParser.Parse(
+            "grok-build",
+            "$grok-build\n```facade-options\nplan,plan\n```\n\nWrite a plan.\n");
+        Assert.False(duplicatePlan.Succeeded);
+
+        var planKey = RelayInvocationParser.Parse(
+            "grok-build",
+            "$grok-build\n```facade-options\nplan: true\n```\n\nWrite a plan.\n");
+        Assert.False(planKey.Succeeded);
+
+        var mixed = RelayInvocationParser.Parse(
+            "grok-build",
+            "$grok-build\n```facade-options\nmodel: grok-4.7\nplan\n```\n\nWrite a plan.\n");
+        Assert.True(mixed.Succeeded, mixed.Error);
+        Assert.Equal("grok-4.7", mixed.Model);
+        Assert.Equal("plan", mixed.RunMode);
+        Assert.Null(mixed.Fast);
+    }
+
     private static void AssertContains(string skillName, string text, string phrase)
     {
         Assert.True(
@@ -3363,7 +3479,7 @@ public class FacadeDelegationSkillContractTests
             }
 
             var candidate = message[candidateIndex..];
-            if (!TryReadOptions(candidate, out var prompt, out var model, out var reasoningEffort, out var fast, out var error))
+            if (!TryReadOptions(candidate, out var prompt, out var model, out var reasoningEffort, out var fast, out var runMode, out var error))
             {
                 return RelayInvocation.Fail(agent, error ?? "Facade options are invalid.");
             }
@@ -3385,7 +3501,12 @@ public class FacadeDelegationSkillContractTests
                 return RelayInvocation.Fail(agent, "Cursor requires model when reasoning_effort or fast is set.");
             }
 
-            return new RelayInvocation(agent, prompt, model, reasoningEffort, fast, Skills: null, Error: null);
+            if (string.Equals(runMode, "plan", StringComparison.Ordinal) && agent != "grok-build")
+            {
+                return RelayInvocation.Fail(agent, "Plan-only run_mode is not supported.");
+            }
+
+            return new RelayInvocation(agent, prompt, model, reasoningEffort, fast, Skills: null, Error: null, RunMode: runMode);
         }
 
         private static bool TryReadOptions(
@@ -3394,12 +3515,14 @@ public class FacadeDelegationSkillContractTests
             out string? model,
             out string? reasoningEffort,
             out bool? fast,
+            out string? runMode,
             out string? error)
         {
             prompt = candidate;
             model = null;
             reasoningEffort = null;
             fast = null;
+            runMode = null;
             error = null;
 
             if (!TrySkipBlankLines(candidate, 0, out var contentIndex))
@@ -3416,6 +3539,7 @@ public class FacadeDelegationSkillContractTests
             var seenModel = false;
             var seenEffort = false;
             var seenFast = false;
+            var seenPlan = false;
             while (TryReadLine(candidate, nextIndex, out var line, out var lineEnd))
             {
                 nextIndex = lineEnd;
@@ -3426,7 +3550,17 @@ public class FacadeDelegationSkillContractTests
                 }
 
                 var colon = line.IndexOf(':');
-                if (colon <= 0)
+                if (colon < 0)
+                {
+                    if (!TryReadPresenceFlags(line, ref seenPlan, ref seenFast, ref runMode, ref fast, out error))
+                    {
+                        return false;
+                    }
+
+                    continue;
+                }
+
+                if (colon == 0)
                 {
                     error = "Facade option line is invalid.";
                     return false;
@@ -3488,6 +3622,62 @@ public class FacadeDelegationSkillContractTests
             return false;
         }
 
+        private static bool TryReadPresenceFlags(
+            string line,
+            ref bool seenPlan,
+            ref bool seenFast,
+            ref string? runMode,
+            ref bool? fast,
+            out string? error)
+        {
+            var tokens = line.Split(',');
+            if (tokens.Length == 0)
+            {
+                error = "Facade option flag is empty.";
+                return false;
+            }
+
+            foreach (var raw in tokens)
+            {
+                var token = raw.Trim();
+                if (token.Length == 0)
+                {
+                    error = "Facade option flag is empty.";
+                    return false;
+                }
+
+                switch (token)
+                {
+                    case "plan":
+                        if (seenPlan)
+                        {
+                            error = "Facade option plan is duplicated.";
+                            return false;
+                        }
+
+                        seenPlan = true;
+                        runMode = "plan";
+                        break;
+                    case "fast":
+                        if (seenFast)
+                        {
+                            error = "Facade option fast is duplicated.";
+                            return false;
+                        }
+
+                        seenFast = true;
+                        fast = true;
+                        break;
+                    default:
+                        error = "Facade option key is unknown.";
+                        return false;
+                }
+            }
+
+            error = null;
+            return true;
+        }
+
         private static bool TrySkipBlankLines(string text, int index, out int contentIndex)
         {
             contentIndex = index;
@@ -3545,7 +3735,8 @@ public class FacadeDelegationSkillContractTests
         string? ReasoningEffort,
         bool? Fast,
         IReadOnlyList<string>? Skills,
-        string? Error)
+        string? Error,
+        string? RunMode = null)
     {
         internal bool Succeeded => Error is null;
 
@@ -5177,6 +5368,7 @@ public class McpPublicContractTests
         Assert.Equal(McpPublicContract.ModelDescription, ReadInputPropertyDescription(start, "model"));
         Assert.Equal(McpPublicContract.ReasoningEffortDescription, ReadInputPropertyDescription(start, "reasoning_effort"));
         Assert.Equal(McpPublicContract.FastDescription, ReadInputPropertyDescription(start, "fast"));
+        Assert.Equal(McpPublicContract.RunModeDescription, ReadInputPropertyDescription(start, "run_mode"));
         var fastType = start.JsonSchema.GetProperty("properties").GetProperty("fast").GetProperty("type");
         if (fastType.ValueKind == JsonValueKind.String)
         {
@@ -5190,6 +5382,10 @@ public class McpPublicContractTests
         {
             Assert.DoesNotContain(
                 "model",
+                startRequired.EnumerateArray().Select(item => item.GetString()),
+                StringComparer.Ordinal);
+            Assert.DoesNotContain(
+                "run_mode",
                 startRequired.EnumerateArray().Select(item => item.GetString()),
                 StringComparer.Ordinal);
         }

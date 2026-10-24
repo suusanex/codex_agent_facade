@@ -373,7 +373,7 @@ Facade は `reasoning_effort` を `--reasoning-effort` へそのまま渡す。C
 
 ## Reasoning Effort と fast（issue #24 第2段階）
 
-`model`, `reasoning_effort`, `fast` は独立した実行設定である。relay Skillでは委譲ヘッダの後、作業本文の前に `facade-options` blockを置く。ブロック自体は worker prompt に含めず、`$skill` の呼び出しも prompt と `skills` に入れない。MCPでは `start_agent` の同名引数で指定する。設定はprompt本文から推測せず、session継続とexact retryでも毎回必要な値を渡す。設定なしは既存CLI既定を保ち、`fast: false` は明示的な非-fast/default指定である。Copilot と Grok Build は独立した `fast` を受け付けない。
+`model`, `reasoning_effort`, `fast` は独立した実行設定である。relay Skillでは委譲ヘッダの後、作業本文の前に `facade-options` blockを置く。ブロック自体は worker prompt に含めず、`$skill` の呼び出しも prompt と `skills` に入れない。MCPでは `start_agent` の同名引数で指定する。設定はprompt本文から推測せず、session継続とexact retryでも毎回必要な値を渡す。設定なしは既存CLI既定を保ち、`fast: false` は明示的な非-fast/default指定である。Copilot と Grok Build は独立した `fast` を受け付けない。`run_mode=plan` はモデル識別子ではない。Grok Build だけが受け付け、通常実行の `--reasoning-effort` とは別に `session/set_config_option` の文字列値で model と reasoning_effort を適用する。
 
 | Agent | Reasoning Effort | Independent fast | CLI変換 |
 | --- | --- | --- | --- |
