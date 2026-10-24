@@ -102,6 +102,7 @@ public sealed class AgentJob
     private readonly CancellationTokenSource _cancellation = new();
     private readonly TaskCompletionSource _terminal = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private string _status = AgentJobStatus.Running;
+    private bool _terminalPersisted;
     private AgentRunResult? _result;
     private string? _error;
     private AgentJobFailure? _failure;
@@ -139,6 +140,21 @@ public sealed class AgentJob
             lock (_gate)
             {
                 return IsTerminalStatus(_status);
+            }
+        }
+    }
+
+    /// <summary>
+    /// terminal 状態の保存コールバックが成功したときだけ true。
+    /// 未保存のまま登録を外すと、disk の running を facade_interrupted として上書きする。
+    /// </summary>
+    public bool TerminalPersisted
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _terminalPersisted;
             }
         }
     }
@@ -220,13 +236,18 @@ public sealed class AgentJob
                 return false;
             }
 
-            beforePublish?.Invoke(new AgentJobSnapshot(
-                JobId,
-                RequestId,
-                status,
-                result,
-                error,
-                failure));
+            if (beforePublish is not null)
+            {
+                beforePublish.Invoke(new AgentJobSnapshot(
+                    JobId,
+                    RequestId,
+                    status,
+                    result,
+                    error,
+                    failure));
+                _terminalPersisted = true;
+            }
+
             _status = status;
             _result = result;
             _error = error;
