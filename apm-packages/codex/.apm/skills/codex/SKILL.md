@@ -21,7 +21,7 @@ payloadの出典は、このSkillを呼び出した実際のユーザーmessage�
 ユーザー message は委譲ヘッダ、Facade options、委譲本文、委譲先 SKILL の4領域に分かれる。領域を混ぜない。message 先頭の空行は読み飛ばし、その次が委譲ヘッダである。
 
 - 委譲ヘッダは `$codex` である。親がこの relay を開始する呼び出しであり、委譲本文でも委譲先 SKILL でもない。`$codex` の直後の区切り（半角スペース1つか改行）はヘッダの終端であり、委譲本文に含めない。`prompt` に `$codex` や `/codex` を追加しない。`skills` に `codex` を入れない。この Skill が指定されたこと自体は、委譲先へ同じ Skill を渡す理由にならない。`agent` はこの relay の agent 名であり、同じ名前を `skills` へ重ねない。
-- Facade options は、`$codex` より後ろの本文の先頭空行を除いた最初の行が開始フェンス（バッククォート3つの後に `facade-options` とだけ書いた行）の場合だけ、その行から終了フェンス（バッククォート3つだけの行）までである。有効な行は `model: <id>`, `reasoning_effort: <token>`, `fast: true|false` の各1行まで。空値、重複、未知のkey、不正なboolean、または閉じていないfenceはtoolを呼ぶ前にエラーとして報告する。`skills` は Facade options のキーではない。実行オプションが無い場合、`model`, `reasoning_effort`, `fast` は渡さない。この turn の Facade options に無い `model`, `reasoning_effort`, `fast` は渡さない。
+- Facade options は、`$codex` より後ろの本文の先頭空行を除いた最初の行が開始フェンス（バッククォート3つの後に `facade-options` とだけ書いた行）の場合だけ、その行から終了フェンス（バッククォート3つだけの行）までである。有効な行は `model: <id>`, `reasoning_effort: <token>`, `fast: true|false` の各1行まで。コロンを含まない行はカンマ区切りの presence flag である。例は `plan` と `plan,fast`。トークンは前後の空白を除き、大文字小文字を区別する。空トークン、重複、未知トークンは `start_agent` を呼ばず報告する。`fast` フラグは存在するときだけ `true` にする。フラグが無いときは `fast` を渡さない。`plan: true` は未知キーである。空値、重複、未知のkey、不正なboolean、または閉じていないfenceはtoolを呼ぶ前にエラーとして報告する。`skills` は Facade options のキーではない。実行オプションが無い場合、`model`, `reasoning_effort`, `fast` は渡さない。この turn の Facade options に無い `model`, `reasoning_effort`, `fast` は渡さない。`plan` フラグが無いときは `run_mode` を渡さない。`plan` フラグはこの agent では未対応である。`plan` があるときは `start_agent` を呼ばず報告する。
 - 委譲本文は、Facade options があるときは終了フェンスの直後から末尾まで、無いときは `$codex` より後ろの本文全体である。終了フェンスの直後から末尾までを一字も変更せず `prompt` にする。直後とは、終了フェンス行を終わらせる改行の次の文字である。Facade options が無いときも、ヘッダ終端より後ろを一字も変更せず `prompt` にする。委譲ヘッダと Facade options は `prompt` に含めない。
 - 委譲先 SKILL は `start_agent` の `skills` だけである。この relay の入力構文に委譲先 SKILL を列挙する欄は無い。新規 job と継続では `skills` を渡さない。委譲本文から Skill 名を抽出して `skills` へ複製しない。Exact retry で元 request に `skills` があった場合だけ、他の引数と一緒に同じ値を再送する。MCP を直接呼ぶ別経路で呼び出し側が `skills` 引数を渡すことは、この入力構文の解釈ではない。
 
@@ -40,11 +40,11 @@ fast: false
 
 ## request_id と session_id の lifetime
 
-`request_id` はdistinctな `start_agent` requestごとに新しく生成する冪等キーで、Codex thread IDでも外部 agent session IDでもない。新しいpayloadやcompleted後の継続では新しいIDを使い、前回 `request_id` を再利用しない。Exact retryだけ同じIDを使う。`session_id` は継続時だけ前回completed resultの `result.sessionId` を使う。Exact retryは今回の `agent`, `prompt`, `working_directory`, `session_id`, `auto_approve`, `model`, `reasoning_effort`, `fast` と、元requestに含まれていた場合は `skills` も完全一致させる。Codex CLI Driverは `skills` fieldをpromptやCLI引数へ変換しないため、新規jobや継続では `skills` を渡さない。
+`request_id` はdistinctな `start_agent` requestごとに新しく生成する冪等キーで、Codex thread IDでも外部 agent session IDでもない。新しいpayloadやcompleted後の継続では新しいIDを使い、前回 `request_id` を再利用しない。Exact retryだけ同じIDを使う。`session_id` は継続時だけ前回completed resultの `result.sessionId` を使う。Exact retryは今回の `agent`, `prompt`, `working_directory`, `session_id`, `auto_approve`, `model`, `reasoning_effort`, `fast`, `run_mode` と、元requestに含まれていた場合は `skills` も完全一致させる。Codex CLI Driverは `skills` fieldをpromptやCLI引数へ変換しないため、新規jobや継続では `skills` を渡さない。
 
 ## start_agent は毎回 full request を再構成する
 
-`start_agent` は部分更新APIではない。各呼び出しは完全な RPC request であり、required fields `request_id`, `agent`, `prompt`, `working_directory` を含める。任意field `session_id`, `auto_approve`, `model`, `reasoning_effort`, `fast` は今回必要な値を指定する。`model`, `reasoning_effort`, `fast` は継続・retryごとに必要な値を再指定し、前回から暗黙継承はしない。省略/nullのままの新optionは既存job fingerprintと互換性がある。前回の各引数も暗黙継承しない。Exact retryで元requestに `skills` があった場合だけ、その値も再送する。
+`start_agent` は部分更新APIではない。各呼び出しは完全な RPC request であり、required fields `request_id`, `agent`, `prompt`, `working_directory` を含める。任意field `session_id`, `auto_approve`, `model`, `reasoning_effort`, `fast`, `run_mode` は今回必要な値を指定する。`plan` があるときは `start_agent` を呼ばない。`plan` が無いときは `run_mode` を渡さない。`model`, `reasoning_effort`, `fast` は継続・retryごとに必要な値を再指定し、前回から暗黙継承はしない。省略/nullのままの新optionは既存job fingerprintと互換性がある。前回の各引数も暗黙継承しない。Exact retryで元requestに `skills` があった場合だけ、その値も再送する。
 
 ## Codex が行ってよい処理
 
@@ -68,6 +68,7 @@ Codex CLI Driverは `skills` fieldをCodex CLIへ渡さず、promptにも変換�
 - 新規jobと継続では `skills` fieldを含めない。新規 job と継続では `skills` を渡さない。`skills` に `codex` を入れない。Exact retryでは元requestに含まれていた場合だけ同じ値を再送する。Codex CLIに適用するSkillはユーザーの実際のpayload中に明示されたinvocationだけであり、Codex側で追加しない
 - Follow-up continuationなら `session_id` は直前のcompleted `result.sessionId` と一致する
 - このturnの実行オプションにある `model`, `reasoning_effort`, `fast` だけを渡す。`fast: false` も省略しない
+- `plan` があるときは `start_agent` を呼ばない。`plan` が無いときは `run_mode` を渡さない
 - Exact retryなら `skills` を含む全ての `start_agent` 引数が前回の試行と同一である
 
 required field が欠けている場合は `start_agent` を呼ばず、そのfieldを補ってから呼ぶ。

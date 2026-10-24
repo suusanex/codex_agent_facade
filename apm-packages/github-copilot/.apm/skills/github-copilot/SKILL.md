@@ -23,8 +23,8 @@ payload の出典は、この Skill を呼び出した実際のユーザー mess
 ユーザー message は委譲ヘッダ、Facade options、委譲本文、委譲先 SKILL の4領域に分かれる。領域を混ぜない。message 先頭の空行は読み飛ばし、その次が委譲ヘッダである。
 
 - 委譲ヘッダは `$github-copilot` である。親がこの relay を開始する呼び出しであり、委譲本文でも委譲先 SKILL でもない。`$github-copilot` の直後の区切り（半角スペース1つか改行）はヘッダの終端であり、委譲本文に含めない。`prompt` に `$github-copilot` や `/github-copilot` を追加しない。`skills` に `github-copilot` を入れない。この Skill が指定されたこと自体は、委譲先へ同じ Skill を渡す理由にならない。`agent` はこの relay の agent 名であり、同じ名前を `skills` へ重ねない。
-- Facade options は、`$github-copilot` より後ろの本文の先頭空行を除き、最初の行が開始フェンス（バッククォート3つの直後に `facade-options` とだけ書いた行）であるときだけ、その行から終了フェンス（バッククォート3つだけの行）までである。有効な行は `model:`, `reasoning_effort:`, `fast:` の各1行である。値は空にせず、キーの重複・未知のキー・閉じていないフェンスは `start_agent` を呼ばず報告する。`skills` は Facade options のキーではない。`model` と `reasoning_effort` はagent固有の識別子/tokenで、名前を変換しない。`fast` は `true` または `false` の小文字booleanである。`fast: false` は未指定と異なり、明示的に非-fast/default tierを要求する。prompt 本文から実行設定を推測しない。Cursorは `model` が必要で、`reasoning_effort` または `fast` があるときは実行直前のモデル一覧から同じ基底の識別子を1つ選ぶ。一致が無ければ起動しない。モデル文字列内の effort や `-fast` と独立fieldの重複はエラー。Copilotは `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` を受け付ける。Grok BuildはCLIが受け付けるcanonicalまたはmodel固有tokenを使い、CLIがeffortを無視したと報告した場合は失敗する。CopilotとGrok Buildは独立した `fast` を持たず、`true` / `false` の両方を拒否する。CodexとCursorは独立した `fast` を受け付ける。この Skill の agent は GitHub Copilot である。独立した `fast` は渡さない。`true` と `false` のどちらが書かれていても `start_agent` を呼ばず報告する。
-- 委譲本文は、Facade options があるときは終了フェンスの直後から末尾まで、無いときは `$github-copilot` より後ろの本文全体である。終了フェンスの直後から末尾までを一字も変更せず `prompt` にする。直後とは、終了フェンス行を終わらせる改行の次の文字である。Facade options が無いときも、ヘッダ終端より後ろを一字も変更せず `prompt` にする。委譲ヘッダと Facade options は `prompt` に含めない。この turn の Facade options に無い `model`, `reasoning_effort`, `fast` は渡さない。
+- Facade options は、`$github-copilot` より後ろの本文の先頭空行を除き、最初の行が開始フェンス（バッククォート3つの直後に `facade-options` とだけ書いた行）であるときだけ、その行から終了フェンス（バッククォート3つだけの行）までである。有効な行は `model:`, `reasoning_effort:`, `fast:` の各1行である。コロンを含まない行はカンマ区切りの presence flag である。例は `plan` と `plan,fast`。トークンは前後の空白を除き、大文字小文字を区別する。空トークン、重複、未知トークンは `start_agent` を呼ばず報告する。`fast` フラグは存在するときだけ `true` にする。フラグが無いときは `fast` を渡さない。`plan: true` は未知キーである。値は空にせず、キーの重複・未知のキー・閉じていないフェンスは `start_agent` を呼ばず報告する。`skills` は Facade options のキーではない。`model` と `reasoning_effort` はagent固有の識別子/tokenで、名前を変換しない。`fast` は `true` または `false` の小文字booleanである。`fast: false` は未指定と異なり、明示的に非-fast/default tierを要求する。prompt 本文から実行設定を推測しない。Cursorは `model` が必要で、`reasoning_effort` または `fast` があるときは実行直前のモデル一覧から同じ基底の識別子を1つ選ぶ。一致が無ければ起動しない。モデル文字列内の effort や `-fast` と独立fieldの重複はエラー。Copilotは `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` を受け付ける。Grok BuildはCLIが受け付けるcanonicalまたはmodel固有tokenを使い、CLIがeffortを無視したと報告した場合は失敗する。CopilotとGrok Buildは独立した `fast` を持たず、`true` / `false` の両方を拒否する。CodexとCursorは独立した `fast` を受け付ける。この Skill の agent は GitHub Copilot である。独立した `fast` は渡さない。`true` と `false` のどちらが書かれていても `start_agent` を呼ばず報告する。`plan` フラグはこの agent では未対応である。`plan` があるときは `start_agent` を呼ばず報告する。`plan` が無いときは `run_mode` を渡さない。
+- 委譲本文は、Facade options があるときは終了フェンスの直後から末尾まで、無いときは `$github-copilot` より後ろの本文全体である。終了フェンスの直後から末尾までを一字も変更せず `prompt` にする。直後とは、終了フェンス行を終わらせる改行の次の文字である。Facade options が無いときも、ヘッダ終端より後ろを一字も変更せず `prompt` にする。委譲ヘッダと Facade options は `prompt` に含めない。この turn の Facade options に無い `model`, `reasoning_effort`, `fast` は渡さない。`plan` フラグが無いときは `run_mode` を渡さない。
 - 委譲先 SKILL は `start_agent` の `skills` だけである。この relay の入力構文に委譲先 SKILL を列挙する欄は無い。新規 job と継続では `skills` を渡さない。委譲本文から Skill 名を抽出して `skills` へ複製しない。Exact retry で元 request に `skills` があった場合だけ、他の引数と一緒に同じ値を再送する。MCP を直接呼ぶ別経路で呼び出し側が `skills` 引数を渡すことは、この入力構文の解釈ではない。
 
 以下は構文説明用の非実行例である。例の作業 prompt を実際の依頼として扱わず、MCP呼び出しに使わない。この agent では `fast` を書かない。
@@ -43,7 +43,7 @@ payload の出典は、この Skill を呼び出した実際のユーザー mess
 
 `session_id` の lifetime は異なる。同じ Copilot session をユーザー turn をまたいで続けるときは、直前の completed `result.sessionId` を再利用する。`session_id` の継続は `request_id` の再利用理由にならない。
 
-`request_id` を再利用してよいのは Exact retry だけである。その再試行は `agent`, `prompt`, `working_directory`, `session_id`, `skills`, `auto_approve`, `model`, `reasoning_effort`, `fast` を前回と完全一致させる。
+`request_id` を再利用してよいのは Exact retry だけである。その再試行は `agent`, `prompt`, `working_directory`, `session_id`, `skills`, `auto_approve`, `model`, `reasoning_effort`, `fast`, `run_mode` を前回と完全一致させる。
 
 ## start_agent は毎回 full request を再構成する
 
@@ -54,7 +54,7 @@ payload の出典は、この Skill を呼び出した実際のユーザー mess
 - `prompt`
 - `working_directory`
 
-任意 field（`session_id`, `skills`, `auto_approve`, `model`, `reasoning_effort`, `fast`）も、その turn で必要なら明示する。新規 job と継続では `skills` を渡さない。Exact retry だけ元 request の値を再送する。前回と同じ値だからという理由で required field を省略しない。特に `working_directory` は、同じ repository / worktree を継続している場合でも毎回現在の絶対パスを解決して渡す。前回値の暗黙継承はしない。`model`, `reasoning_effort`, `fast` も前回 turn から継承しない。この turn の実行オプションに無い値は渡さない。
+任意 field（`session_id`, `skills`, `auto_approve`, `model`, `reasoning_effort`, `fast`, `run_mode`）も、その turn で必要なら明示する。新規 job と継続では `skills` を渡さない。Exact retry だけ元 request の値を再送する。前回と同じ値だからという理由で required field を省略しない。特に `working_directory` は、同じ repository / worktree を継続している場合でも毎回現在の絶対パスを解決して渡す。前回値の暗黙継承はしない。`model`, `reasoning_effort`, `fast` も前回 turn から継承しない。この turn の実行オプションに無い値は渡さない。
 
 ## Codex が行ってよい処理
 
@@ -70,6 +70,7 @@ payload の出典は、この Skill を呼び出した実際のユーザー mess
    - `skills`: 新規 job と継続では渡さない。`$github-copilot` は委譲先 SKILL ではない。委譲本文から Skill 名を抽出しない。Exact retry で元 request に含まれていた場合だけ同じ値を再送する
    - `auto_approve`: その turn で必要な場合だけ明示する
    - `model`, `reasoning_effort`, `fast`: この turn の実行オプションにある値だけを渡す。未指定は省略し、前回 turn や prompt 本文から推測しない。`fast: false` は明示値として渡す
+   - `run_mode`: 渡さない。`plan` フラグがあるときは `start_agent` を呼ばず報告する
 3. `start_agent` 直前の preflight を行う。required field が欠けている場合は呼ばない。
 4. `start_agent` を呼ぶ。
 5. 返された同じ `jobId` に対して、通常は `timeout_seconds` を指定せず `wait_agent_job(job_id)` を呼ぶ。診断・テスト・上位環境の明示的な制約など、既定の300秒を上書きする理由がある場合だけ指定する。
@@ -92,9 +93,10 @@ payload の出典は、この Skill を呼び出した実際のユーザー mess
 - `working_directory` があり、現在の workspace / worktree の絶対パスである
 - Follow-up continuation なら `session_id` は直前の completed `result.sessionId` と一致する
 - この turn の実行オプションにある `model` と `reasoning_effort` だけを渡す。この agent では `fast` を渡さない。`true` と `false` のどちらでも `start_agent` を呼ばない
+- `plan` があるときは `start_agent` を呼ばない。`plan` が無いときは `run_mode` を渡さない
 - `prompt` は委譲本文と一致する。`$github-copilot` や `/github-copilot` を追加していない
 - 新規 job と継続では `skills` を渡さない。`skills` に `github-copilot` を入れない
-- Exact retry なら `model`, `reasoning_effort`, `fast` を含む全ての `start_agent` 引数が前回の試行と同一である
+- Exact retry なら `model`, `reasoning_effort`, `fast`, `run_mode` を含む全ての `start_agent` 引数が前回の試行と同一である
 
 required field が欠けている場合は `start_agent` を呼ばず、その field を補ってから呼ぶ。
 

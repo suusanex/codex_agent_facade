@@ -29,7 +29,8 @@ public static class McpPublicContract
         + "wait_agent_job does not start, restart, or cancel the worker. "
         + "A completed job means the Facade accepted a worker result. For GitHub Copilot, Cursor, and Codex that follows CLI termination. For Grok Build it can also follow a correlated internal prompt completion when the CLI does not exit; exitCode is present only when a real process code was observed and is omitted otherwise. "
         + "Distinguish failed jobs, lost responses, and wait timeouts. A recovery retry reuses the same request_id and must not start a second job. "
-        + "Successful results expose outputKind as final_response or assistant_transcript; raw streams are available only in run logs. "
+        + "Successful results expose outputKind as final_response, assistant_transcript, or plan; raw streams are available only in run logs. "
+        + "Optional run_mode plan asks Grok Build for a native plan and stops before implementation. Other agents reject it before launch. Omitting run_mode keeps the existing run. "
         + "Reuse session_id from a completed result to continue the same external agent session.";
 
     public const string StartAgentDescription =
@@ -41,7 +42,8 @@ public static class McpPublicContract
         + "Omit timeout_seconds to use the 300-second default unless diagnosis, testing, or another explicit constraint requires an override. "
         + "Completed means the Facade accepted a worker result, not that every CLI process exited by itself. Grok Build can complete from its internal prompt log while the process is still running; exitCode is omitted until a real process code is observed. The caller must review the response, diff, tests, and evidence before accepting the work. "
         + "A lost response is recovered with the same request_id; do not start a new job for recovery. "
-        + "Successful results expose outputKind as final_response or assistant_transcript; raw streams are not returned by MCP. "
+        + "Successful results expose outputKind as final_response, assistant_transcript, or plan; raw streams are not returned by MCP. "
+        + "Optional run_mode plan asks Grok Build for a native plan and stops before implementation. Other agents reject it before launch. A plan result includes sessionId and planPath. The workspace file is the source of truth. "
         + "The Facade does not plan, split, or semantically rewrite the supplied worker task. "
         + "Structured options such as skills may be translated by the selected driver. "
         + "When reasoning_effort and fast are omitted, the selected CLI receives the model id as supplied. When either is set, Cursor selects one id from the current cursor-agent model catalog for that base, effort, and fast, and fails before launch when none matches. "
@@ -115,4 +117,11 @@ public static class McpPublicContract
         "Optional explicit fast tier. Omit to preserve the CLI's existing behavior; true requests fast; false explicitly requests the provider's default/non-fast tier. "
         + "Cursor and Codex support this independent option. GitHub Copilot and Grok Build reject either explicit value because their CLIs expose no independent fast switch. "
         + "Cursor requires model. A fast model id may still be selected through model alone. Do not infer fast from model text or substitute another model. Specify the same value on an exact retry.";
+
+    public const string RunModeDescription =
+        "Optional execution mode. Omit it for the existing normal run. "
+        + "The only accepted value is plan, which runs Grok Build in native plan mode and stops before implementation. "
+        + "Other agents reject plan before launch. Do not infer plan from the worker prompt. plan is independent of auto_approve. "
+        + "A successful plan result sets outputKind to plan and includes sessionId and planPath. The workspace file is the source of truth. "
+        + "Specify the same value on an exact retry. Omitting run_mode keeps the existing request fingerprint.";
 }

@@ -13,13 +13,18 @@ public sealed class GrokBuildDriver
     private readonly IProcessRunner _processRunner;
     private readonly TimeProvider _timeProvider;
     private readonly IGrokUnifiedLogReader _logReader;
+    private readonly IGrokAcpProcessFactory _acpProcesses;
 
     public GrokBuildDriver(IProcessRunner processRunner)
-        : this(processRunner, TimeProvider.System, FileGrokUnifiedLogReader.CreateDefault())
+        : this(processRunner, TimeProvider.System, FileGrokUnifiedLogReader.CreateDefault(), null)
     {
     }
 
-    internal GrokBuildDriver(IProcessRunner processRunner, TimeProvider timeProvider, IGrokUnifiedLogReader logReader)
+    internal GrokBuildDriver(
+        IProcessRunner processRunner,
+        TimeProvider timeProvider,
+        IGrokUnifiedLogReader logReader,
+        IGrokAcpProcessFactory? acpProcesses = null)
     {
         ArgumentNullException.ThrowIfNull(processRunner);
         ArgumentNullException.ThrowIfNull(timeProvider);
@@ -27,6 +32,7 @@ public sealed class GrokBuildDriver
         _processRunner = processRunner;
         _timeProvider = timeProvider;
         _logReader = logReader;
+        _acpProcesses = acpProcesses ?? new GrokAcpProcessFactory();
     }
 
     public async Task<AgentRunResult> RunAsync(
@@ -35,6 +41,16 @@ public sealed class GrokBuildDriver
         Action<string>? onStdoutLine,
         CancellationToken cancellationToken)
     {
+        if (request.RunMode is not null)
+        {
+            if (!string.Equals(request.RunMode, GrokPlanSession.Mode, StringComparison.Ordinal))
+            {
+                throw new ArgumentException("run_mode must be omitted or \"plan\".");
+            }
+
+            return await RunPlanAsync(request, runLog, cancellationToken).ConfigureAwait(false);
+        }
+
         var arguments = BuildArguments(request);
         var prompt = ApplyGrokSkills(request.Prompt, request.Skills);
         runLog.WriteStarted(new AgentRunStartedInfo(
@@ -48,7 +64,8 @@ public sealed class GrokBuildDriver
             Arguments: arguments,
             Model: request.Model,
             ReasoningEffort: request.ReasoningEffort,
-            Fast: request.Fast));
+            Fast: request.Fast,
+            RunMode: request.RunMode));
 
         var accumulator = new GrokStreamAccumulator(runLog);
         var signal = new ProcessCompletionSignal();
@@ -247,6 +264,124 @@ public sealed class GrokBuildDriver
         }
 
         return arguments;
+    }
+
+    /// <summary>
+    /// plan は <c>grok agent stdio</c> だけを使う。<c>-p</c> と <c>--reasoning-effort</c> は付けない。
+    /// 1.0.70 の <c>grok agent --reasoning-effort</c> は session の currentValue を変えない。
+    /// model と reasoning_effort は ACP の session/set_config_option で適用する。
+    /// </summary>
+    internal static List<string> BuildPlanArguments(AgentRunRequest request)
+    {
+        var arguments = new List<string>
+        {
+            "agent",
+            "--no-leader",
+        };
+        if (request.AutoApprove)
+        {
+            arguments.Add("--always-approve");
+        }
+
+        AppendModelArgument(arguments, request.Model);
+        arguments.Add("stdio");
+        return arguments;
+    }
+
+    private async Task<AgentRunResult> RunPlanAsync(
+        AgentRunRequest request,
+        IAgentRunLog runLog,
+        CancellationToken cancellationToken)
+    {
+        var arguments = BuildPlanArguments(request);
+        var prompt = ApplyGrokSkills(request.Prompt, request.Skills);
+        runLog.WriteStarted(new AgentRunStartedInfo(
+            Agent: AgentFacade.GrokBuildAgent,
+            WorkingDirectory: request.WorkingDirectory,
+            SessionId: request.SessionId,
+            AutoApprove: request.AutoApprove,
+            Skills: request.Skills,
+            Prompt: prompt,
+            FileName: "grok",
+            Arguments: arguments,
+            Model: request.Model,
+            ReasoningEffort: request.ReasoningEffort,
+            Fast: request.Fast,
+            RunMode: request.RunMode));
+
+        if (!string.IsNullOrWhiteSpace(request.SessionId) && !GrokPlanArtifact.IsSafeSessionId(request.SessionId))
+        {
+            throw PlanFailure("internal_error", "Grok session id is not a safe path segment.");
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        IGrokAcpProcess process;
+        try
+        {
+            process = _acpProcesses.Start(new GrokAcpStartInfo(
+                "grok",
+                arguments,
+                request.WorkingDirectory,
+                line => runLog.WriteProcessLine("stderr", line)));
+        }
+        catch (ProcessStartException ex)
+        {
+            CliJson.TraceException(ex);
+            CliJson.MarkFailure(ex, "process_start_failed");
+            throw;
+        }
+
+        AgentRunResult result;
+        await using (process)
+        {
+            runLog.WriteLaunch(process.Launch);
+            GrokPlanOutcome outcome;
+            try
+            {
+                outcome = await GrokPlanSession.RunAsync(process, request, prompt, runLog, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+
+            var standardError = process.CopyStandardError();
+            if (request.ReasoningEffort is not null && ReportsIgnoredReasoningEffort(standardError))
+            {
+                throw PlanFailure(
+                    "option_not_applied",
+                    "Grok Build CLI reported that the requested reasoning effort was not applied.");
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            GrokPlanArtifact.Write(request.WorkingDirectory, outcome.SessionId, outcome.Content);
+            result = new AgentRunResult(
+                Agent: AgentFacade.GrokBuildAgent,
+                SessionId: outcome.SessionId,
+                ExitCode: null,
+                OutputText: outcome.Content,
+                OutputKind: "plan",
+                RawOutput: outcome.Content,
+                RunId: runLog.RunId,
+                EventsLogPath: runLog.EventsPath,
+                TextLogPath: runLog.TextLogPath,
+                PlanPath: GrokPlanArtifact.RelativePath(outcome.SessionId));
+        }
+
+        if (!process.ExitObserved)
+        {
+            throw PlanFailure("internal_error", "Grok Build plan mode did not exit after termination.");
+        }
+
+        return result;
+    }
+
+    private static InvalidOperationException PlanFailure(string kind, string message)
+    {
+        var failure = new InvalidOperationException(message);
+        CliJson.MarkFailure(failure, kind, message);
+        CliJson.TraceException(failure);
+        return failure;
     }
 
     private static void AppendModelArgument(List<string> arguments, string? model)

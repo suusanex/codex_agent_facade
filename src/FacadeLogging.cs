@@ -285,7 +285,7 @@ internal static class FacadeLog
         {
             var previous = _factory;
             _factory = factory;
-            return new Restore(previous);
+            return new Restore(previous, factory);
         }
     }
 
@@ -309,14 +309,20 @@ internal static class FacadeLog
         logger.LogInformation("{Message}", SecretRedactor.RedactText(message));
     }
 
+    /// <summary>
+    /// 自分が入れた factory がまだ現在値のときだけ previous へ戻す。
+    /// host 停止が先に Null へ戻したあと、破棄済み factory を復元しない。
+    /// </summary>
     private sealed class Restore : IDisposable
     {
         private readonly MsLoggerFactory _previous;
+        private readonly MsLoggerFactory _installed;
         private int _disposed;
 
-        public Restore(MsLoggerFactory previous)
+        public Restore(MsLoggerFactory previous, MsLoggerFactory installed)
         {
             _previous = previous;
+            _installed = installed;
         }
 
         public void Dispose()
@@ -328,7 +334,10 @@ internal static class FacadeLog
 
             lock (Gate)
             {
-                _factory = _previous;
+                if (ReferenceEquals(_factory, _installed))
+                {
+                    _factory = _previous;
+                }
             }
         }
     }

@@ -133,13 +133,13 @@ public sealed class AgentJobService
         var id = jobId.Trim();
         if (_byJobId.TryGetValue(id, out var live))
         {
-            var snapshot = live.CreateSnapshot();
-            if (live.RequestCancel())
+            var fingerprint = ComputeRequestFingerprint(live.Request);
+            if (live.RequestCancel(next => Persist(ToRecord(next, fingerprint))))
             {
-                snapshot = live.CreateSnapshot();
-                LogTerminal(snapshot, AgentJobStatus.Cancelled, exitCode: null, errorType: null);
+                LogTerminal(live.CreateSnapshot(), AgentJobStatus.Cancelled, exitCode: null, errorType: null);
             }
-            Persist(ToRecord(snapshot, ComputeRequestFingerprint(live.Request)));
+
+            var snapshot = live.CreateSnapshot();
             Evict(live);
             return snapshot;
         }
@@ -199,37 +199,48 @@ public sealed class AgentJobService
     {
         try
         {
-            var result = await _facade.RunAsync(
-                    job.Request,
-                    onStdoutLine: null,
-                    job.CancellationToken,
-                    job.JobId)
-                .ConfigureAwait(false);
-            if (job.Complete(result))
+            try
             {
-                LogTerminal(job.CreateSnapshot(), AgentJobStatus.Completed, result.ExitCode, errorType: null);
+                var result = await _facade.RunAsync(
+                        job.Request,
+                        onStdoutLine: null,
+                        job.CancellationToken,
+                        job.JobId)
+                    .ConfigureAwait(false);
+                if (job.Complete(result, next => Persist(ToRecord(next, fingerprint))))
+                {
+                    LogTerminal(job.CreateSnapshot(), AgentJobStatus.Completed, result.ExitCode, errorType: null);
+                }
+            }
+            catch (OperationCanceledException ex)
+            {
+                CliJson.TraceException(ex);
+                if (job.MarkCancelled(next => Persist(ToRecord(next, fingerprint))))
+                {
+                    LogTerminal(job.CreateSnapshot(), AgentJobStatus.Cancelled, exitCode: null, errorType: ex.GetType().Name);
+                }
+            }
+            catch (Exception ex)
+            {
+                CliJson.TraceException(ex);
+                var failure = CreateFailure(ex);
+                if (job.Fail("agent job failed. See the server log for details.", failure, next => Persist(ToRecord(next, fingerprint))))
+                {
+                    LogTerminal(job.CreateSnapshot(), AgentJobStatus.Failed, exitCode: failure.ExitCode, errorType: ex.GetType().Name);
+                }
             }
         }
-        catch (OperationCanceledException ex)
+        finally
         {
-            CliJson.TraceException(ex);
-            if (job.MarkCancelled())
+            // 保存に失敗して terminal になっていないときも、waiter を running のまま残さない。
+            // この Fail は保存しない。Evict は保存済みのときだけ登録を外す。
+            if (!job.IsTerminal)
             {
-                LogTerminal(job.CreateSnapshot(), AgentJobStatus.Cancelled, exitCode: null, errorType: ex.GetType().Name);
+                job.Fail("agent job failed. See the server log for details.");
             }
-        }
-        catch (Exception ex)
-        {
-            CliJson.TraceException(ex);
-            var failure = CreateFailure(ex);
-            if (job.Fail("agent job failed. See the server log for details.", failure))
-            {
-                LogTerminal(job.CreateSnapshot(), AgentJobStatus.Failed, exitCode: failure.ExitCode, errorType: ex.GetType().Name);
-            }
-        }
 
-        Persist(ToRecord(job.CreateSnapshot(), fingerprint));
-        Evict(job);
+            Evict(job);
+        }
     }
 
     private void LogTerminal(AgentJobSnapshot snapshot, string expectedStatus, int? exitCode, string? errorType)
@@ -269,7 +280,9 @@ public sealed class AgentJobService
 
     private void Evict(AgentJob job)
     {
-        if (!job.IsTerminal)
+        // 保存済みの terminal だけ登録から外す。未保存の失敗を外すと、
+        // 次の Get が disk の running を facade_interrupted として上書きする。
+        if (!job.IsTerminal || !job.TerminalPersisted)
         {
             return;
         }
@@ -412,6 +425,22 @@ public sealed class AgentJobService
 
     internal static string ComputeRequestFingerprint(AgentRunRequest request)
     {
+        if (request.RunMode is not null)
+        {
+            var planAwareRequest = new RequestFingerprintV3(
+                request.Agent,
+                request.Prompt,
+                request.WorkingDirectory,
+                request.SessionId ?? string.Empty,
+                request.AutoApprove,
+                request.Skills ?? Array.Empty<string>(),
+                string.IsNullOrWhiteSpace(request.Model) ? null : request.Model,
+                request.ReasoningEffort,
+                request.Fast,
+                request.RunMode);
+            return HashText("request-v3\0" + JsonSerializer.Serialize(planAwareRequest, AgentJson.Options));
+        }
+
         if (request.ReasoningEffort is not null || request.Fast is not null)
         {
             var versionedRequest = new RequestFingerprintV2(
@@ -463,6 +492,18 @@ public sealed class AgentJobService
         string? Model,
         string? ReasoningEffort,
         bool? Fast);
+
+    private sealed record RequestFingerprintV3(
+        string Agent,
+        string Prompt,
+        string WorkingDirectory,
+        string? SessionId,
+        bool AutoApprove,
+        IReadOnlyList<string>? Skills,
+        string? Model,
+        string? ReasoningEffort,
+        bool? Fast,
+        string? RunMode);
 
     private static string HashText(string value)
     {

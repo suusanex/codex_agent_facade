@@ -46,7 +46,8 @@ public sealed record AgentRunPublicResult(
     string OutputKind = "assistant_transcript",
     string? CompletionReason = null,
     GrokCompletionEvidence? CompletionEvidence = null,
-    ProcessTerminationInfo? ProcessTermination = null);
+    ProcessTerminationInfo? ProcessTermination = null,
+    string? PlanPath = null);
 
 /// <summary>
 /// 失敗時に親が復旧判断へ使う、公開可能な最小限の診断情報。
@@ -87,7 +88,8 @@ internal static class AgentJobPublicProjection
             result.OutputKind,
             result.CompletionReason,
             result.CompletionEvidence,
-            result.ProcessTermination);
+            result.ProcessTermination,
+            result.PlanPath);
     }
 }
 
@@ -100,6 +102,7 @@ public sealed class AgentJob
     private readonly CancellationTokenSource _cancellation = new();
     private readonly TaskCompletionSource _terminal = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private string _status = AgentJobStatus.Running;
+    private bool _terminalPersisted;
     private AgentRunResult? _result;
     private string? _error;
     private AgentJobFailure? _failure;
@@ -141,7 +144,22 @@ public sealed class AgentJob
         }
     }
 
-    public bool RequestCancel()
+    /// <summary>
+    /// terminal 状態の保存コールバックが成功したときだけ true。
+    /// 未保存のまま登録を外すと、disk の running を facade_interrupted として上書きする。
+    /// </summary>
+    public bool TerminalPersisted
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _terminalPersisted;
+            }
+        }
+    }
+
+    public bool RequestCancel(Action<AgentJobSnapshot>? beforePublish = null)
     {
         try
         {
@@ -152,24 +170,24 @@ public sealed class AgentJob
             CliJson.TraceException(ex);
         }
 
-        return TryFinish(AgentJobStatus.Cancelled, result: null, error: "cancelled");
+        return TryFinish(AgentJobStatus.Cancelled, result: null, error: "cancelled", failure: null, beforePublish);
     }
 
-    public bool Complete(AgentRunResult result)
+    public bool Complete(AgentRunResult result, Action<AgentJobSnapshot>? beforePublish = null)
     {
         ArgumentNullException.ThrowIfNull(result);
-        return TryFinish(AgentJobStatus.Completed, result, error: null);
+        return TryFinish(AgentJobStatus.Completed, result, error: null, failure: null, beforePublish);
     }
 
-    public bool Fail(string error, AgentJobFailure? failure = null)
+    public bool Fail(string error, AgentJobFailure? failure = null, Action<AgentJobSnapshot>? beforePublish = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(error);
-        return TryFinish(AgentJobStatus.Failed, result: null, error, failure);
+        return TryFinish(AgentJobStatus.Failed, result: null, error, failure, beforePublish);
     }
 
-    public bool MarkCancelled()
+    public bool MarkCancelled(Action<AgentJobSnapshot>? beforePublish = null)
     {
-        return TryFinish(AgentJobStatus.Cancelled, result: null, error: "cancelled");
+        return TryFinish(AgentJobStatus.Cancelled, result: null, error: "cancelled", failure: null, beforePublish);
     }
 
     public AgentJobSnapshot CreateSnapshot()
@@ -198,13 +216,36 @@ public sealed class AgentJob
         }
     }
 
-    private bool TryFinish(string status, AgentRunResult? result, string? error, AgentJobFailure? failure = null)
+    /// <summary>
+    /// terminal 状態を公開する前に <paramref name="beforePublish"/> を実行する。
+    /// Get と WhenTerminal はロック解放とシグナルの後でだけ新しい状態を見る。
+    /// 先に公開すると、disk が running のまま再読込され facade_interrupted になる。
+    /// beforePublish が失敗したときは状態を変えず、例外を返す。
+    /// </summary>
+    private bool TryFinish(
+        string status,
+        AgentRunResult? result,
+        string? error,
+        AgentJobFailure? failure,
+        Action<AgentJobSnapshot>? beforePublish)
     {
         lock (_gate)
         {
             if (IsTerminalStatus(_status))
             {
                 return false;
+            }
+
+            if (beforePublish is not null)
+            {
+                beforePublish.Invoke(new AgentJobSnapshot(
+                    JobId,
+                    RequestId,
+                    status,
+                    result,
+                    error,
+                    failure));
+                _terminalPersisted = true;
             }
 
             _status = status;
