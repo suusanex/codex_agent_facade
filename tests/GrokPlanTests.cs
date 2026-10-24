@@ -47,7 +47,10 @@ public class GrokPlanSessionTests
         Assert.Contains("--always-approve", start.Arguments);
         Assert.DoesNotContain("-p", start.Arguments);
         Assert.DoesNotContain("--reasoning-effort", start.Arguments);
-        Assert.Contains("/review\\n", string.Join("\n", factory.Last!.Written), StringComparison.Ordinal);
+        var written = string.Join("\n", factory.Last!.Written);
+        Assert.Contains("/review\\n", written, StringComparison.Ordinal);
+        Assert.Contains("\"method\":\"session/cancel\"", written, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"outcome\":\"abandoned\"", written, StringComparison.Ordinal);
         var projected = AgentJobPublicProjection.From(result);
         Assert.Equal(result.PlanPath, projected.PlanPath);
         var json = JsonSerializer.Serialize(projected, AgentJson.Options);
@@ -137,6 +140,20 @@ public class GrokPlanSessionTests
         Assert.Equal("session_mismatch", failure.Data[CliJson.FailureKindKey]);
         Assert.False(File.Exists(directory.PlanFile(SessionA)));
         Assert.False(File.Exists(directory.PlanFile(SessionB)));
+    }
+
+    [Fact]
+    public async Task EndTurnAfterPlanCancelIsNotSuccess()
+    {
+        using var directory = new TempWorkspace();
+        var factory = new ScriptedGrokAcpFactory
+        {
+            Script = new ScriptedGrokPlanScript { StopReason = "end_turn" },
+        };
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => RunAsync(Request(directory.Path), factory, new RecordingProcessRunner()));
+        Assert.Equal("internal_error", failure.Data[CliJson.FailureKindKey]);
+        Assert.Contains("end_turn", failure.Message, StringComparison.Ordinal);
+        Assert.False(File.Exists(directory.PlanFile(SessionA)));
     }
 
     [Fact]
@@ -466,6 +483,8 @@ internal sealed class ScriptedGrokPlanScript
 
     public string PlanContent { get; set; } = "# Probe\n\nThis plan records a single probe sentence and makes no repository changes.\n";
 
+    public string StopReason { get; set; } = "cancelled";
+
     public bool ToolCallAfterAbandon { get; set; }
 
     public bool ToolCallUpdateAfterAbandon { get; set; }
@@ -538,29 +557,29 @@ internal sealed class ScriptedGrokAcpPeer : IGrokAcpProcess
         var root = document.RootElement;
         if (!root.TryGetProperty("method", out var method))
         {
-            if (root.TryGetProperty("result", out var result)
-                && result.TryGetProperty("outcome", out var outcome)
-                && outcome.GetString() == "abandoned")
-            {
-                if (_script.ToolCallAfterAbandon)
-                {
-                    Enqueue("{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"tool_call\",\"toolCallId\":\"edit-1\"}}}");
-                }
-                else
-                {
-                    if (_script.ToolCallUpdateAfterAbandon)
-                    {
-                        Enqueue("{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"tool_call_update\",\"toolCallId\":\"exit\"}}}");
-                    }
+            return Task.CompletedTask;
+        }
 
-                    Enqueue("{\"jsonrpc\":\"2.0\",\"id\":" + (_promptId ?? "1") + ",\"result\":{\"stopReason\":\"end_turn\"}}");
+        var name = method.GetString();
+        if (name == "session/cancel")
+        {
+            if (_script.ToolCallAfterAbandon)
+            {
+                Enqueue("{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"tool_call\",\"toolCallId\":\"edit-1\"}}}");
+            }
+            else
+            {
+                if (_script.ToolCallUpdateAfterAbandon)
+                {
+                    Enqueue("{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"tool_call_update\",\"toolCallId\":\"exit\"}}}");
                 }
+
+                Enqueue("{\"jsonrpc\":\"2.0\",\"id\":" + (_promptId ?? "1") + ",\"result\":{\"stopReason\":" + GrokPlanSession.Quote(_script.StopReason) + "}}");
             }
 
             return Task.CompletedTask;
         }
 
-        var name = method.GetString();
         var id = root.GetProperty("id").GetRawText();
         switch (name)
         {
