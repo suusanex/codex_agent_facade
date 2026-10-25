@@ -43,7 +43,7 @@ public static class McpPublicContract
         + "Completed means the Facade accepted a worker result, not that every CLI process exited by itself. Grok Build can complete from its internal prompt log while the process is still running; exitCode is omitted until a real process code is observed. The caller must review the response, diff, tests, and evidence before accepting the work. "
         + "A lost response is recovered with the same request_id; do not start a new job for recovery. "
         + "Successful results expose outputKind as final_response, assistant_transcript, or plan; raw streams are not returned by MCP. "
-        + "Optional run_mode plan asks Grok Build for a native plan and stops before implementation. Other agents reject it before launch. A plan result includes sessionId and planPath. The workspace file is the source of truth. "
+        + "Optional run_mode plan asks Grok Build for a native plan and stops before implementation. Other agents reject it before launch. A plan result includes sessionId and planPath. The workspace file at planPath is the caller-facing published plan artifact. Each successful revision of the same session overwrites it. The next revision reads the Grok session plan, not direct edits of that workspace file. "
         + "The Facade does not plan, split, or semantically rewrite the supplied worker task. "
         + "Structured options such as skills may be translated by the selected driver. "
         + "When reasoning_effort and fast are omitted, the selected CLI receives the model id as supplied. When either is set, Cursor selects one id from the current cursor-agent model catalog for that base, effort, and fast, and fails before launch when none matches. "
@@ -122,6 +122,6 @@ public static class McpPublicContract
         "Optional execution mode. Omit it for the existing normal run. "
         + "The only accepted value is plan, which runs Grok Build in native plan mode and stops before implementation. "
         + "Other agents reject plan before launch. Do not infer plan from the worker prompt. plan is independent of auto_approve. "
-        + "A successful plan result sets outputKind to plan and includes sessionId and planPath. The workspace file is the source of truth. "
+        + "A successful plan result sets outputKind to plan and includes sessionId and planPath. The workspace file at planPath is the caller-facing published plan artifact. Each successful revision of the same session overwrites it. The next revision reads the Grok session plan, not direct edits of that workspace file. "
         + "Specify the same value on an exact retry. Omitting run_mode keeps the existing request fingerprint.";
 }
