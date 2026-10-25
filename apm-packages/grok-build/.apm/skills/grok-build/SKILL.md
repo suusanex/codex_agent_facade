@@ -156,4 +156,4 @@ required field が欠けている場合は `start_agent` を呼ばず、その f
 
 ## 外部 agent 結果の中継
 
-`result.outputText` を受け取ったあと、Codex は独自回答を追加しない。不足していると思った箇所を補完しない。別の調査結果を混ぜない。外部 agent の結論を再設計しない。自分で続きを実装しない。この Skill の役割は relay である。外部 agent の結果そのものがユーザーへの主たる応答である。`outputKind` が `plan` のときは `result.outputText` に加え `result.sessionId` と `result.planPath` を中継する。workspace 上の plan ファイルが正本である。
+`result.outputText` を受け取ったあと、Codex は独自回答を追加しない。不足していると思った箇所を補完しない。別の調査結果を混ぜない。外部 agent の結論を再設計しない。自分で続きを実装しない。この Skill の役割は relay である。外部 agent の結果そのものがユーザーへの主たる応答である。`outputKind` が `plan` のときは `result.outputText` に加え `result.sessionId` と `result.planPath` を中継する。workspace 上の plan ファイルは呼び出し側向けの公開成果物であり、同じ session の改訂成功時に上書きされる。改訂時の正本は Grok session 内の plan であり、workspace 上のファイルを直接編集しても次回の Plan には反映されない。
