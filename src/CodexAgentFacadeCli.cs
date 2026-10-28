@@ -17,6 +17,9 @@
 #:include GrokBuildDriver.cs
 #:include CursorCliDriver.cs
 #:include CodexCliDriver.cs
+#:include AntigravityCliDriver.cs
+#:include JulesApiClient.cs
+#:include JulesDriver.cs
 #:include AgentJob.cs
 #:include RunLogViewerLauncher.cs
 #:include AgentCli.cs
@@ -98,7 +101,8 @@ static async Task<int> RunAsync(string[] args, string productDirectory, string d
         new CodexCliDriver(processRunner),
         new AgentRunLogFactory(ResolveRunLogDirectory(productDirectory), TimeProvider.System),
         new WindowsRunLogViewerLauncher(
-            new FileRunLogViewerSettingsSource(Path.Combine(productDirectory, FacadeUserConfig.FileName))));
+            new FileRunLogViewerSettingsSource(Path.Combine(productDirectory, FacadeUserConfig.FileName))),
+        new AntigravityCliDriver(processRunner));
     return await AgentCli.ExecuteAsync(facade, input, Console.Out, cancellation.Token, diagnosticLogPath).ConfigureAwait(false);
 }
 

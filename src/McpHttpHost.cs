@@ -114,6 +114,8 @@ public static class McpHttpHost
         builder.Services.AddSingleton<GrokBuildDriver>();
         builder.Services.AddSingleton<CursorCliDriver>();
         builder.Services.AddSingleton<CodexCliDriver>();
+        builder.Services.AddSingleton<AntigravityCliDriver>();
+        builder.Services.AddSingleton<JulesDriver>();
         builder.Services.AddSingleton<IRunLogViewerLauncher>(
             options.RunLogViewerLauncher ?? NullRunLogViewerLauncher.Instance);
         builder.Services.AddSingleton<AgentFacade>();

@@ -57,7 +57,8 @@ public sealed class AgentJobService
 
         if (_byRequestId.TryGetValue(key, out var existing))
         {
-            EnsureSameRequest(existing.Request, request);
+            EnsureBound(existing, request, fingerprint);
+            EnsureJulesMonitor(existing, fingerprint);
             return existing.CreateSnapshot();
         }
 
@@ -65,6 +66,13 @@ public sealed class AgentJobService
         if (stored is not null)
         {
             EnsureSameFingerprint(stored, fingerprint);
+            if (CanResumeJules(stored))
+            {
+                var resumed = AttachJules(stored);
+                EnsureJulesMonitor(resumed, fingerprint);
+                return resumed.CreateSnapshot();
+            }
+
             var recovered = RecoverStored(stored);
             return ToSnapshot(recovered);
         }
@@ -111,6 +119,7 @@ public sealed class AgentJobService
         var id = jobId.Trim();
         if (_byJobId.TryGetValue(id, out var live))
         {
+            EnsureJulesMonitor(live, live.BoundFingerprint ?? ComputeRequestFingerprint(live.Request));
             return live.CreateSnapshot();
         }
 
@@ -118,6 +127,13 @@ public sealed class AgentJobService
         if (stored is null)
         {
             throw new KeyNotFoundException($"Unknown job '{id}'.");
+        }
+
+        if (CanResumeJules(stored))
+        {
+            var resumed = AttachJules(stored);
+            EnsureJulesMonitor(resumed, stored.RequestFingerprint);
+            return resumed.CreateSnapshot();
         }
 
         return ToSnapshot(RecoverStored(stored));
@@ -133,7 +149,12 @@ public sealed class AgentJobService
         var id = jobId.Trim();
         if (_byJobId.TryGetValue(id, out var live))
         {
-            var fingerprint = ComputeRequestFingerprint(live.Request);
+            if (IsJulesJob(live))
+            {
+                throw new InvalidOperationException("Jules cancel is unsupported. The remote session was not changed.");
+            }
+
+            var fingerprint = live.BoundFingerprint ?? ComputeRequestFingerprint(live.Request);
             if (live.RequestCancel(next => Persist(ToRecord(next, fingerprint))))
             {
                 LogTerminal(live.CreateSnapshot(), AgentJobStatus.Cancelled, exitCode: null, errorType: null);
@@ -148,6 +169,11 @@ public sealed class AgentJobService
         if (record is null)
         {
             throw new KeyNotFoundException($"Unknown job '{id}'.");
+        }
+
+        if (IsJulesRecord(record))
+        {
+            throw new InvalidOperationException("Jules cancel is unsupported. The remote session was not changed.");
         }
 
         return ToSnapshot(RecoverStored(record));
@@ -178,6 +204,7 @@ public sealed class AgentJobService
         }
 
         var id = jobId.Trim();
+        Get(id);
         if (_byJobId.TryGetValue(id, out var live) && !live.IsTerminal)
         {
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -197,50 +224,332 @@ public sealed class AgentJobService
 
     private async Task RunWorkerAsync(AgentJob job, string fingerprint)
     {
+        if (!job.TryBeginMonitor())
+        {
+            return;
+        }
+
         try
         {
-            try
+            if (IsJules(job.Request))
             {
-                var result = await _facade.RunAsync(
-                        job.Request,
-                        onStdoutLine: null,
-                        job.CancellationToken,
-                        job.JobId)
-                    .ConfigureAwait(false);
-                if (job.Complete(result, next => Persist(ToRecord(next, fingerprint))))
-                {
-                    LogTerminal(job.CreateSnapshot(), AgentJobStatus.Completed, result.ExitCode, errorType: null);
-                }
+                await RunJulesAsync(job, fingerprint).ConfigureAwait(false);
             }
-            catch (OperationCanceledException ex)
+            else
             {
-                CliJson.TraceException(ex);
-                if (job.MarkCancelled(next => Persist(ToRecord(next, fingerprint))))
-                {
-                    LogTerminal(job.CreateSnapshot(), AgentJobStatus.Cancelled, exitCode: null, errorType: ex.GetType().Name);
-                }
-            }
-            catch (Exception ex)
-            {
-                CliJson.TraceException(ex);
-                var failure = CreateFailure(ex);
-                if (job.Fail("agent job failed. See the server log for details.", failure, next => Persist(ToRecord(next, fingerprint))))
-                {
-                    LogTerminal(job.CreateSnapshot(), AgentJobStatus.Failed, exitCode: failure.ExitCode, errorType: ex.GetType().Name);
-                }
+                await RunLocalAsync(job, fingerprint).ConfigureAwait(false);
             }
         }
         finally
         {
             // 保存に失敗して terminal になっていないときも、waiter を running のまま残さない。
-            // この Fail は保存しない。Evict は保存済みのときだけ登録を外す。
-            if (!job.IsTerminal)
+            // Jules の監視中断は remote の停止ではないので、running のまま残す。
+            if (!job.IsTerminal && !IsJules(job.Request) && job.Jules is null)
             {
                 job.Fail("agent job failed. See the server log for details.");
             }
 
+            job.EndMonitorIfStillRunning();
             Evict(job);
         }
+    }
+
+    private async Task RunLocalAsync(AgentJob job, string fingerprint)
+    {
+        try
+        {
+            var result = await _facade.RunAsync(
+                    job.Request,
+                    onStdoutLine: null,
+                    job.CancellationToken,
+                    job.JobId)
+                .ConfigureAwait(false);
+            if (job.Complete(result, next => Persist(ToRecord(next, fingerprint))))
+            {
+                LogTerminal(job.CreateSnapshot(), AgentJobStatus.Completed, result.ExitCode, errorType: null);
+            }
+        }
+        catch (OperationCanceledException ex)
+        {
+            CliJson.TraceException(ex);
+            if (job.MarkCancelled(next => Persist(ToRecord(next, fingerprint))))
+            {
+                LogTerminal(job.CreateSnapshot(), AgentJobStatus.Cancelled, exitCode: null, errorType: ex.GetType().Name);
+            }
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            var failure = CreateFailure(ex);
+            if (job.Fail("agent job failed. See the server log for details.", failure, next => Persist(ToRecord(next, fingerprint))))
+            {
+                LogTerminal(job.CreateSnapshot(), AgentJobStatus.Failed, exitCode: failure.ExitCode, errorType: ex.GetType().Name);
+            }
+        }
+    }
+
+    private async Task RunJulesAsync(AgentJob job, string fingerprint)
+    {
+        var resume = job.Jules?.SessionId is not null ? job.Jules : null;
+        var context = CreateJulesContext(job, fingerprint, resume);
+        try
+        {
+            var outcome = await _facade.RunJulesAsync(job.Request, context, job.CancellationToken).ConfigureAwait(false);
+            await ApplyJulesAsync(job, fingerprint, outcome).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException ex)
+        {
+            CliJson.TraceException(ex);
+            var sessionId = job.Jules?.SessionId;
+            var phase = job.Jules?.RemotePhase;
+            if (!string.IsNullOrWhiteSpace(sessionId))
+            {
+                return;
+            }
+
+            if (phase is JulesRemotePhase.SubmittingCreate or JulesRemotePhase.SubmissionUnknown)
+            {
+                var failure = new AgentJobFailure(
+                    "submission_unknown",
+                    "Jules session create result is unknown. The request was not sent again.");
+                if (job.Fail(failure.Summary, failure, next => Persist(ToRecord(next, fingerprint))))
+                {
+                    LogTerminal(job.CreateSnapshot(), AgentJobStatus.Failed, exitCode: null, errorType: ex.GetType().Name);
+                }
+
+                return;
+            }
+
+            if (job.MarkCancelled(next => Persist(ToRecord(next, fingerprint))))
+            {
+                LogTerminal(job.CreateSnapshot(), AgentJobStatus.Cancelled, exitCode: null, errorType: ex.GetType().Name);
+            }
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            var failure = CreateFailure(ex);
+            if (job.Fail("agent job failed. See the server log for details.", failure, next => Persist(ToRecord(next, fingerprint))))
+            {
+                LogTerminal(job.CreateSnapshot(), AgentJobStatus.Failed, exitCode: failure.ExitCode, errorType: ex.GetType().Name);
+            }
+        }
+    }
+
+    private void EnsureJulesMonitor(AgentJob job, string fingerprint)
+    {
+        if (job.IsTerminal || !IsJulesJob(job))
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(job.Jules?.SessionId)
+            && job.Jules?.RemotePhase is not JulesRemotePhase.SubmittingCreate and not JulesRemotePhase.SubmissionUnknown)
+        {
+            return;
+        }
+
+        if (!job.TryBeginMonitor())
+        {
+            return;
+        }
+
+        _ = ObserveJulesAsync(job, fingerprint);
+    }
+
+    private async Task ObserveJulesAsync(AgentJob job, string fingerprint)
+    {
+        try
+        {
+            await RunJulesAsync(job, fingerprint).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            if (!job.IsTerminal)
+            {
+                var failure = CreateFailure(ex);
+                job.Fail("agent job failed. See the server log for details.", failure, next => Persist(ToRecord(next, fingerprint)));
+            }
+        }
+        finally
+        {
+            job.EndMonitorIfStillRunning();
+            Evict(job);
+        }
+    }
+
+    private async Task ApplyJulesAsync(AgentJob job, string fingerprint, JulesRunOutcome outcome)
+    {
+        switch (outcome)
+        {
+            case JulesCompletedOutcome completed:
+                await ReleaseJulesLockAsync(job, fingerprint).ConfigureAwait(false);
+                if (job.Complete(completed.Result, next => Persist(ToRecord(next, fingerprint))))
+                {
+                    LogTerminal(job.CreateSnapshot(), AgentJobStatus.Completed, completed.Result.ExitCode, errorType: null);
+                }
+
+                break;
+            case JulesWaitingOutcome waiting:
+                await ReleaseJulesLockAsync(job, fingerprint).ConfigureAwait(false);
+                if (job.SettleWaiting(waiting.Result, next => Persist(ToRecord(next, fingerprint))))
+                {
+                    LogTerminal(job.CreateSnapshot(), AgentJobStatus.WaitingForInput, exitCode: null, errorType: null);
+                }
+
+                break;
+            case JulesFailedOutcome failed:
+                if (failed.ReleaseSessionLock)
+                {
+                    await ReleaseJulesLockAsync(job, fingerprint).ConfigureAwait(false);
+                }
+
+                var failure = CreateFailure(failed.Exception);
+                if (job.Fail("agent job failed. See the server log for details.", failure, next => Persist(ToRecord(next, fingerprint))))
+                {
+                    LogTerminal(job.CreateSnapshot(), AgentJobStatus.Failed, exitCode: failure.ExitCode, errorType: failed.Exception.GetType().Name);
+                }
+
+                break;
+            case JulesSuspendedOutcome:
+                break;
+            default:
+                throw new InvalidOperationException("Unknown Jules outcome.");
+        }
+    }
+
+    private JulesRunContext CreateJulesContext(AgentJob job, string fingerprint, JulesJobState? resume)
+    {
+        return new JulesRunContext
+        {
+            JobId = job.JobId,
+            RequestId = job.RequestId,
+            JobStoreDirectory = _storeDirectory,
+            Persist = state => job.UpdateJules(state, snapshot => Persist(ToRecord(snapshot, fingerprint))),
+            IsSessionLockedByOther = sessionId => IsJulesSessionLockedByOther(sessionId, job.JobId),
+            Resume = resume,
+            EventsLogPath = resume?.EventsLogPath,
+            TextLogPath = resume?.TextLogPath,
+        };
+    }
+
+    private async Task ReleaseJulesLockAsync(AgentJob job, string fingerprint)
+    {
+        var state = job.Jules;
+        if (state is not { SessionLockHeld: true } || string.IsNullOrWhiteSpace(state.SessionId))
+        {
+            return;
+        }
+
+        var sessionId = state.SessionId;
+        job.UpdateJules(state with { SessionLockHeld = false }, snapshot => Persist(ToRecord(snapshot, fingerprint)));
+        await JulesSessionGate.ReleaseAsync(_storeDirectory, sessionId, job.JobId, CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private bool IsJulesSessionLockedByOther(string sessionId, string jobId)
+    {
+        foreach (var job in _byJobId.Values)
+        {
+            if (string.Equals(job.JobId, jobId, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var state = job.Jules;
+            if (state is { SessionLockHeld: true }
+                && string.Equals(state.SessionId, sessionId, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        foreach (var path in Directory.EnumerateFiles(_storeDirectory, "req-*.json"))
+        {
+            var record = TryReadFile(path);
+            if (record is null || string.Equals(record.JobId, jobId, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (record.Jules is { SessionLockHeld: true }
+                && string.Equals(record.Jules.SessionId, sessionId, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private AgentJob AttachJules(AgentJobRecord stored)
+    {
+        if (_byJobId.TryGetValue(stored.JobId, out var live))
+        {
+            return live;
+        }
+
+        var sessionId = stored.Jules?.SessionId ?? stored.SessionId;
+        var request = new AgentRunRequest(AgentFacade.JulesAgent, "(recovered)", ".", sessionId, null);
+        var created = new AgentJob(
+            stored.JobId,
+            stored.RequestId,
+            request,
+            _timeProvider.GetUtcNow(),
+            stored.RequestFingerprint,
+            stored.Jules);
+        if (!_byRequestId.TryAdd(stored.RequestId, created))
+        {
+            created.Discard();
+            return _byRequestId[stored.RequestId];
+        }
+
+        if (!_byJobId.TryAdd(stored.JobId, created))
+        {
+            created.Discard();
+            _byRequestId.TryRemove(stored.RequestId, out _);
+            throw new InvalidOperationException("Failed to register agent job.");
+        }
+
+        return created;
+    }
+
+    private static void EnsureBound(AgentJob existing, AgentRunRequest request, string fingerprint)
+    {
+        if (existing.BoundFingerprint is not null)
+        {
+            if (!string.Equals(existing.BoundFingerprint, fingerprint, StringComparison.Ordinal))
+            {
+                throw new ArgumentException("request_id is already bound to a different start_agent request.");
+            }
+
+            return;
+        }
+
+        EnsureSameRequest(existing.Request, request);
+    }
+
+    private static bool IsJules(AgentRunRequest request)
+    {
+        return string.Equals(request.Agent.Trim(), AgentFacade.JulesAgent, StringComparison.Ordinal);
+    }
+
+    private static bool IsJulesJob(AgentJob job)
+    {
+        return IsJules(job.Request) || job.Jules is not null;
+    }
+
+    private static bool IsJulesRecord(AgentJobRecord record)
+    {
+        return record.Jules is not null
+            || string.Equals(record.Result?.Agent, AgentFacade.JulesAgent, StringComparison.Ordinal);
+    }
+
+    private static bool CanResumeJules(AgentJobRecord stored)
+    {
+        // session ID だけでは baseline と prompt hash が無い。checkpoint ごと残っているものだけ再開する。
+        return stored.Status == AgentJobStatus.Running
+            && !string.IsNullOrWhiteSpace(stored.Jules?.SessionId);
     }
 
     private void LogTerminal(AgentJobSnapshot snapshot, string expectedStatus, int? exitCode, string? errorType)
@@ -297,7 +606,38 @@ public sealed class AgentJobService
             return stored;
         }
 
-        var failed = stored with
+        if (CanResumeJules(stored))
+        {
+            return stored;
+        }
+
+        var phase = stored.Jules?.RemotePhase ?? stored.RemotePhase;
+        if (string.IsNullOrWhiteSpace(stored.Jules?.SessionId)
+            && phase is JulesRemotePhase.SubmittingCreate or JulesRemotePhase.SubmissionUnknown)
+        {
+            var failed = stored with
+            {
+                Status = AgentJobStatus.Failed,
+                Error = "agent job failed. See the server log for details.",
+                Result = null,
+                Failure = new AgentJobFailure(
+                    "submission_unknown",
+                    "Jules session create result is unknown. The request was not sent again."),
+                Jules = stored.Jules is null
+                    ? null
+                    : stored.Jules with
+                    {
+                        RemotePhase = JulesRemotePhase.SubmissionUnknown,
+                        SessionLockHeld = false,
+                    },
+                RemotePhase = JulesRemotePhase.SubmissionUnknown,
+            };
+            LogTerminal(ToSnapshot(failed), AgentJobStatus.Failed, exitCode: null, errorType: "submission_unknown");
+            Persist(failed);
+            return failed;
+        }
+
+        var interrupted = stored with
         {
             Status = AgentJobStatus.Failed,
             Error = InterruptedError,
@@ -306,9 +646,9 @@ public sealed class AgentJobService
                 "facade_interrupted",
                 InterruptedError),
         };
-        LogTerminal(ToSnapshot(failed), AgentJobStatus.Failed, exitCode: null, errorType: "InterruptedError");
-        Persist(failed);
-        return failed;
+        LogTerminal(ToSnapshot(interrupted), AgentJobStatus.Failed, exitCode: null, errorType: "InterruptedError");
+        Persist(interrupted);
+        return interrupted;
     }
 
     private AgentJobRecord? TryReadByRequestId(string requestId)
@@ -340,27 +680,37 @@ public sealed class AgentJobService
 
     private AgentJobRecord? TryReadFile(string path)
     {
-        if (!File.Exists(path))
+        // 完了保存の置換と照会が重なる。共有違反のときだけ短い間隔で読み直す。
+        const int attempts = 10;
+        for (var attempt = 1; ; attempt++)
         {
-            return null;
-        }
-
-        try
-        {
-            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
-            using var reader = new StreamReader(stream);
-            var record = JsonSerializer.Deserialize<AgentJobRecord>(reader.ReadToEnd(), AgentJson.Options);
-            if (record is null || string.IsNullOrWhiteSpace(record.JobId) || string.IsNullOrWhiteSpace(record.RequestId))
+            if (!File.Exists(path))
             {
-                throw new InvalidOperationException("Job record is invalid.");
+                return null;
             }
 
-            return record;
-        }
-        catch (Exception ex)
-        {
-            CliJson.TraceException(ex);
-            throw;
+            try
+            {
+                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+                using var reader = new StreamReader(stream);
+                var record = JsonSerializer.Deserialize<AgentJobRecord>(reader.ReadToEnd(), AgentJson.Options);
+                if (record is null || string.IsNullOrWhiteSpace(record.JobId) || string.IsNullOrWhiteSpace(record.RequestId))
+                {
+                    throw new InvalidOperationException("Job record is invalid.");
+                }
+
+                return record;
+            }
+            catch (Exception ex) when (attempt < attempts && ex is IOException or UnauthorizedAccessException)
+            {
+                CliJson.TraceException(ex);
+                Thread.Sleep(TimeSpan.FromMilliseconds(10 * attempt));
+            }
+            catch (Exception ex)
+            {
+                CliJson.TraceException(ex);
+                throw;
+            }
         }
     }
 
@@ -385,9 +735,41 @@ public sealed class AgentJobService
 
     private static void WriteAtomic(string path, string contents)
     {
-        var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-        File.WriteAllText(temp, contents);
-        File.Move(temp, path, overwrite: true);
+        // Windows では宛先を共有読みしている間、File.Move の上書きが
+        // UnauthorizedAccessException になる。照会と完了保存は同時に起きるので、
+        // 共有違反だけ短い間隔でやり直す。権限不足のときは回数を使い切って失敗させる。
+        const int attempts = 10;
+        for (var attempt = 1; ; attempt++)
+        {
+            var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            var moved = false;
+            try
+            {
+                File.WriteAllText(temp, contents);
+                File.Move(temp, path, overwrite: true);
+                moved = true;
+                return;
+            }
+            catch (Exception ex) when (attempt < attempts && ex is IOException or UnauthorizedAccessException)
+            {
+                CliJson.TraceException(ex);
+                Thread.Sleep(TimeSpan.FromMilliseconds(10 * attempt));
+            }
+            finally
+            {
+                if (!moved)
+                {
+                    try
+                    {
+                        File.Delete(temp);
+                    }
+                    catch (Exception ex)
+                    {
+                        CliJson.TraceException(ex);
+                    }
+                }
+            }
+        }
     }
 
     internal static string NormalizeRequestId(string requestId)
@@ -518,7 +900,13 @@ public sealed class AgentJobService
             record.Status,
             record.Result,
             record.Error,
-            record.Failure);
+            record.Failure,
+            record.SessionId ?? record.Jules?.SessionId,
+            record.SessionUrl ?? record.Jules?.SessionUrl,
+            record.InputPrompt ?? record.Jules?.InputPrompt,
+            record.RemotePhase ?? record.Jules?.RemotePhase,
+            record.Artifacts ?? record.Jules?.Artifacts,
+            record.Jules);
     }
 
     private static AgentJobRecord ToRecord(AgentJobSnapshot snapshot, string fingerprint)
@@ -530,7 +918,13 @@ public sealed class AgentJobService
             fingerprint,
             snapshot.Result,
             snapshot.Error,
-            snapshot.Failure);
+            snapshot.Failure,
+            snapshot.Jules,
+            snapshot.SessionId,
+            snapshot.SessionUrl,
+            snapshot.InputPrompt,
+            snapshot.RemotePhase,
+            snapshot.Artifacts);
     }
 
     private static AgentJobFailure CreateFailure(Exception exception)
@@ -546,6 +940,12 @@ internal sealed record AgentJobRecord(
     string RequestFingerprint,
     AgentRunResult? Result,
     string? Error,
-    AgentJobFailure? Failure);
+    AgentJobFailure? Failure,
+    JulesJobState? Jules = null,
+    string? SessionId = null,
+    string? SessionUrl = null,
+    string? InputPrompt = null,
+    string? RemotePhase = null,
+    IReadOnlyList<AgentJobArtifact>? Artifacts = null);
 
 

@@ -19,6 +19,9 @@
 #:include GrokBuildDriver.cs
 #:include CursorCliDriver.cs
 #:include CodexCliDriver.cs
+#:include AntigravityCliDriver.cs
+#:include JulesApiClient.cs
+#:include JulesDriver.cs
 #:include AgentTools.cs
 #:include McpPublicContract.cs
 #:include AgentJob.cs

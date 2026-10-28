@@ -17,6 +17,9 @@
 #:include GrokBuildDriver.cs
 #:include CursorCliDriver.cs
 #:include CodexCliDriver.cs
+#:include AntigravityCliDriver.cs
+#:include JulesApiClient.cs
+#:include JulesDriver.cs
 
 var workspace = Directory.CreateTempSubdirectory("codex-agent-facade-poc-");
 File.WriteAllText(Path.Combine(workspace.FullName, "NOTE.txt"), "poc observation workspace. do not keep.");
@@ -27,7 +30,8 @@ var facade = new AgentFacade(
     new GrokBuildDriver(new ProcessRunner()),
     new CursorCliDriver(new ProcessRunner()),
     new CodexCliDriver(new ProcessRunner()),
-    new AgentRunLogFactory());
+    new AgentRunLogFactory(),
+    antigravityCli: new AntigravityCliDriver(new ProcessRunner()));
 const string prompt = "Reply with only the word pong. Do not create, edit, or delete any files.";
 const string followUp = "Reply with only the word pingpong. Do not create, edit, or delete any files.";
 const string question = "Ask me to choose option A or option B, then stop and wait for my answer. Do not choose for me. Do not modify files.";
