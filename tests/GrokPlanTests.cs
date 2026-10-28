@@ -199,6 +199,146 @@ public class GrokPlanSessionTests
     }
 
     [Fact]
+    public async Task UnmatchedResponsesBeforeTheExpectedIdStillSucceed()
+    {
+        using var directory = new TempWorkspace();
+        var factory = new ScriptedGrokAcpFactory
+        {
+            Script = new ScriptedGrokPlanScript { UnmatchedResponses = ReloadResponses },
+        };
+        var driver = new GrokBuildDriver(new RecordingProcessRunner(), TimeProvider.System, FileGrokUnifiedLogReader.CreateDefault(), factory);
+        await using var log = TestRunLogs.CreateLog();
+        var result = await driver.RunAsync(Request(directory.Path), log, null, CancellationToken.None);
+
+        Assert.Equal(Plan, result.OutputText);
+        Assert.Equal(Plan, File.ReadAllText(directory.PlanFile(SessionA)));
+        var written = string.Join("\n", factory.Last!.Written);
+        Assert.Contains("\"method\":\"session/cancel\"", written, StringComparison.Ordinal);
+        Assert.DoesNotContain("skills-reload", written, StringComparison.Ordinal);
+        Assert.DoesNotContain("workflows-reload", written, StringComparison.Ordinal);
+        var textLog = TestRunLogs.ReadShared(log.TextLogPath);
+        Assert.Contains("\"id\":\"skills-reload\"", textLog, StringComparison.Ordinal);
+        Assert.Contains("\"id\":\"workflows-reload\"", textLog, StringComparison.Ordinal);
+        Assert.Contains("\"id\":999", textLog, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExpectedIdErrorStillFailsAfterAnUnmatchedResponse()
+    {
+        using var directory = new TempWorkspace();
+        var initialize = new ScriptedGrokAcpFactory
+        {
+            Script = new ScriptedGrokPlanScript
+            {
+                UnmatchedResponses = ReloadResponses,
+                ErrorOn = "initialize",
+            },
+        };
+        var initializeFailure = await Assert.ThrowsAsync<InvalidOperationException>(() => RunAsync(Request(directory.Path), initialize, new RecordingProcessRunner()));
+        Assert.Equal("internal_error", initializeFailure.Data[CliJson.FailureKindKey]);
+        Assert.Contains("rejected initialize", initializeFailure.Message, StringComparison.Ordinal);
+        Assert.Contains("boom", initializeFailure.Message, StringComparison.Ordinal);
+        Assert.False(Directory.Exists(Path.Combine(directory.Path, ".codex-agent-facade")));
+
+        var prompt = new ScriptedGrokAcpFactory
+        {
+            Script = new ScriptedGrokPlanScript
+            {
+                UnmatchedResponses = ReloadResponses,
+                ErrorOn = "session/prompt",
+            },
+        };
+        var promptFailure = await Assert.ThrowsAsync<InvalidOperationException>(() => RunAsync(Request(directory.Path), prompt, new RecordingProcessRunner()));
+        Assert.Equal("internal_error", promptFailure.Data[CliJson.FailureKindKey]);
+        Assert.Contains("rejected session/prompt", promptFailure.Message, StringComparison.Ordinal);
+        Assert.False(File.Exists(directory.PlanFile(SessionA)));
+    }
+
+    [Fact]
+    public async Task MissingExpectedResponseStillFailsAfterAnUnmatchedResponse()
+    {
+        using var directory = new TempWorkspace();
+        var initialize = new ScriptedGrokAcpFactory
+        {
+            Script = new ScriptedGrokPlanScript
+            {
+                UnmatchedResponses = ReloadResponses,
+                CloseAfterUnmatchedOn = "initialize",
+            },
+        };
+        var initializeFailure = await Assert.ThrowsAsync<InvalidOperationException>(() => RunAsync(Request(directory.Path), initialize, new RecordingProcessRunner()));
+        Assert.Equal("internal_error", initializeFailure.Data[CliJson.FailureKindKey]);
+        Assert.Contains("closed its output", initializeFailure.Message, StringComparison.Ordinal);
+        Assert.False(Directory.Exists(Path.Combine(directory.Path, ".codex-agent-facade")));
+
+        var prompt = new ScriptedGrokAcpFactory
+        {
+            Script = new ScriptedGrokPlanScript
+            {
+                UnmatchedResponses = ReloadResponses,
+                CloseAfterUnmatchedOn = "session/prompt",
+            },
+        };
+        var promptFailure = await Assert.ThrowsAsync<InvalidOperationException>(() => RunAsync(Request(directory.Path), prompt, new RecordingProcessRunner()));
+        Assert.Equal("internal_error", promptFailure.Data[CliJson.FailureKindKey]);
+        Assert.Contains("closed its output", promptFailure.Message, StringComparison.Ordinal);
+        Assert.Contains("\"method\":\"session/cancel\"", string.Join("\n", prompt.Last!.Written), StringComparison.Ordinal);
+        Assert.False(File.Exists(directory.PlanFile(SessionA)));
+    }
+
+    [Fact]
+    public async Task InvalidJsonAndMissingResultStillFail()
+    {
+        using var directory = new TempWorkspace();
+        var invalid = new ScriptedGrokAcpFactory
+        {
+            Script = new ScriptedGrokPlanScript
+            {
+                UnmatchedResponses = ReloadResponses,
+                InvalidJsonOnInitialize = true,
+            },
+        };
+        var invalidFailure = await Assert.ThrowsAsync<InvalidOperationException>(() => RunAsync(Request(directory.Path), invalid, new RecordingProcessRunner()));
+        Assert.Equal("internal_error", invalidFailure.Data[CliJson.FailureKindKey]);
+        Assert.Contains("not JSON", invalidFailure.Message, StringComparison.Ordinal);
+        Assert.False(Directory.Exists(Path.Combine(directory.Path, ".codex-agent-facade")));
+
+        var omitted = new ScriptedGrokAcpFactory
+        {
+            Script = new ScriptedGrokPlanScript
+            {
+                UnmatchedResponses = ReloadResponses,
+                OmitResultOn = "initialize",
+            },
+        };
+        var omittedFailure = await Assert.ThrowsAsync<InvalidOperationException>(() => RunAsync(Request(directory.Path), omitted, new RecordingProcessRunner()));
+        Assert.Equal("internal_error", omittedFailure.Data[CliJson.FailureKindKey]);
+        Assert.Contains("omitted the result of initialize", omittedFailure.Message, StringComparison.Ordinal);
+        Assert.False(Directory.Exists(Path.Combine(directory.Path, ".codex-agent-facade")));
+    }
+
+    [Fact]
+    public async Task ReverseRequestStillFailsWhenAnUnmatchedResponseArrivesFirst()
+    {
+        using var directory = new TempWorkspace();
+        var factory = new ScriptedGrokAcpFactory
+        {
+            Script = new ScriptedGrokPlanScript
+            {
+                UnmatchedResponses = ReloadResponses,
+                ReverseMethodInsteadOfExit = "session/request_permission",
+            },
+        };
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => RunAsync(Request(directory.Path), factory, new RecordingProcessRunner()));
+        Assert.Equal("internal_error", failure.Data[CliJson.FailureKindKey]);
+        Assert.Contains("session/request_permission", failure.Message, StringComparison.Ordinal);
+        var written = string.Join("\n", factory.Last!.Written);
+        Assert.Contains("\"code\":-32601", written, StringComparison.Ordinal);
+        Assert.DoesNotContain("skills-reload", written, StringComparison.Ordinal);
+        Assert.False(File.Exists(directory.PlanFile(SessionA)));
+    }
+
+    [Fact]
     public async Task ConfigOptionUsesAJsonStringAndMismatchDoesNotWrite()
     {
         using var directory = new TempWorkspace();
@@ -451,6 +591,13 @@ public class GrokPlanSessionTests
             RunMode: "plan");
     }
 
+    private static readonly string[] ReloadResponses =
+    [
+        "{\"jsonrpc\":\"2.0\",\"id\":\"skills-reload\",\"result\":{}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":\"workflows-reload\",\"error\":{\"code\":1,\"message\":\"reload\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":999,\"result\":{\"ok\":true}}",
+    ];
+
     private sealed class TempWorkspace : IDisposable
     {
         public TempWorkspace()
@@ -504,6 +651,16 @@ internal sealed class ScriptedGrokPlanScript
     public bool MismatchAppliedValue { get; set; }
 
     public string StandardError { get; set; } = "";
+
+    public string[] UnmatchedResponses { get; set; } = [];
+
+    public string? CloseAfterUnmatchedOn { get; set; }
+
+    public string? ErrorOn { get; set; }
+
+    public string? OmitResultOn { get; set; }
+
+    public bool InvalidJsonOnInitialize { get; set; }
 }
 
 internal sealed class ScriptedGrokAcpFactory : IGrokAcpProcessFactory
@@ -574,7 +731,7 @@ internal sealed class ScriptedGrokAcpPeer : IGrokAcpProcess
                     Enqueue("{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"tool_call_update\",\"toolCallId\":\"exit\"}}}");
                 }
 
-                Enqueue("{\"jsonrpc\":\"2.0\",\"id\":" + (_promptId ?? "1") + ",\"result\":{\"stopReason\":" + GrokPlanSession.Quote(_script.StopReason) + "}}");
+                EnqueueCorrelated("session/prompt", _promptId ?? "1", "{\"stopReason\":" + GrokPlanSession.Quote(_script.StopReason) + "}");
             }
 
             return Task.CompletedTask;
@@ -584,10 +741,10 @@ internal sealed class ScriptedGrokAcpPeer : IGrokAcpProcess
         switch (name)
         {
             case "initialize":
-                Enqueue("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{\"protocolVersion\":1}}");
+                EnqueueCorrelated("initialize", id, "{\"protocolVersion\":1}");
                 break;
             case "session/new":
-                Enqueue("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{\"sessionId\":" + GrokPlanSession.Quote(_script.SessionId) + ",\"configOptions\":" + Config() + "}}");
+                EnqueueCorrelated("session/new", id, "{\"sessionId\":" + GrokPlanSession.Quote(_script.SessionId) + ",\"configOptions\":" + Config() + "}");
                 break;
             case "session/load":
                 var loaded = new StringBuilder();
@@ -598,7 +755,7 @@ internal sealed class ScriptedGrokAcpPeer : IGrokAcpProcess
                 }
 
                 loaded.Append('}');
-                Enqueue("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":" + loaded + "}");
+                EnqueueCorrelated("session/load", id, loaded.ToString());
                 break;
             case "session/set_config_option":
                 var configId = root.GetProperty("params").GetProperty("configId").GetString();
@@ -611,13 +768,14 @@ internal sealed class ScriptedGrokAcpPeer : IGrokAcpProcess
                 var options = configId == "model" && _script.OmitEffortAfterModel
                     ? "[{\"id\":\"model\",\"currentValue\":" + GrokPlanSession.Quote(model) + "}]"
                     : "[{\"id\":\"model\",\"currentValue\":" + GrokPlanSession.Quote(model) + "},{\"id\":\"reasoning_effort\",\"currentValue\":" + GrokPlanSession.Quote(effort) + "}]";
-                Enqueue("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{\"configOptions\":" + options + "}}");
+                EnqueueCorrelated("session/set_config_option", id, "{\"configOptions\":" + options + "}");
                 break;
             case "session/set_mode":
-                Enqueue("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{}}");
+                EnqueueCorrelated("session/set_mode", id, "{}");
                 break;
             case "session/prompt":
                 _promptId = id;
+                EnqueueUnmatched();
                 Enqueue("{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"current_mode_update\",\"currentModeId\":\"plan\"}}}");
                 if (_script.ReverseMethodInsteadOfExit is not null)
                 {
@@ -667,6 +825,43 @@ internal sealed class ScriptedGrokAcpPeer : IGrokAcpProcess
 
         _inbound.Writer.TryComplete();
         return ValueTask.CompletedTask;
+    }
+
+    private void EnqueueCorrelated(string methodName, string id, string resultJson)
+    {
+        if (string.Equals(methodName, "initialize", StringComparison.Ordinal) && _script.InvalidJsonOnInitialize)
+        {
+            Enqueue("{");
+        }
+
+        EnqueueUnmatched();
+        if (string.Equals(_script.CloseAfterUnmatchedOn, methodName, StringComparison.Ordinal))
+        {
+            _inbound.Writer.TryComplete();
+            return;
+        }
+
+        if (string.Equals(_script.ErrorOn, methodName, StringComparison.Ordinal))
+        {
+            Enqueue("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"error\":{\"code\":-32603,\"message\":\"boom\"}}");
+            return;
+        }
+
+        if (string.Equals(_script.OmitResultOn, methodName, StringComparison.Ordinal))
+        {
+            Enqueue("{\"jsonrpc\":\"2.0\",\"id\":" + id + "}");
+            return;
+        }
+
+        Enqueue("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":" + resultJson + "}");
+    }
+
+    private void EnqueueUnmatched()
+    {
+        foreach (var line in _script.UnmatchedResponses)
+        {
+            Enqueue(line);
+        }
     }
 
     private void Enqueue(string line)

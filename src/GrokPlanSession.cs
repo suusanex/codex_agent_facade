@@ -391,9 +391,9 @@ internal static class GrokPlanSession
                     continue;
                 }
 
-                if (!IdEquals(root, id))
+                if (IsUnmatchedResponse(root, id))
                 {
-                    throw Fail(errorKind, "Grok Build plan mode returned a response for an unexpected id.");
+                    continue;
                 }
 
                 if (root.TryGetProperty("error", out var error))
@@ -442,9 +442,9 @@ internal static class GrokPlanSession
                     continue;
                 }
 
-                if (!IdEquals(root, id))
+                if (IsUnmatchedResponse(root, id))
                 {
-                    throw Fail("internal_error", "Grok Build plan mode returned a response for an unexpected id.");
+                    continue;
                 }
 
                 if (root.TryGetProperty("error", out var error))
@@ -632,6 +632,22 @@ internal static class GrokPlanSession
         private static string Cancel(string sessionId)
         {
             return "{\"jsonrpc\":\"2.0\",\"method\":\"session/cancel\",\"params\":{\"sessionId\":" + Quote(sessionId) + "}}";
+        }
+
+        /// <summary>
+        /// method を持たない JSON-RPC response のうち、待っている request ID と一致しないものを unmatched とする。
+        /// Grok Build は skills / workflow watcher の内部 response を同じ stream に出す。固定 ID は列挙しない。
+        /// 受信行は ReadRequiredAsync が ACP log へ残している。一致する response が来なければ、この判定だけでは成功にしない。
+        /// </summary>
+        private static bool IsUnmatchedResponse(JsonElement root, int expectedId)
+        {
+            // object 以外は response として読まない。壊れた JSON は Parse が既に失敗させている。
+            if (root.ValueKind != JsonValueKind.Object || root.TryGetProperty("method", out _))
+            {
+                return false;
+            }
+
+            return !IdEquals(root, expectedId);
         }
 
         private static bool IdEquals(JsonElement root, int expected)
