@@ -50,7 +50,7 @@ internal static class SecretRedactor
         new(@"-----END [A-Z ]*PRIVATE KEY-----", RegexOptions.Compiled),
         new(@"\bMII[A-Za-z0-9+/=]{16,}", RegexOptions.Compiled),
         new(
-            @"\b(?:XAI_API_KEY|GH_TOKEN|GITHUB_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY|AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID)\s*[=:]\s*\S+",
+            @"\b(?:XAI_API_KEY|GH_TOKEN|GITHUB_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY|AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|JULES_API_KEY)\s*[=:]\s*\S+",
             RegexOptions.IgnoreCase | RegexOptions.Compiled),
         new(
             @"(?:api[_-]?key|access[_-]?token|\btoken\b|secret|password|credential)\s*[=:]\s*\S+",

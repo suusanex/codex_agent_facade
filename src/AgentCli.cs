@@ -111,6 +111,12 @@ public static class AgentCli
             return ExitInvalidRequest;
         }
 
+        if (string.Equals(request.Agent.Trim(), AgentFacade.JulesAgent, StringComparison.Ordinal))
+        {
+            WriteResponse(standardOutput, Invalid("The jules agent is available only through the MCP job host."));
+            return ExitInvalidRequest;
+        }
+
         if (!IsKnownAgent(request.Agent))
         {
             WriteResponse(standardOutput, Invalid(
@@ -119,7 +125,8 @@ public static class AgentCli
                 + AgentFacade.GitHubCopilotAgent + ", "
                 + AgentFacade.GrokBuildAgent + ", "
                 + AgentFacade.CursorAgent + ", "
-                + AgentFacade.CodexAgent + "."));
+                + AgentFacade.CodexAgent + ", "
+                + AgentFacade.AntigravityAgent + "."));
             return ExitInvalidRequest;
         }
 
@@ -176,7 +183,8 @@ public static class AgentCli
         return agent.Trim() is AgentFacade.GitHubCopilotAgent
             or AgentFacade.GrokBuildAgent
             or AgentFacade.CursorAgent
-            or AgentFacade.CodexAgent;
+            or AgentFacade.CodexAgent
+            or AgentFacade.AntigravityAgent;
     }
 
     private static bool TryParse(string input, out AgentCliRequest request, out string error)

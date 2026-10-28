@@ -12,16 +12,21 @@ using ModelContextProtocol.Server;
 public sealed class AgentTools
 {
     private readonly AgentJobService _jobs;
+    private readonly ILogger _logger;
 
-    public AgentTools(AgentJobService jobs)
+    public AgentTools(AgentJobService jobs, ILoggerFactory loggerFactory)
     {
+        ArgumentNullException.ThrowIfNull(jobs);
+        ArgumentNullException.ThrowIfNull(loggerFactory);
         _jobs = jobs;
+        // host の factory を掴む。プロセス全体の FacadeLog 差し替えで MCP 診断が消えないようにする。
+        _logger = loggerFactory.CreateLogger(FacadeLogging.LoggerCategory);
     }
 
     [McpServerTool(Name = "start_agent"), Description(McpPublicContract.StartAgentDescription)]
     public string StartAgent(
         [Description(McpPublicContract.RequestIdDescription)] string request_id,
-        [Description("Target agent. github-copilot, grok-build, cursor, or codex.")] string agent,
+        [Description("Target agent. github-copilot, grok-build, cursor, codex, antigravity, or jules. jules is MCP-only.")] string agent,
         [Description(McpPublicContract.PromptDescription)] string prompt,
         [Description(McpPublicContract.WorkingDirectoryDescription)] string working_directory,
         [Description("Existing external agent session id. Omit to start a new session.")] string? session_id = null,
@@ -111,7 +116,7 @@ public sealed class AgentTools
         }
     }
 
-    [McpServerTool(Name = "cancel_agent_job"), Description("Cancel a running agent job. Terminal jobs are left unchanged.")]
+    [McpServerTool(Name = "cancel_agent_job"), Description("Cancel a running local agent job. Terminal jobs are left unchanged. Jules cancellation is unsupported and does not change the remote session.")]
     public string CancelAgentJob(
         [Description("Job id returned by start_agent.")] string job_id)
     {
@@ -137,27 +142,27 @@ public sealed class AgentTools
         return JsonSerializer.Serialize(AgentJobPublicProjection.From(snapshot), AgentJson.Options);
     }
 
-    private static void LogStarted(string tool, string invocationId, string? requestId, string? jobId, string? agent)
+    private void LogStarted(string tool, string invocationId, string? requestId, string? jobId, string? agent)
     {
-        FacadeLog.CreateLogger(FacadeLogging.LoggerCategory).LogInformation(
+        _logger.LogInformation(
             "MCP tool={Tool} phase=started invocationId={InvocationId} requestId={RequestId} jobId={JobId} agent={Agent}",
             SafeLogValue(tool), SafeLogValue(invocationId), SafeLogValue(requestId), SafeLogValue(jobId), SafeLogValue(agent));
     }
 
-    private static void LogCompleted(string tool, string invocationId, long startedAt, AgentJobSnapshot snapshot, bool includeRequestId, string? agent)
+    private void LogCompleted(string tool, string invocationId, long startedAt, AgentJobSnapshot snapshot, bool includeRequestId, string? agent)
     {
         var durationMs = (long)Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
         var terminal = snapshot.Status is AgentJobStatus.Completed or AgentJobStatus.Failed or AgentJobStatus.Cancelled;
-        FacadeLog.CreateLogger(FacadeLogging.LoggerCategory).LogInformation(
+        _logger.LogInformation(
             "MCP tool={Tool} phase=completed invocationId={InvocationId} requestId={RequestId} jobId={JobId} agent={Agent} status={Status} terminal={Terminal} durationMs={DurationMs}",
             SafeLogValue(tool), SafeLogValue(invocationId), SafeLogValue(includeRequestId ? snapshot.RequestId : null), SafeLogValue(snapshot.JobId),
             SafeLogValue(agent), snapshot.Status, terminal ? "true" : "false", durationMs);
     }
 
-    private static void LogFailed(string tool, string invocationId, long startedAt, Exception exception, string? requestId, string? jobId)
+    private void LogFailed(string tool, string invocationId, long startedAt, Exception exception, string? requestId, string? jobId)
     {
         var durationMs = (long)Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
-        FacadeLog.CreateLogger(FacadeLogging.LoggerCategory).LogWarning(
+        _logger.LogWarning(
             "MCP tool={Tool} phase=failed invocationId={InvocationId} requestId={RequestId} jobId={JobId} errorType={ErrorType} durationMs={DurationMs}",
             SafeLogValue(tool), SafeLogValue(invocationId), SafeLogValue(requestId), SafeLogValue(jobId), exception.GetType().Name, durationMs);
     }

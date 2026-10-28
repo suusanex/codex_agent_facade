@@ -35,7 +35,7 @@ dotnet publish src/RunLogViewer.cs -o .\publish
 dotnet publish src/CodexAgentFacadeCli.cs -o .\publish
 ```
 
-`CodexAgentFacadeCli.exe` は通常アプリが1回のagent実行を同期で呼ぶコンソール入口である。常駐MCPホストとは別プロセスで、タスクスケジューラの起動対象にはしない。契約、入出力、終了コード、MCPおよびFlaUIとの差は [通常アプリ向けCLI](docs/cli.md) を参照する。
+`CodexAgentFacadeCli.exe` は通常アプリが1回のagent実行を同期で呼ぶコンソール入口である。常駐MCPホストとは別プロセスで、タスクスケジューラの起動対象にはしない。契約、入出力、終了コード、MCPおよびFlaUIとの差は [通常アプリ向けCLI](docs/cli.md) を参照する。Antigravity と Jules の対応範囲、未実測の境界は [Antigravity / Jules](docs/antigravity-jules.md) を参照する。
 
 ポートが既に使われている場合は別ポートへ逃げず、起動失敗する。
 
@@ -140,7 +140,7 @@ distinct な agent job / distinct な `start_agent` ごとに、呼び出し側�
 | フィールド | 必須 | 内容 |
 | --- | --- | --- |
 | `request_id` | はい | この distinct な agent job 用の冪等キー。呼び出し側が job ごとに新しく生成する。同じ Codex thread / 同じ外部 session でも新しい payload なら新しい値。同じ値の再呼び出しは、引数が完全一致する lost-result retry のときだけ既存 job を返す |
-| `agent` | はい | `github-copilot`、`grok-build`、`cursor`、または `codex` |
+| `agent` | はい | `github-copilot`、`grok-build`、`cursor`、`codex`、`antigravity`、`jules`。`jules` は MCP の job host だけ。単発 CLI は起動前に拒否する |
 | `prompt` | はい | 呼び出し側が構成した自己完結の worker prompt。元の user prompt 全体である必要はない。Facade はこの task payload を再解釈しない。完全一致の転送は保証せず、`skills` 指定時は対応 Driver が agent 固有の skill 指示を付加する場合がある |
 | `working_directory` | はい | 対象 workspace / worktree。continuation でも毎回指定する。前回値は暗黙継承されない |
 | `session_id` | いいえ | 同一外部 session の継続。省略時は新規 |
@@ -157,7 +157,7 @@ distinct な agent job / distinct な `start_agent` ごとに、呼び出し側�
 
 - `jobId`
 - `requestId`
-- `status`（`running` / `completed` / `failed` / `cancelled`）
+- `status`（`running` / `completed` / `failed` / `cancelled` / `waiting_for_input`）
 
 同じ `request_id` で入力が違う場合は tool error。既存 job は継続する。MCP 接続が切れても job は止まらない。
 
@@ -181,12 +181,13 @@ distinct な agent job / distinct な `start_agent` ごとに、呼び出し側�
 - `runId`（`jobId` と同じ）
 - `eventsLogPath`
 - `textLogPath`
+- Jules の snapshot と、成果があるときの result には `sessionId`、`sessionUrl`、`inputPrompt`、`remotePhase`、`artifacts` を足すことがある。`artifacts` は patch の保存パス、`baseCommitId`、Activity ID、生成時刻である。patch は改変せず複数件を保持し、自動適用しない。Jules の `exitCode` は作らない。`waiting_for_input` は settled で、`wait_agent_job` はそこで戻る。回答は新しい `request_id` と同じ `session_id` の `start_agent` で送る
 
 この compact な `result` は `start_agent` の idempotent retry、`wait_agent_job`、`cancel_agent_job` でも同じである。
 
 Cursor は terminal `result.result` とassistantイベントの対応を確認できる場合だけ、最後のassistant報告を `final_response` として返す。対応を確認できないterminal resultや、result自体が欠落する形式では、情報を削らず `assistant_transcript` として返す。Copilot は対になった `assistant.turn_start` / `assistant.turn_end` とterminal `result`を確認できる場合だけ、最後に完了したassistant turnを `final_response` とする。未完了turn、他種イベントのcompleted属性、対応 lifecycle が確認できない旧形式では、認識済みassistant本文の連結を `assistant_transcript` とする。過去 turn、reasoning、tool の前後の断片を根拠なく削除したり、暗黙に要約・truncateしたりしない。
 
-`failed` / `cancelled` のsnapshotは `error` を返す。`failed` には可能な場合、`failure.kind`（`process_start_failed` / `non_zero_exit` / `output_parse_failed` / `option_not_applied` / `session_mismatch` / `facade_interrupted` / `internal_error`）、単一行で redaction 済みの最大 512 文字の `summary`、取得できた `exitCode`、生成済み run log の参照を含める。例外全文、stdout/stderr 全文、raw stream は公開しない。不明なjob IDや不正な引数などtool呼び出し自体の失敗だけをMCP tool errorとし、workerの失敗を成功扱いや別jobへのフォールバックへ変換しない。
+`failed` / `cancelled` のsnapshotは `error` を返す。`failed` には可能な場合、`failure.kind`（`process_start_failed` / `non_zero_exit` / `output_parse_failed` / `option_not_applied` / `session_mismatch` / `facade_interrupted` / `internal_error` に加え、Antigravity / Jules では `agent_error` / `incomplete_run` / `submission_unknown` / `activity_correlation_failed` / `artifact_persist_failed` / `repository_rejected` / `remote_failed` / `remote_rejected` / `credential_missing` / `communication_error` / `session_locked`）、単一行で redaction 済みの最大 512 文字の `summary`、取得できた `exitCode`、生成済み run log の参照を含める。例外全文、stdout/stderr 全文、raw stream は公開しない。不明なjob IDや不正な引数などtool呼び出し自体の失敗だけをMCP tool errorとし、workerの失敗を成功扱いや別jobへのフォールバックへ変換しない。Jules の `cancel_agent_job` は remote session を変えず、tool error として unsupported を返す。
 
 ### `wait_agent_job`
 
@@ -205,15 +206,16 @@ Cursor は terminal `result.result` とassistantイベントの対応を確認�
 | --- | --- | --- |
 | `job_id` | はい | `start_agent` が返した `jobId` |
 
-実行中なら CLI process tree を止める。既に完了している job は状態を変えない。MCP 切断だけでは cancel しない。
+実行中のローカル agent なら CLI process tree を止める。既に完了している job は状態を変えない。MCP 切断だけでは cancel しない。Jules は remote session を止めず、unsupported の tool error を返す。
 
 実行中の worker は Facade process 内にある。Windows では子 CLI を Job Object（`KILL_ON_JOB_CLOSE`）へ入れる。Facade プロセスが落ちると CLI も終了する。独立した worker process は持たない。
 
 `request_id` と terminal な job snapshot は `%USERPROFILE%\.codex-agent-facade\jobs\` へ残す。Facade 再起動後に同じ `request_id` で `start_agent` しても **新しい agent は起動しない**。
 
 - 完了済みなら保存してある result を返す
-- 実行中だった job は fail-closed で `failed`（error: facade process exited）。同じ作業をやり直すときは新しい `request_id` を使う
-- 外部 agent の会話継続は従来どおり completed `result.sessionId` / `--resume`
+- 実行中だったローカル agent の job は fail-closed で `failed`（error: facade process exited）。同じ作業をやり直すときは新しい `request_id` を使う
+- Jules で session ID を保存済みの running job は `facade_interrupted` にしない。次の `get_agent_job` / `wait_agent_job` が同じ job の監視を再開する。session ID が無い create の結果不明は `submission_unknown` で終わり、同じ request の retry は保存結果を返す。POST は自動再送しない
+- 外部 agent の会話継続は従来どおり completed `result.sessionId` / `--resume`。Jules の質問への回答は、新しい `request_id` と同じ `session_id` を使う
 
 Codex が `start_agent` の応答だけを取り損ねた場合（Facade は生きている）は、同じ `request_id` で再試行すれば実行中の同じ `jobId` が返る。
 

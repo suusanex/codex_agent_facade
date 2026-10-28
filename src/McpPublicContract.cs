@@ -5,7 +5,7 @@
 public static class McpPublicContract
 {
     public const string ServerInstructions =
-        "Thin execution transport from Codex to GitHub Copilot, Grok Build, Cursor CLI, or Codex CLI. "
+        "Thin execution transport from Codex to GitHub Copilot, Grok Build, Cursor CLI, Codex CLI, or Antigravity CLI. "
         + "The caller is responsible for deciding whether and how to delegate work and for constructing a self-contained prompt for the selected external agent. "
         + "The Facade itself does not plan, split, or semantically rewrite the worker prompt supplied to start_agent. "
         + "Do not interpret this as requiring the caller to forward the original user prompt. "
@@ -31,10 +31,16 @@ public static class McpPublicContract
         + "Distinguish failed jobs, lost responses, and wait timeouts. A recovery retry reuses the same request_id and must not start a second job. "
         + "Successful results expose outputKind as final_response, assistant_transcript, or plan; raw streams are available only in run logs. "
         + "Optional run_mode plan asks Grok Build for a native plan and stops before implementation. Other agents reject it before launch. Omitting run_mode keeps the existing run. "
-        + "Reuse session_id from a completed result to continue the same external agent session.";
+        + "Reuse session_id from a completed result to continue the same external agent session. "
+        + "antigravity runs the local agy CLI from both this host and the one-shot CLI. "
+        + "jules is available from this MCP job host only and is rejected by the one-shot CLI before launch. "
+        + "antigravity and jules reject run_mode, fast, and a non-empty skills list. "
+        + "jules also rejects an explicit model, reasoning_effort, and auto_approve=false. "
+        + "wait_agent_job also returns when a Jules job is waiting_for_input. Answer with a new request_id and the same session_id. "
+        + "cancel_agent_job does not stop a Jules session.";
 
     public const string StartAgentDescription =
-        "Start a coding agent job (github-copilot, grok-build, cursor, or codex) and return a jobId immediately. "
+        "Start a coding agent job (github-copilot, grok-build, cursor, codex, antigravity, or jules) and return a jobId immediately. "
         + "The caller constructs a self-contained worker prompt and a request_id for this distinct job. "
         + "Pass request_id, agent, prompt, and working_directory on every call. "
         + "Reuse that request_id only if this start_agent result is lost. "
@@ -52,7 +58,11 @@ public static class McpPublicContract
         + "Optional reasoning_effort is passed as a separate CLI setting; empty or unsafe values are rejected. "
         + "Optional fast is a tri-state boolean: omitted preserves existing behavior, true requests fast, and false requests the provider's explicit non-fast/default tier. "
         + "Cursor requires an explicit model to use reasoning_effort or fast. GitHub Copilot and Grok Build reject either explicit fast value because their CLIs provide no independent fast switch. "
-        + "All settings must be specified again when continuing a session or retrying a start_agent request.";
+        + "All settings must be specified again when continuing a session or retrying a start_agent request. "
+        + "antigravity runs the local agy CLI. jules uses the Jules API from the MCP job host only. "
+        + "Both reject run_mode, fast, and a non-empty skills list. jules also rejects an explicit model, reasoning_effort, and auto_approve=false. "
+        + "A jules snapshot may include sessionId, sessionUrl, inputPrompt, remotePhase, and artifacts. "
+        + "waiting_for_input is a settled Jules state and ends the wait. Jules cancellation is unsupported and does not change the remote session.";
 
     public const string GetAgentJobDescription =
         "Get the current status or terminal result of a previously started agent job. "
@@ -62,7 +72,7 @@ public static class McpPublicContract
         + "Do not poll this tool at a short interval to wait for a long-running worker; use wait_agent_job instead.";
 
     public const string WaitAgentJobDescription =
-        "Wait until a previously started agent job is completed, failed, or cancelled, or until timeout_seconds elapses. Normally omit timeout_seconds and use wait_agent_job(job_id); the Facade then applies a 300-second upper bound. "
+        "Wait until a previously started agent job is completed, failed, cancelled, or waiting_for_input, or until timeout_seconds elapses. Normally omit timeout_seconds and use wait_agent_job(job_id); the Facade then applies a 300-second upper bound. "
         + "Specify timeout_seconds only for diagnosis, testing, or another explicit constraint; an explicit value is not replaced by the default. "
         + "Does not start, restart, or cancel the worker. "
         + "If the job is already terminal, return immediately. "
@@ -93,30 +103,35 @@ public static class McpPublicContract
 
     public const string SkillsDescription =
         "Optional Codex-format skill names. GitHub Copilot and Grok Build translate them to agent-native prompt directives. "
-        + "Cursor and Codex currently do not translate this field; explicit skill invocation must be included in the worker prompt.";
+        + "Cursor and Codex currently do not translate this field; explicit skill invocation must be included in the worker prompt. "
+        + "Antigravity and Jules reject a non-empty skills list before launch.";
 
     public const string AutoApproveDescription =
         "When true (default), allow the selected CLI to make its normal workspace changes without interactive approval. "
         + "When false, omit auto-approval flags for GitHub Copilot, Grok Build, and Cursor; those CLIs may still refuse an operation or wait for permission according to their settings. "
-        + "Codex uses a read-only sandbox with approval_policy=never when false, so approval questions are not shown.";
+        + "Codex uses a read-only sandbox with approval_policy=never when false, so approval questions are not shown. "
+        + "Jules rejects false. Antigravity passes its skip-permissions flag only when this is true and omits that flag when false.";
 
     public const string ModelDescription =
         "Optional agent-native model id. When omitted, empty, or whitespace, the Facade does not pass a model argument and does not choose, rename, or fall back to another model. "
         + "When set without reasoning_effort and fast, the value is forwarded unchanged. When either option is set, Cursor replaces it with the one current catalog id for that base, effort, and fast, or fails before launch. It does not synthesize bracket parameters or switch to another model family. "
         + "Model names that appear only inside the worker prompt are not launch settings. "
         + "Line breaks are rejected before launch; other control characters are rejected for a non-blank model value. Blank values retain the existing omitted-model behavior. "
-        + "Pass the same value again on an exact retry. Continuing a session does not inherit a previous model.";
+        + "Pass the same value again on an exact retry. Continuing a session does not inherit a previous model. "
+        + "Antigravity forwards a non-blank value unchanged and omits the argument when model is omitted. Jules rejects an explicit model.";
 
     public const string ReasoningEffortDescription =
         "Optional provider-native reasoning effort token, separate from the worker prompt. Omit it to preserve the CLI default. "
         + "GitHub Copilot accepts none, minimal, low, medium, high, xhigh, or max; Grok Build accepts its CLI canonical or model-specific effort tokens; Cursor accepts only values supported by the selected model. "
         + "Cursor requires model. Copilot values are none, minimal, low, medium, high, xhigh, or max; Grok Build may accept model-specific tokens. Unsupported values or model combinations must fail rather than silently change effort. "
-        + "Specify it again when continuing a session or retrying the exact request.";
+        + "Specify it again when continuing a session or retrying the exact request. "
+        + "Antigravity forwards the token as its effort setting. Jules rejects reasoning_effort.";
 
     public const string FastDescription =
         "Optional explicit fast tier. Omit to preserve the CLI's existing behavior; true requests fast; false explicitly requests the provider's default/non-fast tier. "
         + "Cursor and Codex support this independent option. GitHub Copilot and Grok Build reject either explicit value because their CLIs expose no independent fast switch. "
-        + "Cursor requires model. A fast model id may still be selected through model alone. Do not infer fast from model text or substitute another model. Specify the same value on an exact retry.";
+        + "Cursor requires model. A fast model id may still be selected through model alone. Do not infer fast from model text or substitute another model. Specify the same value on an exact retry. "
+        + "Antigravity and Jules reject either explicit value.";
 
     public const string RunModeDescription =
         "Optional execution mode. Omit it for the existing normal run. "

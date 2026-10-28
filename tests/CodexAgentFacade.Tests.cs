@@ -20,6 +20,9 @@
 #:include ../src/GrokBuildDriver.cs
 #:include ../src/CursorCliDriver.cs
 #:include ../src/CodexCliDriver.cs
+#:include ../src/AntigravityCliDriver.cs
+#:include ../src/JulesApiClient.cs
+#:include ../src/JulesDriver.cs
 #:include ../src/AgentTools.cs
 #:include ../src/McpPublicContract.cs
 #:include ../src/AgentJob.cs
@@ -30,6 +33,7 @@
 #:include ../src/AgentCli.cs
 #:include GrokInternalCompletionTests.cs
 #:include GrokPlanTests.cs
+#:include AntigravityJulesTests.cs
 
 using System.Diagnostics;
 using System.Security.Cryptography;
@@ -1441,6 +1445,27 @@ public class AgentJobServiceTests
         Assert.Null(recovered.Failure.RunId);
         Assert.Equal(0, runner2.CallCount);
         runner.Gate.TrySetResult(true);
+    }
+
+    [Fact]
+    public async Task CompletionPersistRetriesWhileTheRecordIsOpenForRead()
+    {
+        var service = CreateService(out var runner, "replaced");
+        runner.Gate = NewGate();
+        var started = service.Start("req-open-record", Grok("hello"));
+        Assert.Equal(AgentJobStatus.Running, started.Status);
+        var path = Directory.EnumerateFiles(service.StoreDirectory, "req-*.json").Single();
+        var held = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+        var release = Task.Run(async () =>
+        {
+            await Task.Delay(50);
+            await held.DisposeAsync();
+        });
+        runner.Gate.TrySetResult(true);
+        var completed = await WaitAsync(service, started.JobId);
+        await release;
+        Assert.Equal(AgentJobStatus.Completed, completed.Status);
+        Assert.Equal("replaced", completed.Result!.OutputText);
     }
 
     private static AgentJobService CreateService(out RecordingProcessRunner runner, string grokText, string? storeDirectory = null)

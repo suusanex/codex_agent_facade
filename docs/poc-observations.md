@@ -591,3 +591,12 @@ dotnet run --file tests/CodexAgentFacade.Tests.cs
 
 上の通常CLI実機は、子プロセスがユーザーの `.codex-agent-facade` を使った。レビュー後の live test は子プロセスの `USERPROFILE` を試験用ディレクトリにし、`.grok` と `.agents` だけをジャンクションで維持する。Facade の診断ログと viewer 設定はその試験用ディレクトリに閉じる。
 
+## Antigravity / Jules（issue #40、2026-10-29）
+
+実装と stub による自動テストは入れた。実サービスの smoke は未実施である。
+
+- `JULES_API_KEY` は未設定。接続済み Source、質問への回答、同文再送の区別、複数 patch の実 API は観測していない。
+- ローカル `agy` 1.4.9 の headless stream と soft-deny 文面は、この作業では再実測していない。soft-deny の検出は公開資料の `auto-denied` と `denied_actions` に合わせた。
+- 自動テストは process / HTTP / Git の stub と一時ディレクトリだけを使う。実 Jules と実 `agy` は起動しない。
+- 実タスクの完了と、取得した patch を各 `baseCommitId` の別 checkout で適用できることの確認が終わるまで、Issue の目的は未達である。境界の詳細は [Antigravity / Jules](antigravity-jules.md)。
+

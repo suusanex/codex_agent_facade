@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using Xunit;
 
@@ -443,7 +444,7 @@ public class GrokInternalCompletionTests
             new ProcessTerminationInfo(ProcessTerminationStatus.Exited, false));
         var store = Directory.CreateTempSubdirectory("caf-grok-jobs-").FullName;
         var service = new AgentJobService(harness.CreateFacade(), store, harness.Time);
-        var tools = new AgentTools(service);
+        var tools = new AgentTools(service, NullLoggerFactory.Instance);
         var request = Request();
         var startedJson = tools.StartAgent(
             "req-rescue",

@@ -66,7 +66,11 @@ public sealed record AgentRunResult(
     string? CompletionReason = null,
     GrokCompletionEvidence? CompletionEvidence = null,
     ProcessTerminationInfo? ProcessTermination = null,
-    string? PlanPath = null);
+    string? PlanPath = null,
+    string? SessionUrl = null,
+    string? InputPrompt = null,
+    string? RemotePhase = null,
+    IReadOnlyList<AgentJobArtifact>? Artifacts = null);
 
 internal sealed record ParsedCliOutput(
     string SessionId,
@@ -109,11 +113,15 @@ public sealed class AgentFacade
     public const string GrokBuildAgent = "grok-build";
     public const string CursorAgent = "cursor";
     public const string CodexAgent = "codex";
+    public const string AntigravityAgent = "antigravity";
+    public const string JulesAgent = "jules";
 
     private readonly GitHubCopilotDriver _gitHubCopilot;
     private readonly GrokBuildDriver _grokBuild;
     private readonly CursorCliDriver _cursorCli;
     private readonly CodexCliDriver _codexCli;
+    private readonly AntigravityCliDriver? _antigravityCli;
+    private readonly JulesDriver? _jules;
     private readonly IAgentRunLogFactory _runLogFactory;
     private readonly IRunLogViewerLauncher _runLogViewerLauncher;
 
@@ -123,12 +131,16 @@ public sealed class AgentFacade
         CursorCliDriver cursorCli,
         CodexCliDriver codexCli,
         IAgentRunLogFactory runLogFactory,
-        IRunLogViewerLauncher? runLogViewerLauncher = null)
+        IRunLogViewerLauncher? runLogViewerLauncher = null,
+        AntigravityCliDriver? antigravityCli = null,
+        JulesDriver? jules = null)
     {
         _gitHubCopilot = gitHubCopilot;
         _grokBuild = grokBuild;
         _cursorCli = cursorCli;
         _codexCli = codexCli;
+        _antigravityCli = antigravityCli;
+        _jules = jules;
         _runLogFactory = runLogFactory;
         _runLogViewerLauncher = runLogViewerLauncher ?? NullRunLogViewerLauncher.Instance;
     }
@@ -165,7 +177,10 @@ public sealed class AgentFacade
                     .ConfigureAwait(false),
                 CodexAgent => await _codexCli.RunAsync(request, log, onStdoutLine, cancellationToken)
                     .ConfigureAwait(false),
-                _ => throw new ArgumentException($"Unknown agent '{request.Agent}'. Supported agents: {GitHubCopilotAgent}, {GrokBuildAgent}, {CursorAgent}, {CodexAgent}."),
+                AntigravityAgent => await RequireAntigravity().RunAsync(request, log, onStdoutLine, cancellationToken)
+                    .ConfigureAwait(false),
+                JulesAgent => throw new ArgumentException("The jules agent is available only through the MCP job host."),
+                _ => throw new ArgumentException($"Unknown agent '{request.Agent}'. Supported agents: {GitHubCopilotAgent}, {GrokBuildAgent}, {CursorAgent}, {CodexAgent}, {AntigravityAgent}, {JulesAgent}."),
             };
 
             var withLogs = result with
@@ -190,6 +205,71 @@ public sealed class AgentFacade
             log.WriteFailed(ex);
             throw;
         }
+    }
+
+    internal async Task<JulesRunOutcome> RunJulesAsync(
+        AgentRunRequest request,
+        JulesRunContext context,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(context);
+        Validate(request);
+        if (!string.Equals(request.Agent.Trim(), JulesAgent, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("Jules execution was requested for a different agent.");
+        }
+
+        var jules = RequireJules();
+        await using var log = context.Resume is null
+            ? _runLogFactory.Start(request, context.JobId)
+            : NullAgentRunLog.Instance;
+        if (context.Resume is null)
+        {
+            TryLaunchRunLogViewer(log);
+        }
+
+        try
+        {
+            var outcome = await jules.RunAsync(request, log, context, cancellationToken).ConfigureAwait(false);
+            if (outcome is JulesCompletedOutcome completed)
+            {
+                log.WriteCompleted(completed.Result);
+            }
+            else if (outcome is JulesWaitingOutcome waiting)
+            {
+                log.WriteCompleted(waiting.Result);
+            }
+            else if (outcome is JulesFailedOutcome failed)
+            {
+                log.WriteFailed(failed.Exception);
+            }
+
+            return outcome;
+        }
+        catch (OperationCanceledException ex)
+        {
+            CliJson.TraceException(ex);
+            log.WriteCancelled();
+            throw;
+        }
+        catch (Exception ex)
+        {
+            CliJson.AttachFailureLog(ex, log);
+            CliJson.TraceException(ex);
+            log.WriteFailed(ex);
+            throw;
+        }
+    }
+
+    private AntigravityCliDriver RequireAntigravity()
+    {
+        return _antigravityCli ?? throw new InvalidOperationException("Antigravity driver is not configured.");
+    }
+
+    private JulesDriver RequireJules()
+    {
+        return _jules ?? throw new InvalidOperationException("Jules driver is not configured.");
     }
 
     private void TryLaunchRunLogViewer(IAgentRunLog log)
@@ -249,10 +329,36 @@ public sealed class AgentFacade
             throw new ArgumentException("reasoning_effort must be a non-empty token containing only ASCII letters, digits, hyphens, or underscores.");
         }
 
-        if ((request.Agent.Trim() is GitHubCopilotAgent or GrokBuildAgent)
+        var agent = request.Agent.Trim();
+        if ((agent is GitHubCopilotAgent or GrokBuildAgent or AntigravityAgent or JulesAgent)
             && request.Fast is not null)
         {
-            throw new ArgumentException($"The {request.Agent.Trim()} CLI does not support an independent fast option.");
+            throw new ArgumentException($"The {agent} agent does not support an independent fast option.");
+        }
+
+        if ((agent is AntigravityAgent or JulesAgent)
+            && request.Skills is not null
+            && request.Skills.Count > 0)
+        {
+            throw new ArgumentException($"The {agent} agent does not support skills.");
+        }
+
+        if (agent == JulesAgent)
+        {
+            if (!string.IsNullOrWhiteSpace(request.Model))
+            {
+                throw new ArgumentException("The jules agent does not support an explicit model.");
+            }
+
+            if (request.ReasoningEffort is not null)
+            {
+                throw new ArgumentException("The jules agent does not support reasoning_effort.");
+            }
+
+            if (!request.AutoApprove)
+            {
+                throw new ArgumentException("The jules agent does not support auto_approve=false.");
+            }
         }
 
         if (request.Agent.Trim() == CursorAgent
@@ -280,9 +386,9 @@ public sealed class AgentFacade
                 throw new ArgumentException("run_mode must be omitted or \"plan\".");
             }
 
-            if (request.Agent.Trim() != GrokBuildAgent)
+            if (agent != GrokBuildAgent)
             {
-                throw new ArgumentException("The " + request.Agent.Trim() + " agent does not support run_mode plan.");
+                throw new ArgumentException("The " + agent + " agent does not support run_mode plan.");
             }
         }
     }
