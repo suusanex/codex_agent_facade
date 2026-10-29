@@ -593,10 +593,8 @@ dotnet run --file tests/CodexAgentFacade.Tests.cs
 
 ## Antigravity / Jules（issue #40、2026-10-29）
 
-実装と stub による自動テストは入れた。実サービスの smoke は未実施である。
+Jules の実測は [Antigravity / Jules](antigravity-jules.md) に記録した。接続済み Source `suusanex/coding_agent_plan_and_verify_process` の branch `jules-smoke-20261029` で、質問、同じ文の2回送信、ファイル作成、複数 patch の別 checkout 適用を確認した。`sessionCompleted` activity が無い `COMPLETED` と、diff の無い progress `gitPatch` も観測した。
 
-- `JULES_API_KEY` は未設定。接続済み Source、質問への回答、同文再送の区別、複数 patch の実 API は観測していない。
 - ローカル `agy` 1.4.9 の headless stream と soft-deny 文面は、この作業では再実測していない。soft-deny の検出は公開資料の `auto-denied` と `denied_actions` に合わせた。
-- 自動テストは process / HTTP / Git の stub と一時ディレクトリだけを使う。実 Jules と実 `agy` は起動しない。
-- 実タスクの完了と、取得した patch を各 `baseCommitId` の別 checkout で適用できることの確認が終わるまで、Issue の目的は未達である。境界の詳細は [Antigravity / Jules](antigravity-jules.md)。
+- 自動テストは process / HTTP / Git の stub と一時ディレクトリだけを使う。2026-10-29 は 446 件中 445 件が成功し、Grok の live テスト 1 件をスキップした。実 Jules と実 `agy` は CI では起動しない。
 

@@ -1,0 +1,17 @@
+{
+  "name": "sessions/3295034226344094016",
+  "title": "この branch jules-smoke-20261029 は使い捨ての API 確認です。ファイルを変更しないでください。pull request を作らないでください。\n次の質問だけを出して、私の回答を待ってください。記録する単語は NORTH と SOUTH のどちらですか。自分では選ばないでください。",
+  "createTime": "2026-10-29T09:42:11.848282133Z",
+  "updateTime": "2026-10-29T09:56:24.096636Z",
+  "state": "COMPLETED",
+  "sourceContext": {
+    "source": "sources/github/suusanex/coding_agent_plan_and_verify_process",
+    "githubRepoContext": {
+      "startingBranch": "jules-smoke-20261029"
+    },
+    "environmentVariablesEnabled": true
+  },
+  "prompt": "この branch jules-smoke-20261029 は使い捨ての API 確認です。ファイルを変更しないでください。pull request を作らないでください。\n次の質問だけを出して、私の回答を待ってください。記録する単語は NORTH と SOUTH のどちらですか。自分では選ばないでください。",
+  "url": "https://jules.google.com/session/3295034226344094016",
+  "id": "3295034226344094016"
+}

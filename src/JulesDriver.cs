@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -295,42 +296,55 @@ public sealed class JulesDriver
                 sessionId: null);
         }
 
+        string? stableCompletedSignature = null;
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
             JulesSession session;
-            IReadOnlyList<JulesActivity> activities;
             try
             {
                 session = await _api.GetSessionAsync(state.SessionId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (HandleMonitorReadFailure(ex, state, context, out var outcome))
+            {
+                return outcome!;
+            }
+
+            IReadOnlyList<JulesActivity> activities;
+            try
+            {
                 activities = await _api.ListActivitiesAsync(state.SessionId, cancellationToken).ConfigureAwait(false);
             }
-            catch (JulesCredentialException)
+            catch (JulesRejectedException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
             {
-                throw;
-            }
-            catch (JulesTransportException ex)
-            {
+                // 作成直後は session GET が成功しても activities が 404 になる。同じ URL は直後に 200 を返す。
                 CliJson.TraceException(ex);
-                var phase = state.RemotePhase is JulesRemotePhase.SubmissionUnknown or JulesRemotePhase.SubmittingMessage
-                    ? JulesRemotePhase.SubmissionUnknown
-                    : JulesRemotePhase.CommunicationError;
-                context.Persist(state with { RemotePhase = phase });
-                return new JulesSuspendedOutcome();
+                await _pollDelay(cancellationToken).ConfigureAwait(false);
+                continue;
             }
-            catch (JulesRejectedException ex)
+            catch (Exception ex) when (HandleMonitorReadFailure(ex, state, context, out var outcome))
             {
-                CliJson.TraceException(ex);
-                return Fail(ex, "remote_rejected", releaseLock: false, state.SessionId);
+                return outcome!;
             }
 
             var baseline = new HashSet<string>(state.ActivityBaseline, StringComparer.Ordinal);
             var fresh = activities.Where(activity => !baseline.Contains(activity.Id)).ToList();
+            var completed = string.Equals(session.State, "COMPLETED", StringComparison.Ordinal);
+            var signature = ActivitySignature(activities);
             if (state.Continuation && !TryCorrelate(state, fresh, out var correlationFailure))
             {
                 if (correlationFailure is not null)
                 {
                     return correlationFailure;
+                }
+
+                if (completed && string.Equals(stableCompletedSignature, signature, StringComparison.Ordinal))
+                {
+                    return Fail(
+                        new InvalidOperationException("Jules session completed without one new userMessaged activity for this prompt."),
+                        "activity_correlation_failed",
+                        releaseLock: false,
+                        state.SessionId);
                 }
 
                 if (state.RemotePhase == JulesRemotePhase.SubmittingMessage)
@@ -339,9 +353,26 @@ public sealed class JulesDriver
                     context.Persist(state);
                 }
 
+                stableCompletedSignature = completed ? signature : null;
                 await _pollDelay(cancellationToken).ConfigureAwait(false);
                 continue;
             }
+
+            var hasCompletedActivity = fresh.Any(activity => activity.SessionCompleted);
+            var acceptStableCompleted = completed
+                && !hasCompletedActivity
+                && string.Equals(stableCompletedSignature, signature, StringComparison.Ordinal);
+            if (completed && !hasCompletedActivity && !acceptStableCompleted)
+            {
+                // 実測の session 3295034226344094016 は state=COMPLETED になったが sessionCompleted activity は無かった。
+                // 同じ activity 集合が次の poll でも変わらないときだけ、今回分の agent message で完了する。
+                stableCompletedSignature = signature;
+                context.Persist(state with { RemotePhase = state.RemotePhase });
+                await _pollDelay(cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            stableCompletedSignature = null;
 
             if (state.RemotePhase is JulesRemotePhase.SubmissionUnknown or JulesRemotePhase.SubmittingMessage)
             {
@@ -374,8 +405,7 @@ public sealed class JulesDriver
             };
             runLog.AppendHumanFragment("jules", output);
 
-            if (string.Equals(session.State, "COMPLETED", StringComparison.Ordinal)
-                && fresh.Any(activity => activity.SessionCompleted))
+            if (completed && (hasCompletedActivity || acceptStableCompleted))
             {
                 return new JulesCompletedOutcome(BuildResult(context, state, output, JulesRemotePhase.Completed, inputPrompt: null, runLog));
             }
@@ -414,6 +444,44 @@ public sealed class JulesDriver
             context.Persist(state with { RemotePhase = state.RemotePhase });
             await _pollDelay(cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    private static bool HandleMonitorReadFailure(
+        Exception exception,
+        JulesJobState state,
+        JulesRunContext context,
+        out JulesRunOutcome? outcome)
+    {
+        outcome = null;
+        if (exception is JulesCredentialException or OperationCanceledException)
+        {
+            return false;
+        }
+
+        if (exception is JulesTransportException)
+        {
+            CliJson.TraceException(exception);
+            var phase = state.RemotePhase is JulesRemotePhase.SubmissionUnknown or JulesRemotePhase.SubmittingMessage
+                ? JulesRemotePhase.SubmissionUnknown
+                : JulesRemotePhase.CommunicationError;
+            context.Persist(state with { RemotePhase = phase });
+            outcome = new JulesSuspendedOutcome();
+            return true;
+        }
+
+        if (exception is JulesRejectedException)
+        {
+            CliJson.TraceException(exception);
+            outcome = Fail(exception, "remote_rejected", releaseLock: false, state.SessionId);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static string ActivitySignature(IReadOnlyList<JulesActivity> activities)
+    {
+        return string.Join('\n', activities.Select(activity => activity.Id).Order(StringComparer.Ordinal));
     }
 
     private static bool TryCorrelate(JulesJobState state, List<JulesActivity> fresh, out JulesFailedOutcome? failure)
@@ -598,7 +666,13 @@ public sealed class JulesDriver
             {
                 var suffix = index.ToString(CultureInfo.InvariantCulture);
                 index++;
-                if (patch.Diff is null || string.IsNullOrWhiteSpace(patch.BaseCommitId))
+                if (string.IsNullOrWhiteSpace(patch.Diff))
+                {
+                    // 実測では progress 中の gitPatch が baseCommitId だけで届く。diff が無いものは保存しない。
+                    continue;
+                }
+
+                if (string.IsNullOrWhiteSpace(patch.BaseCommitId))
                 {
                     throw new InvalidOperationException("Jules git patch did not include a base commit and a diff.");
                 }

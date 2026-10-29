@@ -1,0 +1,31 @@
+{
+  "activities": [
+    {
+      "name": "sessions/3295034226344094016/activities/28ad8148d6524cb0b9c3d943ac084ca6",
+      "createTime": "2026-10-29T09:42:33.552372Z",
+      "originator": "agent",
+      "agentMessaged": {
+        "agentMessage": "記録する単語は NORTH と SOUTH のどちらですか。"
+      },
+      "id": "28ad8148d6524cb0b9c3d943ac084ca6"
+    },
+    {
+      "name": "sessions/3295034226344094016/activities/task-3295034226344094016-activity-step-6896993502352719799",
+      "createTime": "2026-10-29T09:48:56.825459664Z",
+      "originator": "user",
+      "userMessaged": {
+        "userMessage": "SAME-TEXT-MARKER"
+      },
+      "id": "task-3295034226344094016-activity-step-6896993502352719799"
+    },
+    {
+      "name": "sessions/3295034226344094016/activities/ebb2dc3e3f304dc992d1f86710eb5501",
+      "createTime": "2026-10-29T09:49:19.990351Z",
+      "originator": "agent",
+      "agentMessaged": {
+        "agentMessage": "記録する単語は NORTH と SOUTH のどちらですか？ご回答をお待ちしております。"
+      },
+      "id": "ebb2dc3e3f304dc992d1f86710eb5501"
+    }
+  ]
+}

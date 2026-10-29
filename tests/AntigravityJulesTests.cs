@@ -234,6 +234,193 @@ public sealed class AntigravityJulesTests
     }
 
     [Fact]
+    public async Task JulesCompletedSessionWithoutCompletedActivityWaitsUntilTheActivityListIsStable()
+    {
+        using var harness = Harness();
+        var sessionReads = 0;
+        harness.Http.Respond = path =>
+        {
+            if (path.Contains("/sources", StringComparison.Ordinal))
+            {
+                return Json(Sources(null, ("sources/src-1", "suusanex", "codex_agent_facade")));
+            }
+
+            if (path.Contains("/activities", StringComparison.Ordinal))
+            {
+                return Json(Activities(Activity("act-agent", user: null, agent: "pong", completed: false)));
+            }
+
+            if (path.Contains("/sessions/sess-1", StringComparison.Ordinal))
+            {
+                sessionReads++;
+                return Json(Session("sess-1", "COMPLETED"));
+            }
+
+            return Json(Session("sess-1", "COMPLETED"));
+        };
+
+        var done = await harness.WaitAsync("req-stable-complete", Request(AgentFacade.JulesAgent, "hello"));
+        AssertCompleted(done, "pong");
+        Assert.True(sessionReads >= 2);
+        Assert.Null(done.Result!.ExitCode);
+    }
+
+    [Fact]
+    public async Task JulesContinuationCompletesWithoutSessionCompletedActivity()
+    {
+        using var harness = Harness();
+        var prompt = "SAME-TEXT-MARKER";
+        var sessionReads = 0;
+        harness.Http.Respond = path =>
+        {
+            if (path.Contains("/sources", StringComparison.Ordinal))
+            {
+                return Json(Sources(null, ("sources/src-1", "suusanex", "codex_agent_facade")));
+            }
+
+            if (path.Contains(":sendMessage", StringComparison.Ordinal))
+            {
+                return Status(HttpStatusCode.OK);
+            }
+
+            var sent = harness.Http.Bodies.Any(call => call.Path.Contains(":sendMessage", StringComparison.Ordinal));
+            if (path.Contains("/activities", StringComparison.Ordinal))
+            {
+                return sent
+                    ? Json(Activities(
+                        Activity("act-old", null, "which word?", completed: false),
+                        Activity("act-user", prompt, null, completed: false),
+                        Activity("act-agent", null, "still waiting", completed: false)))
+                    : Json(Activities(Activity("act-old", null, "which word?", completed: false)));
+            }
+
+            if (path.Contains("/sessions/sess-1", StringComparison.Ordinal))
+            {
+                sessionReads++;
+            }
+
+            return Json(Session("sess-1", sent ? "COMPLETED" : "AWAITING_USER_FEEDBACK"));
+        };
+
+        var done = await harness.WaitAsync("req-continue-stable", Request(AgentFacade.JulesAgent, prompt, sessionId: "sess-1"));
+        AssertCompleted(done, "still waiting");
+        Assert.Equal(1, harness.Http.Bodies.Count(call => call.Path.Contains(":sendMessage", StringComparison.Ordinal)));
+        Assert.True(sessionReads >= 3);
+    }
+
+    [Fact]
+    public async Task JulesProgressPatchWithoutDiffDoesNotFailTheTurn()
+    {
+        using var harness = Harness();
+        var prompt = "TWO";
+        harness.Http.Respond = path =>
+        {
+            if (path.Contains("/sources", StringComparison.Ordinal))
+            {
+                return Json(Sources(null, ("sources/src-1", "suusanex", "codex_agent_facade")));
+            }
+
+            if (path.Contains(":sendMessage", StringComparison.Ordinal))
+            {
+                return Status(HttpStatusCode.OK);
+            }
+
+            var sent = harness.Http.Bodies.Any(call => call.Path.Contains(":sendMessage", StringComparison.Ordinal));
+            if (path.Contains("/activities", StringComparison.Ordinal))
+            {
+                return sent
+                    ? Json(Activities(
+                        Activity("act-old", null, "which file?", completed: false),
+                        Activity("act-user", prompt, null, completed: false),
+                        Activity("act-partial", null, null, completed: false, patches: (Commit, null)),
+                        Activity("act-full", null, "wrote two", completed: false, patches: (Commit, PatchOne))))
+                    : Json(Activities(Activity("act-old", null, "which file?", completed: false)));
+            }
+
+            return Json(Session("sess-1", sent ? "AWAITING_USER_FEEDBACK" : "AWAITING_USER_FEEDBACK"));
+        };
+
+        var waiting = await harness.WaitAsync("req-partial-patch", Request(AgentFacade.JulesAgent, prompt, sessionId: "sess-1"));
+        Assert.Equal(AgentJobStatus.WaitingForInput, waiting.Status);
+        Assert.Equal("wrote two", waiting.Result!.OutputText);
+        var artifact = Assert.Single(waiting.Result.Artifacts!);
+        Assert.Equal("act-full", artifact.ActivityId);
+        Assert.Equal(Commit, artifact.BaseCommitId);
+        Assert.Equal(PatchOne, File.ReadAllText(artifact.PatchPath));
+    }
+
+    [Fact]
+    public async Task JulesActivityNotFoundRightAfterCreateKeepsPollingUntilTheQuestion()
+    {
+        using var harness = Harness();
+        var activityReads = 0;
+        harness.Http.Respond = path =>
+        {
+            if (path.Contains("/sources", StringComparison.Ordinal))
+            {
+                return Json(Sources(null, ("sources/src-1", "suusanex", "codex_agent_facade")));
+            }
+
+            if (path.Contains("/activities", StringComparison.Ordinal))
+            {
+                activityReads++;
+                if (activityReads == 1)
+                {
+                    return Status(HttpStatusCode.NotFound);
+                }
+
+                return Json(Activities(Activity("act-ask", user: null, agent: "which word?", completed: false)));
+            }
+
+            if (path.Contains("/sessions", StringComparison.Ordinal))
+            {
+                return Json(Session("sess-1", "AWAITING_USER_FEEDBACK"));
+            }
+
+            return Status(HttpStatusCode.NotFound);
+        };
+
+        var waiting = await harness.WaitAsync("req-activity-404", Request(AgentFacade.JulesAgent, "hello"));
+        Assert.Equal(AgentJobStatus.WaitingForInput, waiting.Status);
+        Assert.Equal("sess-1", waiting.Result!.SessionId);
+        Assert.True(activityReads >= 2);
+    }
+
+    [Fact]
+    public async Task JulesMissingSessionAfterCreateStaysRejected()
+    {
+        using var harness = Harness();
+        harness.Http.Respond = path =>
+        {
+            if (path.Contains("/sources", StringComparison.Ordinal))
+            {
+                return Json(Sources(null, ("sources/src-1", "suusanex", "codex_agent_facade")));
+            }
+
+            if (path.Contains("/activities", StringComparison.Ordinal))
+            {
+                return Json(Activities(Activity("act-done", user: null, agent: "pong", completed: true)));
+            }
+
+            if (path.Contains("/sessions/sess-1", StringComparison.Ordinal))
+            {
+                return Status(HttpStatusCode.NotFound);
+            }
+
+            if (path.Contains("/sessions", StringComparison.Ordinal))
+            {
+                return Json(Session("sess-1", "IN_PROGRESS"));
+            }
+
+            return Status(HttpStatusCode.NotFound);
+        };
+
+        var failed = await harness.WaitAsync("req-session-404", Request(AgentFacade.JulesAgent, "hello"));
+        Assert.Equal("remote_rejected", failed.Failure!.Kind);
+        Assert.DoesNotContain(harness.Http.Bodies, call => call.Path.Contains("/activities", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task JulesSourcePaginationSelectsTheLaterPage()
     {
         using var harness = Harness();
