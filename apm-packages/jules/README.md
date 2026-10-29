@@ -24,7 +24,7 @@ apm install "C:\path\to\codex_agent_facade\apm-packages\jules" --target codex,ag
 
 ## Use
 
-Codex 上で対象リポジトリを開いた状態で、Skill を指定して作業本文を書く。Skill より後の本文は Jules へ渡す作業 payload であり、Codex 自身への作業実行指示ではない。`working_directory` は今開いているリポジトリの絶対パスにする。required fields を毎回指定する。新しい依頼、回答、継続では新しい `request_id` を生成する。新規 Jules session では `session_id` を渡さない。`waiting_for_input` への回答、または同じ Jules session の明示継続のときだけ、直前の `sessionId` を `session_id` に渡す。同じ Codex thread だけでは過去の session を再利用しない。
+Codex 上で対象リポジトリを開いた状態で、Skill を指定して作業本文を書く。Skill より後の本文は Jules へ渡す作業 payload であり、Codex 自身への作業実行指示ではない。`working_directory` は今開いているリポジトリの絶対パスにする。required fields を毎回指定する。新しい依頼と `waiting_for_input` への回答では新しい `request_id` を生成する。新規 Jules session では `session_id` を渡さない。`waiting_for_input` への回答のときだけ、直前の `sessionId` を `session_id` に渡す。完了後の新しい依頼は新規 session にする。完了済み Jules session の明示継続は現在の Facade では unsupported である。同じ Codex thread だけでは過去の session を再利用しない。
 
 `$jules` は親の委譲ヘッダであり、worker prompt にも `skills` にも入れない。`/jules` を prompt へ追加しない。`facade-options` で送ってよいのは `auto_approve: true` だけである。未指定時は引数を渡さず Facade 既定（true）を使う。`model`、`reasoning_effort`、`fast`、`plan`、`skills`、`auto_approve: false` は非対応なので、黙って省略せず `start_agent` を呼ばない。この relay は新規 job と継続では `skills` を渡さない。本文中のモデル名は起動設定にしない。
 

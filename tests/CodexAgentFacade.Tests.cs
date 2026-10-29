@@ -3477,6 +3477,19 @@ public class FacadeDelegationSkillContractTests
         Assert.Contains("単発 CLI", text, StringComparison.Ordinal);
         Assert.Contains("commit、push、fetch、rebase、checkout", text, StringComparison.Ordinal);
         Assert.Contains("質問への回答を作らない", text, StringComparison.Ordinal);
+        Assert.Contains("`waiting_for_input` / `AWAITING_USER_FEEDBACK` への回答のときだけ", text, StringComparison.Ordinal);
+        Assert.Contains("完了後の新しい依頼は新規 Jules session", text, StringComparison.Ordinal);
+        Assert.Contains("完了済み Jules session の明示継続は現在の Facade では unsupported", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("完了済み Jules session への明示的な継続", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("同じ Jules session の継続を明示したとき", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("回答または明示継続", text, StringComparison.Ordinal);
+        var followUpSection = ReadHeadingSection(text, "## Follow-up continuation");
+        Assert.Contains("`waiting_for_input` / `AWAITING_USER_FEEDBACK` に対するユーザーの回答だけ", followUpSection, StringComparison.Ordinal);
+        Assert.DoesNotContain("完了済み Jules session への明示的な継続", followUpSection, StringComparison.Ordinal);
+        var readme = File.ReadAllText(Path.Combine(LocateRepoRoot(), "apm-packages", "jules", "README.md"));
+        Assert.Contains("`waiting_for_input` への回答のときだけ", readme, StringComparison.Ordinal);
+        Assert.Contains("完了済み Jules session の明示継続は現在の Facade では unsupported", readme, StringComparison.Ordinal);
+        Assert.DoesNotContain("同じ Jules session の明示継続のときだけ", readme, StringComparison.Ordinal);
         var followUp = ReadActionBlock(
             "jules",
             ReadHeadingSection(text, "## Follow-up continuation"),
