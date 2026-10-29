@@ -493,6 +493,23 @@ public sealed class AntigravityJulesTests
         Assert.Equal("submission_unknown", failed.Failure!.Kind);
     }
 
+    [Theory]
+    [InlineData("{")]
+    [InlineData("{}")]
+    public async Task JulesUnreadableCreateBodyIsSubmissionUnknown(string body)
+    {
+        using var harness = Harness();
+        harness.Http.Respond = path => path.Contains("/sources", StringComparison.Ordinal)
+            ? Json(Sources(null, ("sources/src-1", "suusanex", "codex_agent_facade")))
+            : Status(HttpStatusCode.OK, body);
+        var request = Request(AgentFacade.JulesAgent, "hello");
+        var failed = await harness.WaitAsync("req-unreadable-create", request);
+        Assert.Equal("submission_unknown", failed.Failure!.Kind);
+        var again = harness.Jobs.Start("req-unreadable-create", request);
+        Assert.Equal("submission_unknown", again.Failure!.Kind);
+        Assert.Equal(1, harness.Http.Bodies.Count(call => call.Method == HttpMethod.Post.Method));
+    }
+
     [Fact]
     public async Task JulesMissingCredentialFailsOnlyThatJob()
     {
@@ -753,7 +770,10 @@ public sealed class AntigravityJulesTests
         };
         var artifact = await harness.WaitAsync("req-artifact", Request(AgentFacade.JulesAgent, "answer", sessionId: "sess-1"));
         Assert.Equal("artifact_persist_failed", artifact.Failure!.Kind);
-        Assert.Contains("\"sessionLockHeld\":true", File.ReadAllText(Directory.EnumerateFiles(harness.Store, "req-*.json").Single(path => path.Contains(HashText("req-artifact"), StringComparison.Ordinal))), StringComparison.Ordinal);
+        var artifactRecord = File.ReadAllText(Directory.EnumerateFiles(harness.Store, "req-*.json").Single(path => path.Contains(HashText("req-artifact"), StringComparison.Ordinal)));
+        Assert.Contains("\"sessionLockHeld\":false", artifactRecord, StringComparison.Ordinal);
+        var lockText = File.ReadAllText(Path.Combine(harness.Store, "jules-locks", HashText("sess-1") + ".lock"));
+        Assert.True(string.IsNullOrWhiteSpace(lockText));
     }
 
     [Fact]
@@ -847,6 +867,45 @@ public sealed class AntigravityJulesTests
         AssertNoSecret(harness.Store);
     }
 
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized, "")]
+    [InlineData(HttpStatusCode.Forbidden, "")]
+    [InlineData(HttpStatusCode.OK, "{")]
+    public async Task JulesObserverReadFailureStaysRunning(HttpStatusCode status, string body)
+    {
+        using var harness = Harness();
+        var polls = 0;
+        harness.Http.Respond = path =>
+        {
+            if (path.Contains("/sources", StringComparison.Ordinal))
+            {
+                return Json(Sources(null, ("sources/src-1", "suusanex", "codex_agent_facade")));
+            }
+
+            if (path.Contains("/activities", StringComparison.Ordinal))
+            {
+                return Json(Activities(Activity("act-done", null, "pong", completed: true)));
+            }
+
+            if (path.EndsWith("/sessions", StringComparison.Ordinal))
+            {
+                return Json(Session("sess-1", "IN_PROGRESS"));
+            }
+
+            var seen = Interlocked.Increment(ref polls);
+            return seen == 1
+                ? Status(status, body.Length == 0 ? null : body)
+                : Json(Session("sess-1", "COMPLETED"));
+        };
+
+        var started = harness.Jobs.Start("req-observer", Request(AgentFacade.JulesAgent, "hello"));
+        Assert.True(await WaitUntilAsync(() => JobFileContains(harness.Store, "req-observer", "\"status\":\"running\"")
+            && JobFileContains(harness.Store, "req-observer", "\"remotePhase\":\"communication_error\"")));
+        var done = await harness.Jobs.WaitAsync(started.JobId, 5);
+        AssertCompleted(done, "pong");
+        Assert.True(polls >= 2);
+    }
+
     [Fact]
     public async Task JulesCrashBeforeSessionIdBecomesSubmissionUnknown()
     {
@@ -920,6 +979,107 @@ public sealed class AntigravityJulesTests
         var blocked = await harness.WaitAsync("req-new-lock", Request(AgentFacade.JulesAgent, "other", sessionId: "sess-1"));
         Assert.Equal("session_locked", blocked.Failure!.Kind);
         Assert.Empty(harness.Http.Bodies);
+    }
+
+    [Fact]
+    public async Task JulesRunningCreateBlocksContinuationOnTheSameSession()
+    {
+        using var harness = Harness();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Http.RespondAsync = async (path, _) =>
+        {
+            if (path.Contains("/sources", StringComparison.Ordinal))
+            {
+                return Json(Sources(null, ("sources/src-1", "suusanex", "codex_agent_facade")));
+            }
+
+            if (path.Contains("/activities", StringComparison.Ordinal))
+            {
+                return Json(Activities(Activity("act-done", null, "pong", completed: true)));
+            }
+
+            if (path.Contains(":sendMessage", StringComparison.Ordinal))
+            {
+                return Status(HttpStatusCode.OK);
+            }
+
+            if (path.EndsWith("/sessions", StringComparison.Ordinal))
+            {
+                return Json(Session("sess-1", "IN_PROGRESS"));
+            }
+
+            await release.Task.WaitAsync(TimeSpan.FromSeconds(20)).ConfigureAwait(false);
+            return Json(Session("sess-1", "COMPLETED"));
+        };
+
+        var started = harness.Jobs.Start("req-create-open", Request(AgentFacade.JulesAgent, "hello"));
+        Assert.True(await WaitUntilAsync(() => JobFileContains(harness.Store, "req-create-open", "\"sessionId\":\"sess-1\"")
+            && JobFileContains(harness.Store, "req-create-open", "\"status\":\"running\"")));
+        var blocked = await harness.WaitAsync("req-create-continue", Request(AgentFacade.JulesAgent, "more", sessionId: "sess-1"));
+        Assert.Equal("session_locked", blocked.Failure!.Kind);
+        Assert.DoesNotContain(harness.Http.Bodies, call => call.Path.Contains(":sendMessage", StringComparison.Ordinal));
+        release.TrySetResult();
+        var done = await harness.Jobs.WaitAsync(started.JobId, 10);
+        AssertCompleted(done, "pong");
+    }
+
+    [Fact]
+    public async Task JulesStaleLockFileDoesNotBlockASettledOwner()
+    {
+        using var harness = Harness();
+        WriteRecord(harness.Store, new AgentJobRecord(
+            "job-stale",
+            "req-stale",
+            AgentJobStatus.Failed,
+            "stored-fingerprint",
+            null,
+            null,
+            null,
+            new JulesJobState(
+                JulesRemotePhase.Polling,
+                JulesDriver.HashPrompt("old"),
+                [],
+                true,
+                false,
+                "sess-1")));
+        var lockDirectory = Path.Combine(harness.Store, "jules-locks");
+        Directory.CreateDirectory(lockDirectory);
+        File.WriteAllText(
+            Path.Combine(lockDirectory, HashText("sess-1") + ".lock"),
+            """{"sessionId":"sess-1","jobId":"job-stale","requestId":"req-stale"}""");
+        var prompt = "answer";
+        harness.Http.Respond = path =>
+        {
+            if (path.Contains("/sources", StringComparison.Ordinal))
+            {
+                return Json(Sources(null, ("sources/src-1", "suusanex", "codex_agent_facade")));
+            }
+
+            if (path.Contains(":sendMessage", StringComparison.Ordinal))
+            {
+                return Status(HttpStatusCode.OK);
+            }
+
+            if (path.Contains("/activities", StringComparison.Ordinal))
+            {
+                return harness.Http.Bodies.Any(call => call.Path.Contains(":sendMessage", StringComparison.Ordinal))
+                    ? Json(Activities(
+                        Activity("act-old", null, "Choose", completed: false),
+                        Activity("act-user", prompt, null, completed: false),
+                        Activity("act-done", null, "done", completed: true)))
+                    : Json(Activities(Activity("act-old", null, "Choose", completed: false)));
+            }
+
+            return Json(Session(
+                "sess-1",
+                harness.Http.Bodies.Any(call => call.Path.Contains(":sendMessage", StringComparison.Ordinal))
+                    ? "COMPLETED"
+                    : "AWAITING_USER_FEEDBACK"));
+        };
+
+        var done = await harness.WaitAsync("req-after-stale", Request(AgentFacade.JulesAgent, prompt, sessionId: "sess-1"));
+        AssertCompleted(done, "done");
+        Assert.Equal(1, harness.Http.Bodies.Count(call => call.Path.Contains(":sendMessage", StringComparison.Ordinal)));
     }
 
     [Fact]
