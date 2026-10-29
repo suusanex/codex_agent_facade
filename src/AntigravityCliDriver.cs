@@ -221,6 +221,7 @@ internal sealed class AntigravityStreamAccumulator
     private bool _sawInit;
     private bool _sawResult;
     private bool _permissionSoftDenied;
+    private bool _sawAgentResponseTextDelta;
     private string? _terminalFailure;
     private Exception? _lastJsonError;
 
@@ -336,7 +337,61 @@ internal sealed class AntigravityStreamAccumulator
             }
         }
 
-        _runLog.WriteAgentEvent(eventName, root, _response);
+        // raw payload は従来どおり events JSONL へ残す。human .log だけを投影する。
+        ProjectHuman(eventName, root);
+    }
+
+    /// <summary>
+    /// 実行中の tool と agent_response を human .log へ出す。
+    /// <see cref="AgentLogSummary"/> は toolName / data 前提の別形式なので使わない。
+    /// Antigravity は step_update.tool_info.parameters と text_delta の細切れ配信である。
+    /// </summary>
+    private void ProjectHuman(string eventName, JsonElement root)
+    {
+        if (string.Equals(eventName, "init", StringComparison.Ordinal))
+        {
+            _runLog.WriteAgentEvent(eventName, root, AntigravityHumanSummary.FormatInit(root));
+            return;
+        }
+
+        if (string.Equals(eventName, "result", StringComparison.Ordinal))
+        {
+            // text_delta が一度も無い版だけ、最終 response を human log へ出す。
+            // MCP の OutputText はここを見ず、常に result.response を正本にする。
+            if (!_sawAgentResponseTextDelta && !string.IsNullOrEmpty(_response))
+            {
+                _runLog.AppendHumanFragment("assistant", _response);
+            }
+
+            _runLog.WriteAgentEvent(eventName, root, AntigravityHumanSummary.FormatResult(_status));
+            return;
+        }
+
+        if (string.Equals(eventName, "step_update", StringComparison.Ordinal)
+            && TryGetObject(root, "step_update", out var step))
+        {
+            var stepType = ReadString(step, "step_type");
+            if (string.Equals(stepType, "agent_response", StringComparison.Ordinal))
+            {
+                _runLog.WriteAgentEvent(eventName, root, humanSummary: null);
+                var textDelta = ReadString(step, "text_delta");
+                if (!string.IsNullOrEmpty(textDelta))
+                {
+                    _sawAgentResponseTextDelta = true;
+                    _runLog.AppendHumanFragment("assistant", textDelta);
+                }
+
+                return;
+            }
+
+            if (string.Equals(stepType, "tool", StringComparison.Ordinal))
+            {
+                _runLog.WriteAgentEvent(eventName, root, AntigravityHumanSummary.FormatTool(step));
+                return;
+            }
+        }
+
+        _runLog.WriteAgentEvent(eventName, root, humanSummary: null);
     }
 
     public AntigravityParsedOutput Complete(string? requestedSessionId, bool cancellationRequested)
@@ -493,6 +548,92 @@ internal sealed class AntigravityStreamAccumulator
 
         value = default;
         return false;
+    }
+
+    private static string? ReadString(JsonElement element, string name)
+    {
+        return element.ValueKind == JsonValueKind.Object
+            && element.TryGetProperty(name, out var value)
+            && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+    }
+}
+
+/// <summary>
+/// Antigravity stream-json の人間向け1行。tool 出力全文と tools 一覧は展開しない。
+/// </summary>
+internal static class AntigravityHumanSummary
+{
+    public static string FormatInit(JsonElement root)
+    {
+        var builder = new StringBuilder("antigravity init");
+        if (!root.TryGetProperty("init", out var init) || init.ValueKind != JsonValueKind.Object)
+        {
+            return builder.ToString();
+        }
+
+        AppendField(builder, "model", ReadString(init, "model"));
+        AppendField(builder, "permissionMode", ReadString(init, "permission_mode"));
+        AppendField(builder, "cwd", ReadString(init, "cwd"));
+        return builder.ToString();
+    }
+
+    public static string FormatResult(string? status)
+    {
+        return string.IsNullOrWhiteSpace(status)
+            ? "antigravity result"
+            : "antigravity result status=" + status.Trim();
+    }
+
+    public static string FormatTool(JsonElement step)
+    {
+        var name = ReadString(step, "tool_name");
+        if (string.IsNullOrWhiteSpace(name)
+            && step.TryGetProperty("tool_info", out var info)
+            && info.ValueKind == JsonValueKind.Object)
+        {
+            name = ReadString(info, "name");
+        }
+
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            name = "tool";
+        }
+
+        var builder = new StringBuilder("tool: ");
+        builder.Append(name.Trim());
+        var state = ReadString(step, "state");
+        if (!string.IsNullOrWhiteSpace(state))
+        {
+            builder.Append(' ');
+            builder.Append(state.Trim());
+        }
+
+        if (step.TryGetProperty("tool_info", out var toolInfo)
+            && toolInfo.ValueKind == JsonValueKind.Object
+            && toolInfo.TryGetProperty("parameters", out var parameters)
+            && parameters.ValueKind == JsonValueKind.Object)
+        {
+            // 実 stream で安定している主パラメータだけ。output と error 本文は JSONL に残す。
+            AppendField(builder, "command", CliJson.FindFirstString(parameters, "CommandLine"));
+            AppendField(builder, "path", CliJson.FindFirstString(parameters, "Path"));
+        }
+
+        return builder.ToString();
+    }
+
+    private static void AppendField(StringBuilder builder, string name, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return;
+        }
+
+        builder.Append(' ');
+        builder.Append(name);
+        builder.Append('=');
+        builder.Append(value.Trim());
     }
 
     private static string? ReadString(JsonElement element, string name)

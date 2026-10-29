@@ -1422,12 +1422,256 @@ public sealed class AntigravityJulesTests
         Assert.Null(denied.PlanPath);
     }
 
+    [Fact]
+    public async Task AntigravityHumanLogShowsToolStateAndPrimaryParameter()
+    {
+        var longCommand = new string('x', 280) + "UNIQUE_TAIL";
+        var stream = string.Join('\n',
+            AgEvent("init", new Dictionary<string, object?>
+            {
+                ["model"] = "gemini-4-argon-medium",
+                ["cwd"] = "D:/work",
+                ["permission_mode"] = "always-proceed",
+                ["tools"] = new[] { "tool-catalog-should-stay-out", "run_command" },
+            }, "conv-1"),
+            ToolEvent("run_command", "ACTIVE", new Dictionary<string, object?> { ["CommandLine"] = "py -m pytest -v" }),
+            ToolEvent("run_command", "DONE", new Dictionary<string, object?> { ["CommandLine"] = "py -m pytest -v" }, "RAW_TOOL_OUTPUT_KEEP"),
+            ToolEvent("write_file", "ACTIVE", new Dictionary<string, object?> { ["Path"] = "D:/work/README.md" }),
+            ToolEvent("write_file", "DONE", new Dictionary<string, object?> { ["Path"] = "D:/work/README.md" }),
+            ToolEvent(
+                "edit_file",
+                "ERROR",
+                new Dictionary<string, object?> { ["Path"] = "D:/work/.gitignore" },
+                errorMessage: "target content not found in the file"),
+            ToolEvent(
+                "read_file",
+                "ACTIVE",
+                new Dictionary<string, object?>
+                {
+                    ["Path"] = "D:/work/Program.cs",
+                    ["StartLine"] = "424242",
+                }),
+            ToolEvent(
+                "mystery_tool",
+                "ACTIVE",
+                new Dictionary<string, object?> { ["Foo"] = "SHOULD_NOT_SHOW_FOO" },
+                "SHOULD_NOT_SHOW_OUTPUT"),
+            ToolEvent("run_command", "ACTIVE", new Dictionary<string, object?> { ["CommandLine"] = "echo ghp_abcdefghijklmnopqrst" }),
+            ToolEvent("run_command", "ACTIVE", new Dictionary<string, object?> { ["CommandLine"] = longCommand }),
+            AgEvent("result", new Dictionary<string, object?>
+            {
+                ["conversation_id"] = "conv-1",
+                ["status"] = "SUCCESS",
+                ["response"] = "tool-run-ok",
+            }));
+
+        await using var log = TestRunLogs.CreateLog();
+        var result = await RunAntigravityAsync(stream, 0, log: log);
+        Assert.Equal("tool-run-ok", result.OutputText);
+        Assert.Equal("conv-1", result.SessionId);
+
+        var human = TestRunLogs.ReadShared(result.TextLogPath);
+        Assert.Contains("antigravity init model=gemini-4-argon-medium permissionMode=always-proceed cwd=D:/work", human, StringComparison.Ordinal);
+        Assert.DoesNotContain("tool-catalog-should-stay-out", human, StringComparison.Ordinal);
+        Assert.DoesNotContain("permission_mode", human, StringComparison.Ordinal);
+        Assert.Contains("tool: run_command ACTIVE command=py -m pytest -v", human, StringComparison.Ordinal);
+        Assert.Contains("tool: run_command DONE command=py -m pytest -v", human, StringComparison.Ordinal);
+        Assert.Contains("tool: write_file ACTIVE path=D:/work/README.md", human, StringComparison.Ordinal);
+        Assert.Contains("tool: write_file DONE path=D:/work/README.md", human, StringComparison.Ordinal);
+        Assert.Contains("tool: edit_file ERROR path=D:/work/.gitignore", human, StringComparison.Ordinal);
+        Assert.Contains("tool: read_file ACTIVE path=D:/work/Program.cs", human, StringComparison.Ordinal);
+        Assert.Contains("tool: mystery_tool ACTIVE", human, StringComparison.Ordinal);
+        Assert.Contains("antigravity result status=SUCCESS", human, StringComparison.Ordinal);
+        Assert.DoesNotContain("RAW_TOOL_OUTPUT_KEEP", human, StringComparison.Ordinal);
+        Assert.DoesNotContain("SHOULD_NOT_SHOW_FOO", human, StringComparison.Ordinal);
+        Assert.DoesNotContain("SHOULD_NOT_SHOW_OUTPUT", human, StringComparison.Ordinal);
+        Assert.DoesNotContain("target content not found", human, StringComparison.Ordinal);
+        Assert.DoesNotContain("424242", human, StringComparison.Ordinal);
+        Assert.DoesNotContain("UNIQUE_TAIL", human, StringComparison.Ordinal);
+        Assert.DoesNotContain("ghp_abcdefghijklmnopqrst", human, StringComparison.Ordinal);
+        Assert.Contains(SecretRedactor.Replacement, human, StringComparison.Ordinal);
+
+        var events = TestRunLogs.ReadShared(result.EventsLogPath);
+        Assert.Contains("RAW_TOOL_OUTPUT_KEEP", events, StringComparison.Ordinal);
+        Assert.Contains("SHOULD_NOT_SHOW_OUTPUT", events, StringComparison.Ordinal);
+        Assert.Contains("424242", events, StringComparison.Ordinal);
+        Assert.Contains("UNIQUE_TAIL", events, StringComparison.Ordinal);
+        Assert.Contains("tool-catalog-should-stay-out", events, StringComparison.Ordinal);
+        Assert.DoesNotContain("ghp_abcdefghijklmnopqrst", events, StringComparison.Ordinal);
+        Assert.Equal(9, CountEvents(events, "step_update"));
+    }
+
+    [Fact]
+    public async Task AntigravityHumanLogCombinesAgentResponseFragments()
+    {
+        var response = "# 開発状況報告\n次の行です。\n";
+        var stream = string.Join('\n',
+            AgEvent("init", new Dictionary<string, object?>(), "conv-1"),
+            TextDelta("# 開発"),
+            TextDelta("状況報告\n"),
+            TextDelta("次の行"),
+            TextDelta("です。\n"),
+            AgEvent("result", new Dictionary<string, object?>
+            {
+                ["conversation_id"] = "conv-1",
+                ["status"] = "SUCCESS",
+                ["response"] = response,
+            }));
+
+        await using var log = TestRunLogs.CreateLog();
+        var result = await RunAntigravityAsync(stream, 0, log: log);
+        Assert.Equal(response, result.OutputText);
+
+        var human = TestRunLogs.ReadShared(result.TextLogPath);
+        var assistant = LinesContaining(human, "assistant:");
+        Assert.Equal(2, assistant.Count);
+        Assert.Contains("assistant: # 開発状況報告", assistant[0], StringComparison.Ordinal);
+        Assert.Contains("assistant: 次の行です。", assistant[1], StringComparison.Ordinal);
+        Assert.DoesNotContain(assistant, line => line.EndsWith("assistant: # 開発", StringComparison.Ordinal));
+        Assert.DoesNotContain(assistant, line => line.EndsWith("assistant: 状況報告", StringComparison.Ordinal));
+        Assert.DoesNotContain(assistant, line => line.EndsWith("assistant: 次の行", StringComparison.Ordinal));
+        Assert.Contains("antigravity result status=SUCCESS", human, StringComparison.Ordinal);
+
+        var events = TestRunLogs.ReadShared(result.EventsLogPath);
+        Assert.Equal(4, CountEvents(events, "step_update"));
+        Assert.Equal(4, CountOccurrences(events, "text_delta"));
+    }
+
+    [Fact]
+    public async Task AntigravityHumanLogDecodesUnicodeTextDeltaOnce()
+    {
+        // JSON の \u をソースに残す。C# の raw string はここで展開しない。
+        var stream = string.Join('\n',
+            AgEvent("init", new Dictionary<string, object?>(), "conv-1"),
+            """{"event":"step_update","step_update":{"step_index":10,"state":"ACTIVE","step_type":"agent_response","text_delta":"\u9032\u884c\n"}}""",
+            """{"event":"result","result":{"conversation_id":"conv-1","status":"SUCCESS","response":"\u9032\u884c\n"}}""");
+
+        Assert.Contains("\\u9032\\u884c", stream, StringComparison.Ordinal);
+        await using var log = TestRunLogs.CreateLog();
+        var result = await RunAntigravityAsync(stream, 0, log: log);
+        Assert.Equal("進行\n", result.OutputText);
+        Assert.DoesNotContain("\\u9032", result.OutputText, StringComparison.Ordinal);
+
+        var human = TestRunLogs.ReadShared(result.TextLogPath);
+        var assistant = LinesContaining(human, "assistant:");
+        Assert.Single(assistant);
+        Assert.Contains("assistant: 進行", assistant[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("\\u9032", human, StringComparison.Ordinal);
+
+        var events = TestRunLogs.ReadShared(result.EventsLogPath);
+        var deltaLine = events.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Last(line => line.Contains("text_delta", StringComparison.Ordinal));
+        using var document = JsonDocument.Parse(deltaLine);
+        var stored = document.RootElement
+            .GetProperty("data")
+            .GetProperty("step_update")
+            .GetProperty("text_delta")
+            .GetString();
+        Assert.Equal("進行\n", stored);
+    }
+
+    [Fact]
+    public async Task AntigravityHumanLogFallsBackToResultResponseWithoutTextDelta()
+    {
+        var response = new string('あ', 120) + "\n" + new string('い', 120) + "\n" + new string('う', 120);
+        var stream = string.Join('\n',
+            AgEvent("init", new Dictionary<string, object?>(), "conv-1"),
+            AgEvent("result", new Dictionary<string, object?>
+            {
+                ["conversation_id"] = "conv-1",
+                ["status"] = "SUCCESS",
+                ["response"] = response,
+            }));
+
+        await using var log = TestRunLogs.CreateLog();
+        var result = await RunAntigravityAsync(stream, 0, log: log);
+        Assert.Equal(response, result.OutputText);
+
+        var human = TestRunLogs.ReadShared(result.TextLogPath);
+        var assistant = LinesContaining(human, "assistant:");
+        Assert.Equal(3, assistant.Count);
+        Assert.Contains(new string('あ', 120), assistant[0], StringComparison.Ordinal);
+        Assert.Contains(new string('い', 120), assistant[1], StringComparison.Ordinal);
+        Assert.Contains(new string('う', 120), assistant[2], StringComparison.Ordinal);
+        Assert.Contains("antigravity result status=SUCCESS", human, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AntigravityHumanLogDoesNotRepeatStreamedResponse()
+    {
+        var response = "STREAMED_PART\nRESULT_ONLY_PART";
+        var stream = string.Join('\n',
+            AgEvent("init", new Dictionary<string, object?>(), "conv-1"),
+            TextDelta("STREAMED_PART\n"),
+            AgEvent("result", new Dictionary<string, object?>
+            {
+                ["conversation_id"] = "conv-1",
+                ["status"] = "SUCCESS",
+                ["response"] = response,
+            }));
+
+        await using var log = TestRunLogs.CreateLog();
+        var result = await RunAntigravityAsync(stream, 0, sessionId: "conv-1", log: log);
+        Assert.Equal(response, result.OutputText);
+        Assert.Equal("final_response", result.OutputKind);
+
+        var human = TestRunLogs.ReadShared(result.TextLogPath);
+        var assistant = LinesContaining(human, "assistant:");
+        Assert.Single(assistant);
+        Assert.Contains("assistant: STREAMED_PART", assistant[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("RESULT_ONLY_PART", human, StringComparison.Ordinal);
+        Assert.Contains("antigravity result status=SUCCESS", human, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AntigravityConsoleViewerShowsProjectedHumanLog()
+    {
+        await using var log = TestRunLogs.CreateLog();
+        var stream = string.Join('\n',
+            AgEvent("init", new Dictionary<string, object?>
+            {
+                ["model"] = "gemini-3.8-flash-low",
+                ["permission_mode"] = "always-proceed",
+                ["cwd"] = "D:/work",
+            }, "conv-1"),
+            ToolEvent("run_command", "ACTIVE", new Dictionary<string, object?> { ["CommandLine"] = "py -m pytest -v" }),
+            TextDelta("viewer line\n"),
+            AgEvent("result", new Dictionary<string, object?>
+            {
+                ["conversation_id"] = "conv-1",
+                ["status"] = "SUCCESS",
+                ["response"] = "viewer line\n",
+            }));
+        var result = await RunAntigravityAsync(stream, 0, log: log);
+        ((AgentRunLog)log).WriteHeartbeat();
+
+        var output = new StringWriter();
+        var session = new RunLogViewerSession(TimeSpan.FromMilliseconds(20));
+        var task = session.RunAsync(log.TextLogPath, log.EventsPath, output, TextWriter.Null, CancellationToken.None);
+        var shown = await WaitUntilAsync(() =>
+        {
+            var text = output.ToString();
+            return text.Contains("tool: run_command ACTIVE command=py -m pytest -v", StringComparison.Ordinal)
+                && text.Contains("assistant: viewer line", StringComparison.Ordinal)
+                && text.Contains(" heartbeat ", StringComparison.Ordinal);
+        });
+        Assert.True(shown);
+        log.WriteCompleted(result);
+        Assert.Equal(0, await task.WaitAsync(TimeSpan.FromSeconds(3)));
+
+        var viewed = output.ToString();
+        Assert.Contains("tool: run_command ACTIVE command=py -m pytest -v", viewed, StringComparison.Ordinal);
+        Assert.Contains("assistant: viewer line", viewed, StringComparison.Ordinal);
+        Assert.Contains(" heartbeat ", viewed, StringComparison.Ordinal);
+    }
+
     private static async Task<AgentRunResult> RunAntigravityAsync(
         string stdout,
         int exitCode,
         string? sessionId = null,
         string standardError = "",
-        string? runMode = null)
+        string? runMode = null,
+        IAgentRunLog? log = null)
     {
         var runner = new RecordingProcessRunner
         {
@@ -1436,9 +1680,98 @@ public sealed class AntigravityJulesTests
         var driver = new AntigravityCliDriver(runner);
         return await driver.RunAsync(
             Request(AgentFacade.AntigravityAgent, "hello", sessionId: sessionId, runMode: runMode),
-            TestRunLogs.CreateLog(),
+            log ?? TestRunLogs.CreateLog(),
             null,
             CancellationToken.None);
+    }
+
+    private static string AgEvent(string name, Dictionary<string, object?> body, string? conversationId = null)
+    {
+        var payload = new Dictionary<string, object?>
+        {
+            ["event"] = name,
+            [name] = body,
+        };
+        if (conversationId is not null)
+        {
+            payload["conversation_id"] = conversationId;
+        }
+
+        return JsonSerializer.Serialize(payload);
+    }
+
+    private static string ToolEvent(
+        string name,
+        string state,
+        Dictionary<string, object?> parameters,
+        string? output = null,
+        string? errorMessage = null)
+    {
+        var info = new Dictionary<string, object?>
+        {
+            ["name"] = name,
+            ["parameters"] = parameters,
+        };
+        if (output is not null)
+        {
+            info["output"] = output;
+        }
+
+        if (errorMessage is not null)
+        {
+            info["error"] = new Dictionary<string, object?>
+            {
+                ["type"] = "TOOL_ERROR",
+                ["message"] = errorMessage,
+            };
+        }
+
+        return AgEvent("step_update", new Dictionary<string, object?>
+        {
+            ["step_index"] = 2,
+            ["state"] = state,
+            ["step_type"] = "tool",
+            ["tool_name"] = name,
+            ["tool_info"] = info,
+        });
+    }
+
+    private static string TextDelta(string text)
+    {
+        return AgEvent("step_update", new Dictionary<string, object?>
+        {
+            ["step_index"] = 10,
+            ["state"] = "ACTIVE",
+            ["step_type"] = "agent_response",
+            ["text_delta"] = text,
+        });
+    }
+
+    private static int CountEvents(string jsonl, string type)
+    {
+        return jsonl.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Count(line => line.Contains("\"type\":\"" + type + "\"", StringComparison.Ordinal));
+    }
+
+    private static int CountOccurrences(string text, string value)
+    {
+        var count = 0;
+        var index = 0;
+        while ((index = text.IndexOf(value, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += value.Length;
+        }
+
+        return count;
+    }
+
+    private static List<string> LinesContaining(string text, string marker)
+    {
+        return text.Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Where(line => line.Contains(marker, StringComparison.Ordinal))
+            .ToList();
     }
 
     private static string SuccessStream(string conversationId, string status, string response)
