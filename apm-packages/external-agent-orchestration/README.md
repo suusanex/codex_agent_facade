@@ -30,7 +30,7 @@ $external-agent-orchestration
 対象 issue の内容と現状を調べ、プランを作成してください。実装はまだ行わないでください。
 ```
 
-Cursor を使う場合は委譲先を `cursor` に変更します。未指定なら Skill は委譲先を確認します。「このスレッド」と指定した場合は、変更指示まで役割と委譲先を引き継ぎます。
+委譲先は `github-copilot`、`cursor`、`grok-build`、`codex`、`antigravity`、`jules` を指定できます。未指定なら Skill は委譲先を確認します。「このスレッド」と指定した場合は、変更指示まで役割と委譲先を引き継ぎます。Jules の `waiting_for_input`、受理不明、cancel 非対応、Antigravity の `permission_soft_denied` は親用 SKILL の境界に従い、細則は各 relay SKILL と Facade 公開契約を参照します。
 
 親は必要な根拠を直接確認しますが、成果物の編集・修正は worker へ戻します。Facade が使えない場合は、親実装や別 agent への切替で代替せず、阻害要因を報告します。「調査のみ」「プランまで」という依頼は、その範囲のまま委譲します。
 
@@ -39,7 +39,7 @@ Cursor を使う場合は委譲先を `cursor` に変更します。未指定な
 | Skill | Codex の役割 |
 | --- | --- |
 | `external-agent-orchestration` | 作業を分解して委譲し、成果をレビューして受入判断を行う |
-| `github-copilot` / `cursor` / `grok-build` | ユーザー本文をそのまま外部 agent へ渡し、結果を中継する |
+| `github-copilot` / `cursor` / `grok-build` / `codex` / `antigravity` / `jules` | ユーザー本文をそのまま外部 agent へ渡し、結果を中継する |
 
 この親用 Skill は中継用 Skill に依存しません。同じ作業で両者の役割を重ねず、MCP tool を直接使用します。引数、待機、再試行、session 継続は MCP の公開説明を正とし、Skill 側へ固定値を複製しません。
 

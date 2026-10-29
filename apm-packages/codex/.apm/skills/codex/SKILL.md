@@ -21,7 +21,7 @@ payloadの出典は、このSkillを呼び出した実際のユーザーmessage�
 ユーザー message は委譲ヘッダ、Facade options、委譲本文、委譲先 SKILL の4領域に分かれる。領域を混ぜない。message 先頭の空行は読み飛ばし、その次が委譲ヘッダである。
 
 - 委譲ヘッダは `$codex` である。親がこの relay を開始する呼び出しであり、委譲本文でも委譲先 SKILL でもない。`$codex` の直後の区切り（半角スペース1つか改行）はヘッダの終端であり、委譲本文に含めない。`prompt` に `$codex` や `/codex` を追加しない。`skills` に `codex` を入れない。この Skill が指定されたこと自体は、委譲先へ同じ Skill を渡す理由にならない。`agent` はこの relay の agent 名であり、同じ名前を `skills` へ重ねない。
-- Facade options は、`$codex` より後ろの本文の先頭空行を除いた最初の行が開始フェンス（バッククォート3つの後に `facade-options` とだけ書いた行）の場合だけ、その行から終了フェンス（バッククォート3つだけの行）までである。有効な行は `model: <id>`, `reasoning_effort: <token>`, `fast: true|false` の各1行まで。コロンを含まない行はカンマ区切りの presence flag である。例は `plan` と `plan,fast`。トークンは前後の空白を除き、大文字小文字を区別する。空トークン、重複、未知トークンは `start_agent` を呼ばず報告する。`fast` フラグは存在するときだけ `true` にする。フラグが無いときは `fast` を渡さない。`plan: true` は未知キーである。空値、重複、未知のkey、不正なboolean、または閉じていないfenceはtoolを呼ぶ前にエラーとして報告する。`skills` は Facade options のキーではない。実行オプションが無い場合、`model`, `reasoning_effort`, `fast` は渡さない。この turn の Facade options に無い `model`, `reasoning_effort`, `fast` は渡さない。`plan` フラグが無いときは `run_mode` を渡さない。`plan` フラグはこの agent では未対応である。`plan` があるときは `start_agent` を呼ばず報告する。
+- Facade options は、`$codex` より後ろの本文の先頭空行を除いた最初の行が開始フェンス（バッククォート3つの後に `facade-options` とだけ書いた行）の場合だけ、その行から終了フェンス（バッククォート3つだけの行）までである。有効な行は `model: <id>`, `reasoning_effort: <token>`, `fast: true|false`, `auto_approve: true|false` の各1行まで。コロンを含まない行はカンマ区切りの presence flag である。例は `plan` と `plan,fast`。トークンは前後の空白を除き、大文字小文字を区別する。空トークン、重複、未知トークンは `start_agent` を呼ばず報告する。`fast` フラグは存在するときだけ `true` にする。フラグが無いときは `fast` を渡さない。`plan: true` は未知キーである。空値、重複、未知のkey、不正なboolean、または閉じていないfenceはtoolを呼ぶ前にエラーとして報告する。`skills` は Facade options のキーではない。実行オプションが無い場合、`model`, `reasoning_effort`, `fast` は渡さない。この turn の Facade options に無い `model`, `reasoning_effort`, `fast` は渡さない。 `auto_approve:` が無いときも `auto_approve` は渡さない。`plan` フラグが無いときは `run_mode` を渡さない。`plan` フラグはこの agent では未対応である。`plan` があるときは `start_agent` を呼ばず報告する。
 - 委譲本文は、Facade options があるときは終了フェンスの直後から末尾まで、無いときは `$codex` より後ろの本文全体である。終了フェンスの直後から末尾までを一字も変更せず `prompt` にする。直後とは、終了フェンス行を終わらせる改行の次の文字である。Facade options が無いときも、ヘッダ終端より後ろを一字も変更せず `prompt` にする。委譲ヘッダと Facade options は `prompt` に含めない。
 - 委譲先 SKILL は `start_agent` の `skills` だけである。この relay の入力構文に委譲先 SKILL を列挙する欄は無い。新規 job と継続では `skills` を渡さない。委譲本文から Skill 名を抽出して `skills` へ複製しない。Exact retry で元 request に `skills` があった場合だけ、他の引数と一緒に同じ値を再送する。MCP を直接呼ぶ別経路で呼び出し側が `skills` 引数を渡すことは、この入力構文の解釈ではない。
 
@@ -36,7 +36,7 @@ fast: false
 
 `reasoning_effort` はCodex CLIの `model_reasoning_effort` 設定へ渡す。`fast: true` は `service_tier=priority`、`fast: false` は `service_tier=default` を明示する。両方とも省略時はCLI既定を維持する。指定値はCodex CLIへ渡す値であり、backendが要求tierを実際に提供したことを保証しない。利用条件と料金はモデル/契約に依存する。Codex CLIが設定を受け付けない場合、Facadeは失敗を返す。
 
-`auto_approve=true` はworkspace-write sandbox、`false` はread-only sandboxを選び、いずれも `approval_policy=never` を使う。falseでは承認質問が表示されない。
+`auto_approve: true` はworkspace-write sandbox、`auto_approve: false` はread-only sandboxを選び、いずれも `approval_policy=never` を使う。falseでは承認質問が表示されない。`facade-options` にその行があるときだけ boolean を渡す。未指定時は引数を渡さず Facade 既定（true）を使う。presence flag にはしない。
 
 ## request_id と session_id の lifetime
 

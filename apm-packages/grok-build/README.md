@@ -26,7 +26,7 @@ apm install "C:\path\to\codex_agent_facade\apm-packages\grok-build" --target cod
 
 Codex 上で対象リポジトリを開いた状態で、Skill を指定して作業本文を書く。Skill より後の本文は Grok Build へ渡す作業 payload であり、Codex 自身への作業実行指示ではない。`working_directory` は今開いているリポジトリのパスにする。同じ Codex thread で続けて委譲するときは、新しい `request_id` を生成し、前回 completed result の `sessionId` を `session_id` に渡し、`working_directory` を含む required fields を毎回指定する。
 
-`$grok-build` は親の委譲ヘッダであり、worker prompt にも `skills` にも入れない。`/grok-build` を prompt へ追加しない。`facade-options` の `key: value` は `model`, `reasoning_effort`, `fast` だけで、`skills` は未知キーとしてエラーにする。コロンの無い行は presence flag で、`plan` は `run_mode=plan` になる。`fast` フラグは在るときだけ true で、無いときは送らない。この relay は新規 job と継続では `skills` を渡さない。Grok Build では `fast` を指定しない。
+`$grok-build` は親の委譲ヘッダであり、worker prompt にも `skills` にも入れない。`/grok-build` を prompt へ追加しない。`facade-options` の `key: value` は `model`, `reasoning_effort`, `fast`, `auto_approve` である。`auto_approve` は `true` または `false` で、未指定時は引数を渡さない。`skills` は未知キーとしてエラーにする。コロンの無い行は presence flag で、`plan` は `run_mode=plan` になる。`fast` フラグは在るときだけ true で、無いときは送らない。この relay は新規 job と継続では `skills` を渡さない。Grok Build では `fast` を指定しない。
 
 ```text
 $grok-build このリポジトリの README に使い方を追記して。

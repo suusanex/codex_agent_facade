@@ -12,7 +12,7 @@ apm install suusanex/codex_agent_facade/apm-packages/codex --target codex,agent-
 
 ## Use
 
-作業本文の前に `facade-options` blockを置くときは `model`, `reasoning_effort`, `fast` を指定できる。未指定optionはCLI既定を使い、`fast: false` は明示的にdefault tierを要求する。prompt本文に現れたモデル名から起動設定を推測しない。本文中のモデル名は起動設定にしない。`$codex` は親の委譲ヘッダであり、worker prompt にも `skills` にも入れない。`/codex` を prompt へ追加しない。実行オプションが無いときは委譲ヘッダより後ろの本文が作業 prompt である。`facade-options` の `key: value` は `model`, `reasoning_effort`, `fast` だけで、`skills` は未知キーとしてエラーにする。presence flag の `plan` はこの agent では未対応なので `start_agent` を呼ばない。`fast` フラグは在るときだけ true で、無いときは送らない。この relay は新規 job と継続では `skills` を渡さない。
+作業本文の前に `facade-options` blockを置くときは `model`, `reasoning_effort`, `fast`, `auto_approve` を指定できる。未指定optionはCLI既定を使い、`fast: false` は明示的にdefault tierを要求する。prompt本文に現れたモデル名から起動設定を推測しない。本文中のモデル名は起動設定にしない。`$codex` は親の委譲ヘッダであり、worker prompt にも `skills` にも入れない。`/codex` を prompt へ追加しない。実行オプションが無いときは委譲ヘッダより後ろの本文が作業 prompt である。`facade-options` の `key: value` は `model`, `reasoning_effort`, `fast`, `auto_approve` である。`auto_approve` は `true` または `false` で、未指定時は引数を渡さない。`skills` は未知キーとしてエラーにする。presence flag の `plan` はこの agent では未対応なので `start_agent` を呼ばない。`fast` フラグは在るときだけ true で、無いときは送らない。この relay は新規 job と継続では `skills` を渡さない。
 
 ```text
 $codex このリポジトリで対象変更を実装し、結果を報告して。

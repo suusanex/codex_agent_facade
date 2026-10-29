@@ -2,7 +2,7 @@
 
 この一覧は、relay SKILL の `facade-options` ブロック内 `model:` 行、および MCP `start_agent` の `model` 引数へ渡す **CLI 識別子** を記録する。Codex App / Cursor IDE / GitHub Copilot App など UI 上のモデル名とは文字列が一致しない場合がある。Facade は、Cursor で `reasoning_effort` または `fast` を指定したときを除き、識別子を変換せず指定時だけ各 CLI の `--model` へそのまま渡す。Cursor の選択規則は下の effort / fast 表を参照する。
 
-**スナップショット取得日:** Cursor と GitHub Copilot は 2026-10-06。Grok Build は 2026-10-15。
+**スナップショット取得日:** Cursor と GitHub Copilot は 2026-10-06。Grok Build は 2026-10-15。Antigravity は 2026-10-29。Jules に model 識別子は無い。
 
 ## 使い方
 
@@ -13,7 +13,7 @@ model: composer-2.5-fast
 ```
 作業 prompt
 
-MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子を渡す。未指定時はモデル引数を付けない。prompt 本文中のモデル名は起動設定にしない。
+MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子を渡す。未指定時はモデル引数を付けない。prompt 本文中のモデル名は起動設定にしない。同じ block の `auto_approve: true|false` は明示 boolean で、presence flag にはしない。未指定時は `auto_approve` 引数を渡さず Facade 既定（true）を使う。
 
 ## Cursor CLI
 
@@ -359,21 +359,57 @@ Facade は `reasoning_effort` を `--reasoning-effort` へそのまま渡す。C
 
 `model does not support reasoning effort; ignoring` は 1.0.52 のバイナリにも、上記の実機 stderr にも無かった。カタログ外モデルの無視警告は exit 1 なので、Facade は従来どおり `non_zero_exit` で失敗する。exit 0 で新しい無視警告だけが出た場合は `option_not_applied` にする。`--effort/--reasoning-effort ignored` は同じバイナリの文字列としてあるが、このカタログでは exit 0 の再現は取れていない。
 
+## Antigravity CLI
+
+- **CLI バージョン:** `agy` 1.4.9
+- **取得コマンド:** `agy models`
+- **件数:** 13
+- **確認日:** 2026-10-29
+
+`model:` には、このコマンドが出した slug をそのまま書く。Facade は空白以外を `--model` へ変換せず渡す。省略時は引数を付けない。未知 slug を別モデルへ替えない。slug の末尾にある level 名は model 識別子の一部であり、`reasoning_effort` ではない。
+
+| CLI 識別子 (`model:` / `--model`) | 表示名 |
+| --- | --- |
+| `gemini-4-argon-medium` | Gemini 4 Argon (Medium) |
+| `gemini-4-argon-high` | Gemini 4 Argon (High) |
+| `gemini-4-argon-low` | Gemini 4 Argon (Low) |
+| `gemini-3.8-flash-high` | Gemini 3.8 Flash (High) |
+| `gemini-3.8-flash-medium` | Gemini 3.8 Flash (Medium) |
+| `gemini-3.8-flash-low` | Gemini 3.8 Flash (Low) |
+| `claude-opus-5-5-low` | Claude Opus 5.5 (Low) |
+| `claude-opus-5-5-medium` | Claude Opus 5.5 (Medium) |
+| `claude-opus-5-5-high` | Claude Opus 5.5 (High) |
+| `claude-sonnet-5-5-low` | Claude Sonnet 5.5 (Low) |
+| `claude-sonnet-5-5-medium` | Claude Sonnet 5.5 (Medium) |
+| `claude-sonnet-5-5-high` | Claude Sonnet 5.5 (High) |
+| `gpt-oss-120b-medium` | GPT-OSS 120B (Medium) |
+
+`reasoning_effort` は `--effort` へそのまま渡す。2026-10-29 の公開 headless flag 表の例は `low` / `medium` / `high` である。CLI reference はモデル依存で low から max まで、と書いている。この環境では effort 一覧コマンドを再実行していない。Facade は token を絞らず、未指定なら `--effort` を付けない。
+
+`fast` と `run_mode` は非対応である。relay は送らない。指定されていれば起動前に拒否し、黙って省略しない。`auto_approve: true` は `--dangerously-skip-permissions`、`false` はその flag を付けない。`false` は headless の対話承認にはならず、tool が soft-deny され得る。未指定は引数を渡さず Facade 既定の true になる。`session_id` は Antigravity conversation id で、継続するときだけ `--conversation` に渡る。
+
+- [Headless](https://antigravity.google/docs/cli/headless)
+
+## Jules
+
+Jules に model 識別子は無い。`model`、`reasoning_effort`、`fast`、`run_mode`、空でない `skills`、`auto_approve=false` は起動前に拒否する。relay はこれらを省略して送ったり、別の値へ替えたりしない。新規 session では `session_id` を渡さない。
+
 ## 更新方法
 
 1. **Cursor:** `cursor-agent models` を実行し、`識別子 - 表示名` 形式の出力を反映する。CLI は一部行を特殊な区切り文字で連結するため、連結された行は区切ってから表へ変換する。識別子は CLI 出力から得た値だけを使い、推測で補わない。
 2. **GitHub Copilot:** 対話 CLI で `/model` を実行するか、上記 headless stdio 経路で `models.list` を取得する。公式ドキュメント: [GitHub Copilot CLI programmatic reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference)
 3. **Grok Build:** `grok models` を実行し、CLI が出した識別子だけを反映する。未ログイン時のカタログと、ログイン後に実際に選べる集合は分けて記録する。
-4. このファイルのスナップショット日、CLI バージョン、表本体を更新する。
+4. **Antigravity:** `agy models` を実行し、CLI が出した slug だけを反映する。effort の受理範囲は公開資料と、その model が拒否した実エラーを分けて記録する。推測で token を足さない。
+5. このファイルのスナップショット日、CLI バージョン、表本体を更新する。
 
 ## 関連
 
-- relay SKILL の `model:` 仕様: [cursor](../apm-packages/cursor/.apm/skills/cursor/SKILL.md), [github-copilot](../apm-packages/github-copilot/.apm/skills/github-copilot/SKILL.md), [grok-build](../apm-packages/grok-build/.apm/skills/grok-build/SKILL.md)
+- relay SKILL の `model:` 仕様: [cursor](../apm-packages/cursor/.apm/skills/cursor/SKILL.md), [github-copilot](../apm-packages/github-copilot/.apm/skills/github-copilot/SKILL.md), [grok-build](../apm-packages/grok-build/.apm/skills/grok-build/SKILL.md), [antigravity](../apm-packages/antigravity/.apm/skills/antigravity/SKILL.md), [jules](../apm-packages/jules/.apm/skills/jules/SKILL.md)
 - Facade の `model` 引数: [README](README.md) の `start_agent` 節
 
 ## Reasoning Effort と fast（issue #24 第2段階）
 
-`model`, `reasoning_effort`, `fast` は独立した実行設定である。relay Skillでは委譲ヘッダの後、作業本文の前に `facade-options` blockを置く。ブロック自体は worker prompt に含めず、`$skill` の呼び出しも prompt と `skills` に入れない。MCPでは `start_agent` の同名引数で指定する。設定はprompt本文から推測せず、session継続とexact retryでも毎回必要な値を渡す。設定なしは既存CLI既定を保ち、`fast: false` は明示的な非-fast/default指定である。Copilot と Grok Build は独立した `fast` を受け付けない。`run_mode=plan` はモデル識別子ではない。Grok Build だけが受け付け、通常実行の `--reasoning-effort` とは別に `session/set_config_option` の文字列値で model と reasoning_effort を適用する。
+`model`, `reasoning_effort`, `fast` は独立した実行設定である。relay Skillでは委譲ヘッダの後、作業本文の前に `facade-options` blockを置く。ブロック自体は worker prompt に含めず、`$skill` の呼び出しも prompt と `skills` に入れない。MCPでは `start_agent` の同名引数で指定する。設定はprompt本文から推測せず、session継続とexact retryでも毎回必要な値を渡す。設定なしは既存CLI既定を保ち、`fast: false` は明示的な非-fast/default指定である。Copilot と Grok Build は独立した `fast` を受け付けない。`run_mode=plan` はモデル識別子ではない。Grok Build だけが受け付け、通常実行の `--reasoning-effort` とは別に `session/set_config_option` の文字列値で model と reasoning_effort を適用する。Antigravity は `model` と `reasoning_effort` を `--model` と `--effort` へそのまま渡し、`fast` と `run_mode` は拒否する。Jules は `model`、`reasoning_effort`、`fast`、`run_mode`、`auto_approve=false` を拒否する。
 
 | Agent | Reasoning Effort | Independent fast | CLI変換 |
 | --- | --- | --- | --- |
@@ -381,6 +417,8 @@ Facade は `reasoning_effort` を `--reasoning-effort` へそのまま渡す。C
 | GitHub Copilot | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | 非対応。両booleanを拒否 | `--reasoning-effort <token>` |
 | Grok Build | CLI canonicalまたはmodel固有token | 非対応。両booleanを拒否 | `--reasoning-effort <token>`。CLIがeffortを無視したwarningを出せばexit 0でも失敗 |
 | Codex CLI | CLIが許すeffort token | `true` / `false` | `-c model_reasoning_effort="<token>"`; fastは `-c service_tier="priority"` / `"default"` |
+| Antigravity | 呼び出し側の token。公開 headless 例は `low` / `medium` / `high` | 非対応。両booleanを拒否 | `--model` と `--effort`。未指定は付けない |
+| Jules | 非対応 | 非対応。両booleanを拒否 | `model`、`reasoning_effort`、`fast` は起動前に拒否 |
 
 Cursorは `reasoning_effort` と `fast` を両方省略したとき、渡された `model` をそのまま `--model` に渡す。どちらかを指定したときは、その実行の直前に `cursor-agent models` を読み、基底・effort・fastが一致する識別子だけを渡す。bracketは作らない。一覧の取得に失敗した場合や、一致する識別子が無い場合は起動しない。モデル文字列に既に effort や `-fast` があり、同じ項目を独立fieldでも指定した場合は重複として拒否する。
 
