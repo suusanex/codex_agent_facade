@@ -318,6 +318,30 @@ public class GrokPlanSessionTests
     }
 
     [Fact]
+    public async Task MalformedMethodlessResponseFailsEvenWhenAValidResponseFollows()
+    {
+        foreach (var frame in new[]
+        {
+            "{\"jsonrpc\":\"2.0\",\"result\":{}}",
+            "{\"jsonrpc\":\"2.0\",\"id\":999}",
+        })
+        {
+            using var directory = new TempWorkspace();
+            var factory = new ScriptedGrokAcpFactory
+            {
+                Script = new ScriptedGrokPlanScript { InvalidResponseBeforeInitialize = frame },
+            };
+            var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => RunAsync(Request(directory.Path), factory, new RecordingProcessRunner()));
+            Assert.Equal("internal_error", failure.Data[CliJson.FailureKindKey]);
+            Assert.Contains("invalid JSON-RPC response", failure.Message, StringComparison.Ordinal);
+            var responses = string.Join("\n", factory.Last!.Responses);
+            Assert.Contains(frame, responses, StringComparison.Ordinal);
+            Assert.Contains("protocolVersion", responses, StringComparison.Ordinal);
+            Assert.False(Directory.Exists(Path.Combine(directory.Path, ".codex-agent-facade")));
+        }
+    }
+
+    [Fact]
     public async Task ReverseRequestStillFailsWhenAnUnmatchedResponseArrivesFirst()
     {
         using var directory = new TempWorkspace();
@@ -661,6 +685,8 @@ internal sealed class ScriptedGrokPlanScript
     public string? OmitResultOn { get; set; }
 
     public bool InvalidJsonOnInitialize { get; set; }
+
+    public string? InvalidResponseBeforeInitialize { get; set; }
 }
 
 internal sealed class ScriptedGrokAcpFactory : IGrokAcpProcessFactory
@@ -851,6 +877,12 @@ internal sealed class ScriptedGrokAcpPeer : IGrokAcpProcess
         {
             Enqueue("{\"jsonrpc\":\"2.0\",\"id\":" + id + "}");
             return;
+        }
+
+        if (string.Equals(methodName, "initialize", StringComparison.Ordinal)
+            && _script.InvalidResponseBeforeInitialize is not null)
+        {
+            Enqueue(_script.InvalidResponseBeforeInitialize);
         }
 
         Enqueue("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":" + resultJson + "}");

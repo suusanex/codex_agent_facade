@@ -391,7 +391,7 @@ internal static class GrokPlanSession
                     continue;
                 }
 
-                if (IsUnmatchedResponse(root, id))
+                if (IsUnmatchedResponse(root, id, errorKind))
                 {
                     continue;
                 }
@@ -442,7 +442,7 @@ internal static class GrokPlanSession
                     continue;
                 }
 
-                if (IsUnmatchedResponse(root, id))
+                if (IsUnmatchedResponse(root, id, "internal_error"))
                 {
                     continue;
                 }
@@ -635,19 +635,42 @@ internal static class GrokPlanSession
         }
 
         /// <summary>
-        /// method を持たない JSON-RPC response のうち、待っている request ID と一致しないものを unmatched とする。
-        /// Grok Build は skills / workflow watcher の内部 response を同じ stream に出す。固定 ID は列挙しない。
-        /// 受信行は ReadRequiredAsync が ACP log へ残している。一致する response が来なければ、この判定だけでは成功にしない。
+        /// response として成立し、待っている request ID と一致しないものだけ true。
+        /// id が string か number であり、result か error がある object に限る。固定 ID は列挙しない。
+        /// id が無い、id の型が違う、result も error も無い object は protocol error として失敗させる。
+        /// 待っている ID に result も error も無い場合は、呼び出し側の既存エラーに任せる。
+        /// method を持つメッセージは response ではない。受信行は ReadRequiredAsync が ACP log へ残している。
         /// </summary>
-        private static bool IsUnmatchedResponse(JsonElement root, int expectedId)
+        private static bool IsUnmatchedResponse(JsonElement root, int expectedId, string errorKind)
         {
-            // object 以外は response として読まない。壊れた JSON は Parse が既に失敗させている。
             if (root.ValueKind != JsonValueKind.Object || root.TryGetProperty("method", out _))
             {
                 return false;
             }
 
+            if (!HasJsonRpcResponseId(root))
+            {
+                throw Fail(errorKind, "Grok Build plan mode returned an invalid JSON-RPC response.");
+            }
+
+            var hasPayload = root.TryGetProperty("result", out _) || root.TryGetProperty("error", out _);
+            if (!hasPayload)
+            {
+                if (IdEquals(root, expectedId))
+                {
+                    return false;
+                }
+
+                throw Fail(errorKind, "Grok Build plan mode returned an invalid JSON-RPC response.");
+            }
+
             return !IdEquals(root, expectedId);
+        }
+
+        private static bool HasJsonRpcResponseId(JsonElement root)
+        {
+            return root.TryGetProperty("id", out var id)
+                && id.ValueKind is JsonValueKind.String or JsonValueKind.Number;
         }
 
         private static bool IdEquals(JsonElement root, int expected)
