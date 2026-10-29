@@ -1,0 +1,41 @@
+{"activities":[{
+      "name": "sessions/14644344499652563347/activities/1f642c67ccbe45178987c169a381a8d1",
+      "createTime": "2026-10-29T11:11:20.579861Z",
+      "originator": "agent",
+      "agentMessaged": {
+        "agentMessage": "復唱の準備はできていますか"
+      },
+      "id": "1f642c67ccbe45178987c169a381a8d1"
+    },{
+      "name": "sessions/14644344499652563347/activities/task-14644344499652563347-activity-step-7668377535958361935",
+      "createTime": "2026-10-29T11:13:30.340120307Z",
+      "originator": "user",
+      "userMessaged": {
+        "userMessage": "SAME-TEXT-MARKER"
+      },
+      "id": "task-14644344499652563347-activity-step-7668377535958361935"
+    },{
+      "name": "sessions/14644344499652563347/activities/a786ce187f8e419d9dcf80ff641d568d",
+      "createTime": "2026-10-29T11:13:40.021612Z",
+      "originator": "agent",
+      "agentMessaged": {
+        "agentMessage": "復唱の準備はできていますか"
+      },
+      "id": "a786ce187f8e419d9dcf80ff641d568d"
+    },{
+      "name": "sessions/14644344499652563347/activities/task-14644344499652563347-activity-step-5426814382443254259",
+      "createTime": "2026-10-29T11:13:47.160362825Z",
+      "originator": "user",
+      "userMessaged": {
+        "userMessage": "SAME-TEXT-MARKER"
+      },
+      "id": "task-14644344499652563347-activity-step-5426814382443254259"
+    },{
+      "name": "sessions/14644344499652563347/activities/4898619ac68443339f878a0838c96481",
+      "createTime": "2026-10-29T11:13:54.214173Z",
+      "originator": "agent",
+      "agentMessaged": {
+        "agentMessage": "復唱の準備はできていますか"
+      },
+      "id": "4898619ac68443339f878a0838c96481"
+    }]}

@@ -35,7 +35,7 @@ dotnet publish src/RunLogViewer.cs -o .\publish
 dotnet publish src/CodexAgentFacadeCli.cs -o .\publish
 ```
 
-`CodexAgentFacadeCli.exe` は通常アプリが1回のagent実行を同期で呼ぶコンソール入口である。常駐MCPホストとは別プロセスで、タスクスケジューラの起動対象にはしない。契約、入出力、終了コード、MCPおよびFlaUIとの差は [通常アプリ向けCLI](docs/cli.md) を参照する。Antigravity と Jules の対応範囲、未実測の境界は [Antigravity / Jules](docs/antigravity-jules.md) を参照する。
+`CodexAgentFacadeCli.exe` は通常アプリが1回のagent実行を同期で呼ぶコンソール入口である。常駐MCPホストとは別プロセスで、タスクスケジューラの起動対象にはしない。契約、入出力、終了コード、MCPおよびFlaUIとの差は [通常アプリ向けCLI](docs/cli.md) を参照する。Antigravity と Jules の対応範囲と実測は [Antigravity / Jules](docs/antigravity-jules.md) を参照する。`agy` の soft-deny 文面は未再実測である。
 
 ポートが既に使われている場合は別ポートへ逃げず、起動失敗する。
 

@@ -41,6 +41,14 @@ public sealed class JulesRejectedException : JulesApiException
         : base(message)
     {
     }
+
+    public JulesRejectedException(string message, HttpStatusCode statusCode)
+        : base(message)
+    {
+        StatusCode = statusCode;
+    }
+
+    public HttpStatusCode? StatusCode { get; }
 }
 
 public sealed class JulesCredentialException : JulesApiException
@@ -236,7 +244,9 @@ public sealed class JulesApiClient
 
         if (!response.IsSuccessStatusCode)
         {
-            throw new JulesRejectedException("Jules API rejected the request with status " + status.ToString(System.Globalization.CultureInfo.InvariantCulture) + ".");
+            throw new JulesRejectedException(
+                "Jules API rejected the request with status " + status.ToString(System.Globalization.CultureInfo.InvariantCulture) + ".",
+                response.StatusCode);
         }
 
         return body;
