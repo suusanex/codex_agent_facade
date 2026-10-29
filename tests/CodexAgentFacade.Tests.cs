@@ -3388,9 +3388,18 @@ public class FacadeDelegationSkillContractTests
         Assert.False(RelayInvocationParser.Parse(
             "antigravity",
             "$antigravity\n```facade-options\nfast\n```\n\nImplement issue #123.\n").Succeeded);
+        var plan = RelayInvocationParser.Parse(
+            "antigravity",
+            "$antigravity\n```facade-options\nplan\nmodel: gemini-4-argon-high\nreasoning_effort: high\nauto_approve: false\n```\n\nImplement issue #123.\n");
+        Assert.True(plan.Succeeded, plan.Error);
+        Assert.Equal("plan", plan.RunMode);
+        Assert.Equal("gemini-4-argon-high", plan.Model);
+        Assert.Equal("high", plan.ReasoningEffort);
+        Assert.True(plan.AutoApprove == false);
+        Assert.Equal("\nImplement issue #123.\n", plan.Prompt);
         Assert.False(RelayInvocationParser.Parse(
             "antigravity",
-            "$antigravity\n```facade-options\nplan\n```\n\nImplement issue #123.\n").Succeeded);
+            "$antigravity\n```facade-options\nplan: true\n```\n\nImplement issue #123.\n").Succeeded);
         Assert.False(RelayInvocationParser.Parse(
             "antigravity",
             "$antigravity\n```facade-options\nskills: review\n```\n\nImplement issue #123.\n").Succeeded);
@@ -3403,6 +3412,11 @@ public class FacadeDelegationSkillContractTests
         Assert.Contains("同じ Codex thread だからという理由では渡さない", text, StringComparison.Ordinal);
         Assert.Contains("--model", text, StringComparison.Ordinal);
         Assert.Contains("--effort", text, StringComparison.Ordinal);
+        Assert.Contains("`plan` フラグがあるときだけ `run_mode` に `plan` を渡す", text, StringComparison.Ordinal);
+        Assert.Contains("無いときは `run_mode` を渡さない", text, StringComparison.Ordinal);
+        Assert.Contains("`outputKind` が `plan`", text, StringComparison.Ordinal);
+        Assert.Contains("`planPath` は付かない", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("`plan` も非対応", text, StringComparison.Ordinal);
         Assert.Contains("WAITING", text, StringComparison.Ordinal);
         Assert.Contains("RUNNING", text, StringComparison.Ordinal);
         var followUp = ReadHeadingSection(text, "## Follow-up continuation");
@@ -3729,7 +3743,7 @@ public class FacadeDelegationSkillContractTests
                 return RelayInvocation.Fail(agent, "Cursor requires model when reasoning_effort or fast is set.");
             }
 
-            if (string.Equals(runMode, "plan", StringComparison.Ordinal) && agent != "grok-build")
+            if (string.Equals(runMode, "plan", StringComparison.Ordinal) && agent is not "grok-build" and not "antigravity")
             {
                 return RelayInvocation.Fail(agent, "Plan-only run_mode is not supported.");
             }

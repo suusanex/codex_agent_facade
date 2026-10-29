@@ -146,7 +146,8 @@ public sealed class AntigravityJulesTests
     {
         Assert.Throws<ArgumentException>(() => AgentFacade.Validate(Request(AgentFacade.AntigravityAgent, "hello", fast: false)));
         Assert.Throws<ArgumentException>(() => AgentFacade.Validate(Request(AgentFacade.AntigravityAgent, "hello", skills: ["skill"])));
-        Assert.Throws<ArgumentException>(() => AgentFacade.Validate(Request(AgentFacade.AntigravityAgent, "hello", runMode: "plan")));
+        AgentFacade.Validate(Request(AgentFacade.AntigravityAgent, "hello", runMode: "plan"));
+        Assert.Throws<ArgumentException>(() => AgentFacade.Validate(Request(AgentFacade.AntigravityAgent, "hello", runMode: "execute")));
         Assert.Throws<ArgumentException>(() => AgentFacade.Validate(Request(AgentFacade.JulesAgent, "hello", fast: true)));
         Assert.Throws<ArgumentException>(() => AgentFacade.Validate(Request(AgentFacade.JulesAgent, "hello", skills: ["skill"])));
         Assert.Throws<ArgumentException>(() => AgentFacade.Validate(Request(AgentFacade.JulesAgent, "hello", runMode: "plan")));
@@ -194,6 +195,59 @@ public sealed class AntigravityJulesTests
         Assert.Equal(AntigravityCliDriver.FileName, runner.LastRequest!.FileName);
         Assert.Contains("--conversation", runner.LastRequest.Arguments);
         Assert.DoesNotContain("--model", runner.LastRequest.Arguments);
+        Assert.DoesNotContain("--mode", runner.LastRequest.Arguments);
+    }
+
+    [Fact]
+    public async Task CliRunsAntigravityPlanWithoutPlanPath()
+    {
+        var runner = new RecordingProcessRunner
+        {
+            Result = new ProcessRunResult(0, SuccessStream("conv-1", "SUCCESS", "the plan"), ""),
+        };
+        var facade = Facade(runner, new JulesHttpScript(), new FakeGitWorktree());
+        await using var accepted = new StringWriter();
+        var code = await AgentCli.ExecuteAsync(
+            facade,
+            JsonSerializer.Serialize(new
+            {
+                agent = AgentFacade.AntigravityAgent,
+                prompt = "hello",
+                working_directory = Path.GetTempPath(),
+                model = "gemini",
+                reasoning_effort = "high",
+                auto_approve = false,
+                run_mode = "plan",
+            }),
+            accepted,
+            CancellationToken.None,
+            @"C:\facade-cli-test\cli.4242.log");
+        Assert.Equal(AgentCli.ExitCompleted, code);
+        var arguments = runner.LastRequest!.Arguments;
+        var modeIndex = -1;
+        var modeCount = 0;
+        for (var i = 0; i < arguments.Count; i++)
+        {
+            if (arguments[i] == "--mode")
+            {
+                modeCount++;
+                modeIndex = i;
+            }
+        }
+
+        Assert.Equal(1, modeCount);
+        Assert.Equal("plan", arguments[modeIndex + 1]);
+        Assert.Contains("--model", runner.LastRequest.Arguments);
+        Assert.Contains("gemini", runner.LastRequest.Arguments);
+        Assert.Contains("--effort", runner.LastRequest.Arguments);
+        Assert.Contains("high", runner.LastRequest.Arguments);
+        Assert.DoesNotContain("--dangerously-skip-permissions", runner.LastRequest.Arguments);
+        using var json = JsonDocument.Parse(accepted.ToString());
+        var result = json.RootElement.GetProperty("result");
+        Assert.Equal("plan", result.GetProperty("outputKind").GetString());
+        Assert.Equal("the plan", result.GetProperty("outputText").GetString());
+        Assert.Equal("conv-1", result.GetProperty("sessionId").GetString());
+        Assert.False(result.TryGetProperty("planPath", out _));
     }
 
     [Fact]
@@ -1316,11 +1370,64 @@ public sealed class AntigravityJulesTests
         Assert.Equal(repository, parsedRepository);
     }
 
+    [Fact]
+    public void AntigravityPlanModeAddsModeOnceAndOmitsItOtherwise()
+    {
+        var normal = AntigravityCliDriver.BuildArguments(Request(
+            AgentFacade.AntigravityAgent,
+            "hello",
+            sessionId: " conv ",
+            model: "gemini",
+            effort: "high"));
+        Assert.DoesNotContain("--mode", normal);
+
+        var plan = AntigravityCliDriver.BuildArguments(Request(
+            AgentFacade.AntigravityAgent,
+            "hello",
+            sessionId: " conv ",
+            autoApprove: false,
+            model: "gemini",
+            effort: "high",
+            runMode: "plan"));
+        Assert.Equal(1, plan.Count(argument => argument == "--mode"));
+        Assert.Equal("plan", plan[plan.IndexOf("--mode") + 1]);
+        Assert.Contains("--conversation", plan);
+        Assert.Contains("conv", plan);
+        Assert.Contains("--model", plan);
+        Assert.Contains("gemini", plan);
+        Assert.Contains("--effort", plan);
+        Assert.Contains("high", plan);
+        Assert.DoesNotContain("--dangerously-skip-permissions", plan);
+        Assert.Throws<ArgumentException>(() => AntigravityCliDriver.BuildArguments(
+            Request(AgentFacade.AntigravityAgent, "hello", runMode: "execute")));
+    }
+
+    [Fact]
+    public async Task AntigravityPlanSuccessUsesPlanOutputKindWithoutPlanPath()
+    {
+        var result = await RunAntigravityAsync(SuccessStream("conv-1", "SUCCESS", "the plan"), 0, runMode: "plan");
+        Assert.Equal("plan", result.OutputKind);
+        Assert.Equal("the plan", result.OutputText);
+        Assert.Equal("conv-1", result.SessionId);
+        Assert.Null(result.PlanPath);
+        Assert.Null(result.CompletionReason);
+
+        var denied = await RunAntigravityAsync(
+            SuccessStream("conv-1", "SUCCESS", "partial"),
+            0,
+            standardError: "Permission was auto-denied by the policy.",
+            runMode: "plan");
+        Assert.Equal("plan", denied.OutputKind);
+        Assert.Equal(AntigravityCliDriver.PermissionSoftDeniedReason, denied.CompletionReason);
+        Assert.Null(denied.PlanPath);
+    }
+
     private static async Task<AgentRunResult> RunAntigravityAsync(
         string stdout,
         int exitCode,
         string? sessionId = null,
-        string standardError = "")
+        string standardError = "",
+        string? runMode = null)
     {
         var runner = new RecordingProcessRunner
         {
@@ -1328,7 +1435,7 @@ public sealed class AntigravityJulesTests
         };
         var driver = new AntigravityCliDriver(runner);
         return await driver.RunAsync(
-            Request(AgentFacade.AntigravityAgent, "hello", sessionId: sessionId),
+            Request(AgentFacade.AntigravityAgent, "hello", sessionId: sessionId, runMode: runMode),
             TestRunLogs.CreateLog(),
             null,
             CancellationToken.None);

@@ -386,7 +386,7 @@ public sealed class AgentFacade
                 throw new ArgumentException("run_mode must be omitted or \"plan\".");
             }
 
-            if (agent != GrokBuildAgent)
+            if (agent is not GrokBuildAgent and not AntigravityAgent)
             {
                 throw new ArgumentException("The " + agent + " agent does not support run_mode plan.");
             }

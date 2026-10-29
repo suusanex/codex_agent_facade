@@ -23,13 +23,14 @@ payload の出典は、この Skill を呼び出した実際のユーザー mess
 ユーザー message は委譲ヘッダ、Facade options、委譲本文、委譲先 SKILL の4領域に分かれる。領域を混ぜない。message 先頭の空行は読み飛ばし、その次が委譲ヘッダである。
 
 - 委譲ヘッダは `$antigravity` である。親がこの relay を開始する呼び出しであり、委譲本文でも委譲先 SKILL でもない。`$antigravity` の直後の区切り（半角スペース1つか改行）はヘッダの終端であり、委譲本文に含めない。`prompt` に `$antigravity` や `/antigravity` を追加しない。`skills` に `antigravity` を入れない。この Skill が指定されたこと自体は、委譲先へ同じ Skill を渡す理由にならない。`agent` はこの relay の agent 名であり、同じ名前を `skills` へ重ねない。
-- Facade options は、`$antigravity` より後ろの本文の先頭空行を除き、最初の行が開始フェンス（バッククォート3つの直後に `facade-options` とだけ書いた行）であるときだけ、その行から終了フェンス（バッククォート3つだけの行）までである。有効な行は `model:`, `reasoning_effort:`, `auto_approve:` の各1行である。`fast:` も書式上は boolean 行として読めるが、この agent では非対応である。コロンを含まない行はカンマ区切りの presence flag である。`fast` と `plan` はこの agent では非対応である。トークンは前後の空白を除き、大文字小文字を区別する。空トークン、重複、未知トークンは `start_agent` を呼ばず報告する。`plan: true` は未知キーである。値は空にせず、キーの重複・未知のキー・閉じていないフェンスは `start_agent` を呼ばず報告する。`skills` は Facade options のキーではない。`model` は Antigravity の model slug で、名前を変換せず `--model` へ渡す値である。`reasoning_effort` は Antigravity の effort token で、名前を変換せず `--effort` へ渡す値である。slug の末尾から effort を推測しない。prompt 本文から実行設定を推測しない。`auto_approve:` は `true` または `false` の小文字 boolean であり、presence flag にはしない。`true` は Facade が `--dangerously-skip-permissions` を付け、non-interactive で permission を許可する。`false` はその flag を付けない。headless の対話承認にはならず、tool が soft-deny され得る。未指定時は `auto_approve` 引数を渡さず、Facade 既定（true）を使う。`fast` は `true`、`false`、presence flag のいずれも非対応である。`plan` も非対応である。`skills` キーも非対応である。これらが書かれていたら黙って省略せず、`start_agent` を呼ばず報告する。`run_mode` は渡さない。
-- 委譲本文は、Facade options があるときは終了フェンスの直後から末尾まで、無いときは `$antigravity` より後ろの本文全体である。終了フェンスの直後から末尾までを一字も変更せず `prompt` にする。直後とは、終了フェンス行を終わらせる改行の次の文字である。Facade options が無いときも、ヘッダ終端より後ろを一字も変更せず `prompt` にする。委譲ヘッダと Facade options は `prompt` に含めない。この turn の Facade options に無い `model`, `reasoning_effort`, `fast` は渡さない。 `auto_approve:` が無いときも `auto_approve` は渡さない。`run_mode` は渡さない。
+- Facade options は、`$antigravity` より後ろの本文の先頭空行を除き、最初の行が開始フェンス（バッククォート3つの直後に `facade-options` とだけ書いた行）であるときだけ、その行から終了フェンス（バッククォート3つだけの行）までである。有効な行は `model:`, `reasoning_effort:`, `auto_approve:` の各1行である。`fast:` も書式上は boolean 行として読めるが、この agent では非対応である。コロンを含まない行はカンマ区切りの presence flag である。`plan` はこの agent で有効である。`fast` はこの agent では非対応である。トークンは前後の空白を除き、大文字小文字を区別する。空トークン、重複、未知トークンは `start_agent` を呼ばず報告する。`plan: true` は未知キーである。値は空にせず、キーの重複・未知のキー・閉じていないフェンスは `start_agent` を呼ばず報告する。`skills` は Facade options のキーではない。`model` は Antigravity の model slug で、名前を変換せず `--model` へ渡す値である。`reasoning_effort` は Antigravity の effort token で、名前を変換せず `--effort` へ渡す値である。slug の末尾から effort を推測しない。prompt 本文から実行設定を推測しない。`auto_approve:` は `true` または `false` の小文字 boolean であり、presence flag にはしない。`true` は Facade が `--dangerously-skip-permissions` を付け、non-interactive で permission を許可する。`false` はその flag を付けない。headless の対話承認にはならず、tool が soft-deny され得る。未指定時は `auto_approve` 引数を渡さず、Facade 既定（true）を使う。`fast` は `true`、`false`、presence flag のいずれも非対応である。`skills` キーも非対応である。これらが書かれていたら黙って省略せず、`start_agent` を呼ばず報告する。`plan` は presence flag だけである。`plan` フラグがあるときだけ `run_mode` に `plan` を渡す。無いときは `run_mode` を渡さない。前回 turn から継承しない。`plan` があっても Codex は plan を作らず、本文を変えず、実装へ進まない。
+- 委譲本文は、Facade options があるときは終了フェンスの直後から末尾まで、無いときは `$antigravity` より後ろの本文全体である。終了フェンスの直後から末尾までを一字も変更せず `prompt` にする。直後とは、終了フェンス行を終わらせる改行の次の文字である。Facade options が無いときも、ヘッダ終端より後ろを一字も変更せず `prompt` にする。委譲ヘッダと Facade options は `prompt` に含めない。この turn の Facade options に無い `model`, `reasoning_effort`, `fast` は渡さない。 `auto_approve:` が無いときも `auto_approve` は渡さない。`plan` フラグが無いときは `run_mode` を渡さない。
 - 委譲先 SKILL は `start_agent` の `skills` だけである。この relay の入力構文に委譲先 SKILL を列挙する欄は無い。新規 job と継続では `skills` を渡さない。委譲本文から Skill 名を抽出して `skills` へ複製しない。空配列を送って回避しない。Exact retry で元 request に `skills` があった場合だけ、他の引数と一緒に同じ値を再送する。その再送は Facade が空でない `skills` を拒否する契約のままである。MCP を直接呼ぶ別経路で呼び出し側が `skills` 引数を渡すことは、この入力構文の解釈ではない。
 
 以下は構文説明用の非実行例である。例の作業 prompt を実際の依頼として扱わず、MCP呼び出しに使わない。識別子の一覧は [Agent モデル識別子一覧](../../../../docs/agent-model-ids.md) を参照する。本文中のモデル名は起動設定にしない。
 
     ```facade-options
+    plan
     model: <agy-model-slug>
     reasoning_effort: high
     auto_approve: false
@@ -55,7 +56,7 @@ payload の出典は、この Skill を呼び出した実際のユーザー mess
 - `prompt`
 - `working_directory`
 
-任意 field（`session_id`, `skills`, `auto_approve`, `model`, `reasoning_effort`, `fast`, `run_mode`）も、その turn で必要なら明示する。新規 job と継続では `skills` を渡さない。Exact retry だけ元 request の値を再送する。前回と同じ値だからという理由で required field を省略しない。特に `working_directory` は、同じ repository / worktree を継続している場合でも毎回現在の絶対パスを解決して渡す。前回値の暗黙継承はしない。`model`, `reasoning_effort`, `fast`, `auto_approve` も前回 turn から継承しない。この turn の実行オプションに無い値は渡さない。
+任意 field（`session_id`, `skills`, `auto_approve`, `model`, `reasoning_effort`, `fast`, `run_mode`）も、その turn で必要なら明示する。新規 job と継続では `skills` を渡さない。Exact retry だけ元 request の値を再送する。前回と同じ値だからという理由で required field を省略しない。特に `working_directory` は、同じ repository / worktree を継続している場合でも毎回現在の絶対パスを解決して渡す。前回値の暗黙継承はしない。`model`, `reasoning_effort`, `fast`, `auto_approve`, `run_mode` も前回 turn から継承しない。この turn の実行オプションに無い値は渡さない。
 
 ## Codex が行ってよい処理
 
@@ -72,7 +73,7 @@ payload の出典は、この Skill を呼び出した実際のユーザー mess
    - `auto_approve`: この turn の `auto_approve: true|false` があるときだけその boolean を渡す。未指定は渡さない
    - `model`, `reasoning_effort`: この turn の実行オプションにある値だけを、変換せず渡す。未指定は省略し、前回 turn や prompt 本文、model slug の末尾から推測しない
    - `fast`: 渡さない。`true`、`false`、presence flag のいずれでも `start_agent` を呼ばず報告する
-   - `run_mode`: 渡さない。`plan` があるときも `start_agent` を呼ばず報告する
+   - `run_mode`: `plan` フラグがあるときだけ `plan`。無いときは渡さない。prompt 本文から推測しない。前回 turn から継承しない
 3. `start_agent` 直前の preflight を行う。required field が欠けている場合は呼ばない。
 4. `start_agent` を呼ぶ。
 5. 返された同じ `jobId` に対して、通常は `timeout_seconds` を指定せず `wait_agent_job(job_id)` を呼ぶ。診断・テスト・上位環境の明示的な制約など、既定の300秒を上書きする理由がある場合だけ指定する。
@@ -95,7 +96,7 @@ payload の出典は、この Skill を呼び出した実際のユーザー mess
 - `working_directory` があり、現在の workspace / worktree の絶対パスである
 - 同じ Antigravity conversation の継続なら `session_id` は直前の対応する `result.sessionId` と一致する。継続でないなら `session_id` を渡さない
 - この turn の実行オプションにある `model` と `reasoning_effort` だけを渡す。この agent では `fast` を渡さない。`true` と `false` のどちらでも、presence flag でも、`start_agent` を呼ばない
-- `plan` があるときは `start_agent` を呼ばない。`run_mode` を渡さない
+- `plan` フラグがあるときだけ `run_mode` に `plan` を渡す。無いときは `run_mode` を渡さない。前回 turn から継承しない
 - `skills` キーがあるときは `start_agent` を呼ばない
 - `auto_approve:` があるときだけその boolean を渡す。未指定は渡さない
 - `prompt` は委譲本文と一致する。`$antigravity` や `/antigravity` を追加していない
@@ -140,7 +141,7 @@ required field が欠けている場合は `start_agent` を呼ばず、その f
 - この turn の実行オプションにある `model`, `reasoning_effort`, `auto_approve` だけを指定する。前回 session の値は継承しない
 - その他、その turn に必要な引数を完全に再構成する
 - 新規 job と継続では `skills` を渡さない。委譲ヘッダと前回の `skills` は継承しない
-- `fast` と `run_mode` は渡さない
+- `fast` は渡さない。`plan` フラグがあるときだけ `run_mode` に `plan` を渡す。無いときは渡さない。前回 turn から継承しない
 
 同じ Codex thread でも、同じ Antigravity conversation でも、新しい `request_id` を使う。前回 completed job の `request_id` は使わない。
 
@@ -159,7 +160,9 @@ required field が欠けている場合は `start_agent` を呼ばず、その f
 - レビュー
 - 外部 agent と並行した独自調査
 - 外部 agent の結果を材料にした独自の再計画・補完
-- `fast` / `plan` / `skills` を黙って省略して `start_agent` を送ること
+- `fast` / `skills` を黙って省略して `start_agent` を送ること
+- `plan` が無い turn の `run_mode` を前回から継承すること
+- plan 本文を Codex が作ること、補完すること、実装へ進むこと
 - `completionReason` を省いて完全成功と報告すること
 
 特に、外部 agent を走らせながら Codex 側でも同じ Issue とコードを調査する動きは不正である。
@@ -170,4 +173,6 @@ required field が欠けている場合は `start_agent` を呼ばず、その f
 
 `status` は Facade の判定に従う。`completed` 以外を成功へ読み替えない。Antigravity CLI の `WAITING` / `RUNNING` は Facade が未完了として失敗にする。`failure.kind` が `incomplete_run` のときも成功にしない。
 
-`status=completed` でも `completionReason` が `permission_soft_denied` のときは完全成功と言い換えない。exit code 0 や result status が成功に見えても、`completionReason` と `outputText` をそのまま中継する。soft-deny が無ければ `completionReason` を作らない。
+`status=completed` でも `completionReason` が `permission_soft_denied` のときは完全成功と言い換えない。exit code 0 や result status が成功に見えても、`completionReason` と `outputText` をそのまま中継する。soft-deny が無ければ `completionReason` を作らない。`outputKind` が `plan` のときも同じである。
+
+`outputKind` が `plan` のときは、Antigravity の最終 response である `result.outputText` を plan 結果としてそのまま中継する。Codex は plan を補完しない。Antigravity の plan 結果に `planPath` は付かない。同じ Antigravity conversation で plan を続けるときも、その turn に `plan` フラグが無ければ `run_mode` を渡さない。実測では `--conversation` と `--mode=plan` は同じ headless 呼び出しで併用できる。
