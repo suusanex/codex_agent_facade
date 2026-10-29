@@ -131,7 +131,7 @@ public sealed class AntigravityCliDriver
             RunId: runLog.RunId,
             EventsLogPath: runLog.EventsPath,
             TextLogPath: runLog.TextLogPath,
-            OutputKind: "final_response",
+            OutputKind: string.Equals(request.RunMode, "plan", StringComparison.Ordinal) ? "plan" : "final_response",
             CompletionReason: parsed.PermissionSoftDenied ? PermissionSoftDeniedReason : null);
     }
 
@@ -146,6 +146,17 @@ public sealed class AntigravityCliDriver
             "--print-timeout",
             "0s",
         };
+        if (request.RunMode is not null)
+        {
+            if (!string.Equals(request.RunMode, "plan", StringComparison.Ordinal))
+            {
+                throw new ArgumentException("run_mode must be omitted or \"plan\".");
+            }
+
+            arguments.Add("--mode");
+            arguments.Add("plan");
+        }
+
         if (!string.IsNullOrWhiteSpace(request.SessionId))
         {
             arguments.Add("--conversation");

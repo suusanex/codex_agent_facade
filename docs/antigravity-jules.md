@@ -16,7 +16,7 @@ Issue [#40](https://github.com/suusanex/codex_agent_facade/issues/40) の実装�
 ## 実装した境界
 
 - Antigravity は MCP と単発 CLI。Jules は MCP のみ。単発 CLI は process を起動する前に拒否する。
-- 両 agent は `run_mode`、`fast`、空でない `skills` を拒否する。Jules はさらに明示的な model、reasoning effort、`auto_approve=false` を拒否する。
+- Antigravity の `run_mode=plan` は `agy --mode plan` になる。成功時の `outputKind` は `plan` で、`outputText` は CLI の最終 response である。`planPath` は付けない。`fast` と空でない `skills` は拒否する。Jules は `run_mode`、`fast`、空でない `skills`、明示的な model、reasoning effort、`auto_approve=false` を拒否する。
 - 新規 Jules session は clean worktree だけを受ける。attached branch は configured upstream の tip が HEAD と一致するときだけ。detached HEAD は `git ls-remote` で HEAD と一致する一意の branch だけ。commit / push / fetch / checkout はしない。
 - 継続は Session の Source とローカル repository の一致だけを見る。dirty や branch の進行では拒否しない。継続できる state は `AWAITING_USER_FEEDBACK` だけ。
 - 継続の成果は、送信前に保存した Activity ID の baseline に無く、prompt の SHA-256 が一致する `userMessaged` がちょうど1件あるものだけを今回分として採用する。一覧順と時刻だけでは相関しない。複数件は `activity_correlation_failed` とし、session lock は残す。完了済み session に該当する `userMessaged` がまだ無い場合は terminal にせず、running の `submission_unknown` と session lock を維持する。次の get / wait が同じ job を再照会する。
@@ -40,6 +40,41 @@ Issue [#40](https://github.com/suusanex/codex_agent_facade/issues/40) の実装�
 - session `12231436768692532422` で `jules-smoke/one.txt` に `ONE` を作らせ、質問待ちになった。保存した patch は2件で、どちらも base `3bcee41296b05b63e7bf3f7959342747712eea5a`、Activity は `a4fd27c99bbe43a5a3abe02de0c26e92` と `f27fda80bbea4b868f68332ea81e15b6`。別 checkout で両方とも適用でき、内容は `ONE` だった。
 - 続けて `jules-smoke/two.txt` に `TWO` を作らせた。progress 中の `gitPatch` が `baseCommitId` だけで届き、その job は `artifact_persist_failed` になった。失敗前に保存できた10件は、同じ base の別 checkout で全部適用できた。前半は `one.txt=ONE` だけ、後半は `one.txt=ONE` と `two.txt=TWO` だった。最後の patch だけを成果にはしていない。session 自体はその後 `COMPLETED` になった。
 - session `14644344499652563347` へ `RESTART-MARKER` を送った job `20261029T112102Z-e0e23374` は、`polling` で session ID を保存したあと host を止めた。別の host が同じ job を再送せず追跡し、`completed` になった。user activity は `task-14644344499652563347-activity-step-14685163969043484571` の1件だけだった。出力は「回答を受け取りました。指示通り、セッションは完了せずにこのまま待機します。何か他にご用件はありますか？」で、session state は再び `COMPLETED` だった。
-- `agy` 1.4.9 の soft-deny 文面は、この環境では再実測していない。
+- `agy` 1.4.9 の plan mode 実測は下の節。permission 拒否は result の `denied_actions` として観測した。changelog の `auto-denied` 文面そのものは、この plan smoke の stderr には出ていない。
 
 自動テストは process、HTTP、Git の stub と一時ディレクトリで行う。2026-10-29 の実行は 454 件中 453 件が成功し、1 件は Grok の live テストをスキップした。CI は実 Jules と実 `agy` を起動しない。
+
+## 2026-10-29 の Antigravity plan mode 実測
+
+`agy` 1.4.9 の `agy --help` は `--mode` の値として `accept-edits`、`auto`、`plan` を出す。公開資料は [modes](https://antigravity.google/docs/cli/modes/)、[reference](https://antigravity.google/docs/cli/reference/)、[plan](https://antigravity.google/docs/plan/) である。資料上の `--mode=plan` は `/plan` を前置し、実装前に調査と structured plan を出す。
+
+使い捨て repository は `C:\WINDOW~1\agy-plan-smoke-repo` と `C:\WINDOW~1\agy-plan-smoke-repo2`。中身は `Program.cs` の `Console.WriteLine("hello");` だけである。作業対象の Facade repository は使っていない。
+
+権限を許可しない新規 plan:
+
+```text
+agy -p "このリポジトリに小さな機能を追加するとした場合の実装計画だけを作成してください。実装は行わないでください。" --mode=plan --output-format stream-json --print-timeout 0s
+```
+
+- exit code 0。イベントは `init`、`step_update`、`result`。`init.expanded_commands` は `plan` / `system`。`permission_mode` は `request-review`。
+- result は `status=SUCCESS`。`conversation_id` は `8ea32fff-fd6b-4a07-9779-ba6ba1a89548`。
+- `run_command` の `Get-ChildItem -Force` が `permission check failed` / `user denied` で止まった。result の `denied_actions` は `command` / `RunCommand` が1件。最終 `response` はその前の前置きだけで、計画本文ではない。
+- worktree のファイル一覧は実行前後で同じだった。
+
+`--dangerously-skip-permissions` を付けた新規 plan は、同じ prompt に「ファイルの作成や変更、コマンドによる書き込みはしない」を足した。exit code 0。`permission_mode` は `always-proceed`。`expanded_commands` は再び `plan`。conversation は `a0e273a0-35a4-494c-8539-57e14cb80cf5`。`denied_actions` は無い。
+
+- tool は `run_command`、`read_file`、`write_file`。`write_file` の Path は `%USERPROFILE%\.gemini\antigravity-cli\brain\<conversation_id>\implementation_plan.md` で、worktree の外だった。
+- そのファイルは structured plan（目的、提案 diff、検証手順）だった。stream-json の result に path、artifact ID、本文の独立項目は無い。result のキーは `conversation_id`、`status`、`response`、`duration_seconds`、`num_turns`、`usage`。
+- 最終 `response` は調査の要約と、その artifact へのリンク、計画の要点である。artifact 全文ではない。
+- worktree のファイル一覧と `git status` は実行前後で空のままだった。
+
+同じ conversation の継続:
+
+```text
+agy -p "先の計画に、引数なしの既存出力を維持する検証手順を1つ追記してください。実装は行わないでください。リポジトリ内のファイルは変更しないでください。" --conversation a0e273a0-35a4-494c-8539-57e14cb80cf5 --mode=plan --output-format stream-json --print-timeout 0s --dangerously-skip-permissions
+```
+
+- exit code 0。`status=SUCCESS`。返った `conversation_id` は要求と同じ。`expanded_commands` は `plan`。
+- 最終 `response` は artifact を更新した旨の要約で、全文は result に無い。worktree は変わっていない。
+
+この実測から、Facade は `run_mode=plan` の成功を `outputKind=plan` とし、`outputText` には最終 `response` を入れる。`planPath` は付けない。brain 配下の artifact は読まず、workspace へ複製しない。plan mode は worktree を変えない保証ではない。この3回では worktree は変わらなかったが、権限を許可すると worktree 外の artifact へ書き、shell も実行した。権限を許可しない headless では tool が拒否され、`SUCCESS` でも計画が完了しないことがある。そのときは既存の `denied_actions` 検出で `completionReason=permission_soft_denied` にする。

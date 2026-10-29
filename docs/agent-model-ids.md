@@ -386,7 +386,7 @@ Facade は `reasoning_effort` を `--reasoning-effort` へそのまま渡す。C
 
 `reasoning_effort` は `--effort` へそのまま渡す。2026-10-29 の公開 headless flag 表の例は `low` / `medium` / `high` である。CLI reference はモデル依存で low から max まで、と書いている。この環境では effort 一覧コマンドを再実行していない。Facade は token を絞らず、未指定なら `--effort` を付けない。
 
-`fast` と `run_mode` は非対応である。relay は送らない。指定されていれば起動前に拒否し、黙って省略しない。`auto_approve: true` は `--dangerously-skip-permissions`、`false` はその flag を付けない。`false` は headless の対話承認にはならず、tool が soft-deny され得る。未指定は引数を渡さず Facade 既定の true になる。`session_id` は Antigravity conversation id で、継続するときだけ `--conversation` に渡る。
+`fast` は非対応である。relay は送らない。指定されていれば起動前に拒否し、黙って省略しない。`run_mode=plan` は `--mode plan` になる。通常実行では `--mode` を付けない。成功時の `outputKind` は `plan` で、`planPath` は付けない。`plan` 以外の `run_mode` は起動前に拒否する。`auto_approve: true` は `--dangerously-skip-permissions`、`false` はその flag を付けない。`false` は headless の対話承認にはならず、tool が soft-deny され得る。未指定は引数を渡さず Facade 既定の true になる。`session_id` は Antigravity conversation id で、継続するときだけ `--conversation` に渡る。
 
 - [Headless](https://antigravity.google/docs/cli/headless)
 
@@ -409,7 +409,7 @@ Jules に model 識別子は無い。`model`、`reasoning_effort`、`fast`、`ru
 
 ## Reasoning Effort と fast（issue #24 第2段階）
 
-`model`, `reasoning_effort`, `fast` は独立した実行設定である。relay Skillでは委譲ヘッダの後、作業本文の前に `facade-options` blockを置く。ブロック自体は worker prompt に含めず、`$skill` の呼び出しも prompt と `skills` に入れない。MCPでは `start_agent` の同名引数で指定する。設定はprompt本文から推測せず、session継続とexact retryでも毎回必要な値を渡す。設定なしは既存CLI既定を保ち、`fast: false` は明示的な非-fast/default指定である。Copilot と Grok Build は独立した `fast` を受け付けない。`run_mode=plan` はモデル識別子ではない。Grok Build だけが受け付け、通常実行の `--reasoning-effort` とは別に `session/set_config_option` の文字列値で model と reasoning_effort を適用する。Antigravity は `model` と `reasoning_effort` を `--model` と `--effort` へそのまま渡し、`fast` と `run_mode` は拒否する。Jules は `model`、`reasoning_effort`、`fast`、`run_mode`、`auto_approve=false` を拒否する。
+`model`, `reasoning_effort`, `fast` は独立した実行設定である。relay Skillでは委譲ヘッダの後、作業本文の前に `facade-options` blockを置く。ブロック自体は worker prompt に含めず、`$skill` の呼び出しも prompt と `skills` に入れない。MCPでは `start_agent` の同名引数で指定する。設定はprompt本文から推測せず、session継続とexact retryでも毎回必要な値を渡す。設定なしは既存CLI既定を保ち、`fast: false` は明示的な非-fast/default指定である。Copilot と Grok Build は独立した `fast` を受け付けない。`run_mode=plan` はモデル識別子ではない。Grok Build は通常実行の `--reasoning-effort` とは別に `session/set_config_option` の文字列値で model と reasoning_effort を適用する。Antigravity は `model` と `reasoning_effort` を `--model` と `--effort` へそのまま渡し、`run_mode=plan` のときだけ `--mode plan` を付ける。`fast` は拒否する。Jules は `model`、`reasoning_effort`、`fast`、`run_mode`、`auto_approve=false` を拒否する。
 
 | Agent | Reasoning Effort | Independent fast | CLI変換 |
 | --- | --- | --- | --- |
@@ -417,7 +417,7 @@ Jules に model 識別子は無い。`model`、`reasoning_effort`、`fast`、`ru
 | GitHub Copilot | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | 非対応。両booleanを拒否 | `--reasoning-effort <token>` |
 | Grok Build | CLI canonicalまたはmodel固有token | 非対応。両booleanを拒否 | `--reasoning-effort <token>`。CLIがeffortを無視したwarningを出せばexit 0でも失敗 |
 | Codex CLI | CLIが許すeffort token | `true` / `false` | `-c model_reasoning_effort="<token>"`; fastは `-c service_tier="priority"` / `"default"` |
-| Antigravity | 呼び出し側の token。公開 headless 例は `low` / `medium` / `high` | 非対応。両booleanを拒否 | `--model` と `--effort`。未指定は付けない |
+| Antigravity | 呼び出し側の token。公開 headless 例は `low` / `medium` / `high` | 非対応。両booleanを拒否 | `--model` と `--effort`。`run_mode=plan` は `--mode plan`。未指定は付けない |
 | Jules | 非対応 | 非対応。両booleanを拒否 | `model`、`reasoning_effort`、`fast` は起動前に拒否 |
 
 Cursorは `reasoning_effort` と `fast` を両方省略したとき、渡された `model` をそのまま `--model` に渡す。どちらかを指定したときは、その実行の直前に `cursor-agent models` を読み、基底・effort・fastが一致する識別子だけを渡す。bracketは作らない。一覧の取得に失敗した場合や、一致する識別子が無い場合は起動しない。モデル文字列に既に effort や `-fast` があり、同じ項目を独立fieldでも指定した場合は重複として拒否する。
