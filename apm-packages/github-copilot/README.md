@@ -26,7 +26,7 @@ apm install "C:\path\to\codex_agent_facade\apm-packages\github-copilot" --target
 
 Codex 上で対象リポジトリを開いた状態で、Skill を指定して作業本文を書く。Skill より後の本文は GitHub Copilot へ渡す作業 payload であり、Codex 自身への作業実行指示ではない。`working_directory` は今開いているリポジトリのパスにする。同じ Codex thread で続けて委譲するときは、新しい `request_id` を生成し、前回 completed result の `sessionId` を `session_id` に渡し、`working_directory` を含む required fields を毎回指定する。
 
-`$github-copilot` は親の委譲ヘッダであり、worker prompt にも `skills` にも入れない。`/github-copilot` を prompt へ追加しない。`facade-options` の `key: value` は `model`, `reasoning_effort`, `fast` だけで、`skills` は未知キーとしてエラーにする。presence flag の `plan` はこの agent では未対応なので `start_agent` を呼ばない。`fast` フラグは在るときだけ true で、無いときは送らない。この relay は新規 job と継続では `skills` を渡さない。GitHub Copilot では `fast` を指定しない。
+`$github-copilot` は親の委譲ヘッダであり、worker prompt にも `skills` にも入れない。`/github-copilot` を prompt へ追加しない。`facade-options` の `key: value` は `model`, `reasoning_effort`, `fast`, `auto_approve` である。`auto_approve` は `true` または `false` で、未指定時は引数を渡さない。`skills` は未知キーとしてエラーにする。presence flag の `plan` はこの agent では未対応なので `start_agent` を呼ばない。`fast` フラグは在るときだけ true で、無いときは送らない。この relay は新規 job と継続では `skills` を渡さない。GitHub Copilot では `fast` を指定しない。
 
 ```text
 $github-copilot このリポジトリの README に使い方を追記して。

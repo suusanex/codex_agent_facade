@@ -49,6 +49,16 @@ jobの完了はタスクの達成を意味しない。短い報告から確認�
 
 通信失敗とworker失敗を区別し、実行中のjobを二重起動しない。待機timeoutだけで失敗と判断しない。停止・取消の扱いはMCP契約に従い、実行中jobを放置したまま終了したように報告しない。
 
+## Antigravity と Jules の境界
+
+委譲先に `antigravity` と `jules` を使ってよい。引数の細則は各 relay SKILL と Facade の公開契約を正とし、ここへ複製しない。親は次を別の状態へ読み替えない。
+
+- Jules の `waiting_for_input` は task 完了ではない。`inputPrompt` をユーザーへ示し、回答はユーザーの次の指示として、新しい `request_id` と同じ `session_id` の `start_agent` で送る。親が回答を作らない。
+- `running` かつ `remotePhase=submission_unknown`、または `communication_error` では、新しい request で同じ作業を再送しない。同じ `jobId` を `wait_agent_job` / `get_agent_job` で再照会する。受理不明中の session lock を別 request で回避しない。
+- Jules の `cancel_agent_job` は unsupported である。cancelled になったと報告しない。
+- Antigravity の `completionReason=permission_soft_denied` は完全成功ではない。`completed` でもこの reason を省かない。
+- 同じ Codex thread だけでは Antigravity conversation や Jules session を継続しない。
+
 ## 継続と最終報告
 
 長い作業では、方針と委譲先、受入条件、作業ごとのworkspace・job・sessionの対応、状態、次の判断を簡潔に引き継ぐ。引継ぎファイルが必要ならworkerへ作成を依頼する。

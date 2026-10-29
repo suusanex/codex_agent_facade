@@ -2779,6 +2779,8 @@ public class FacadeDelegationSkillContractTests
         "grok-build",
         "cursor",
         "codex",
+        "antigravity",
+        "jules",
     ];
 
     private static readonly (string Name, string SessionLabel)[] KnownAgentSessionLabels =
@@ -2787,6 +2789,8 @@ public class FacadeDelegationSkillContractTests
         ("grok-build", "Grok session"),
         ("cursor", "Cursor session"),
         ("codex", "Codex CLI session"),
+        ("antigravity", "Antigravity conversation"),
+        ("jules", "Jules session"),
     ];
 
     private static readonly string[] RequiredRelayContractPhrases =
@@ -3156,17 +3160,25 @@ public class FacadeDelegationSkillContractTests
                 + "\n"
                 + "Implement issue #123.\n";
             var parsed = RelayInvocationParser.Parse(agent, withOptions);
-            Assert.True(parsed.Succeeded, agent + " options parse failed: " + parsed.Error);
-            Assert.Equal(agent, parsed.Agent);
-            Assert.Equal("grok-4.7", parsed.Model);
-            Assert.Equal("high", parsed.ReasoningEffort);
-            Assert.Null(parsed.Fast);
-            Assert.Null(parsed.Skills);
-            Assert.Equal("\nImplement issue #123.\n", parsed.Prompt);
-            Assert.Contains("Implement issue #123.", parsed.Prompt, StringComparison.Ordinal);
-            Assert.DoesNotContain("$" + agent, parsed.Prompt, StringComparison.Ordinal);
-            Assert.DoesNotContain("facade-options", parsed.Prompt, StringComparison.Ordinal);
-            Assert.False(parsed.Prompt.StartsWith("/" + agent, StringComparison.Ordinal));
+            if (agent == "jules")
+            {
+                Assert.False(parsed.Succeeded, "jules accepted model and reasoning_effort");
+            }
+            else
+            {
+                Assert.True(parsed.Succeeded, agent + " options parse failed: " + parsed.Error);
+                Assert.Equal(agent, parsed.Agent);
+                Assert.Equal("grok-4.7", parsed.Model);
+                Assert.Equal("high", parsed.ReasoningEffort);
+                Assert.Null(parsed.Fast);
+                Assert.Null(parsed.AutoApprove);
+                Assert.Null(parsed.Skills);
+                Assert.Equal("\nImplement issue #123.\n", parsed.Prompt);
+                Assert.Contains("Implement issue #123.", parsed.Prompt, StringComparison.Ordinal);
+                Assert.DoesNotContain("$" + agent, parsed.Prompt, StringComparison.Ordinal);
+                Assert.DoesNotContain("facade-options", parsed.Prompt, StringComparison.Ordinal);
+                Assert.False(parsed.Prompt.StartsWith("/" + agent, StringComparison.Ordinal));
+            }
 
             var withoutOptions = "$" + agent + "\n\nImplement issue #123.\n";
             var plain = RelayInvocationParser.Parse(agent, withoutOptions);
@@ -3309,6 +3321,174 @@ public class FacadeDelegationSkillContractTests
         Assert.Equal("grok-4.7", mixed.Model);
         Assert.Equal("plan", mixed.RunMode);
         Assert.Null(mixed.Fast);
+    }
+
+    [Fact]
+    public void RelayInvocationAcceptsExplicitAutoApproveBoolean()
+    {
+        // auto_approve は presence flag にしない。未指定は渡さず、true/false だけを明示 boolean にする。
+        var omitted = RelayInvocationParser.Parse(
+            "cursor",
+            "$cursor\n```facade-options\nmodel: composer-2.5\n```\n\nImplement issue #123.\n");
+        Assert.True(omitted.Succeeded, omitted.Error);
+        Assert.Null(omitted.AutoApprove);
+
+        var cursorFalse = RelayInvocationParser.Parse(
+            "cursor",
+            "$cursor\n```facade-options\nmodel: composer-2.5\nauto_approve: false\n```\n\nImplement issue #123.\n");
+        Assert.True(cursorFalse.Succeeded, cursorFalse.Error);
+        Assert.False(cursorFalse.AutoApprove == true);
+        Assert.True(cursorFalse.AutoApprove == false);
+
+        var flag = RelayInvocationParser.Parse(
+            "grok-build",
+            "$grok-build\n```facade-options\nauto_approve\n```\n\nImplement issue #123.\n");
+        Assert.False(flag.Succeeded);
+
+        var invalid = RelayInvocationParser.Parse(
+            "codex",
+            "$codex\n```facade-options\nauto_approve: yes\n```\n\nImplement issue #123.\n");
+        Assert.False(invalid.Succeeded);
+
+        var duplicate = RelayInvocationParser.Parse(
+            "codex",
+            "$codex\n```facade-options\nauto_approve: true\nauto_approve: false\n```\n\nImplement issue #123.\n");
+        Assert.False(duplicate.Succeeded);
+    }
+
+    [Fact]
+    public void AntigravityRelayMapsOptionsAndKeepsSoftDenyVisible()
+    {
+        var parsed = RelayInvocationParser.Parse(
+            "antigravity",
+            "$antigravity\n```facade-options\nmodel: gemini-4-argon-high\nreasoning_effort: low\nauto_approve: false\n```\n\nImplement issue #123.\n");
+        Assert.True(parsed.Succeeded, parsed.Error);
+        Assert.Equal("antigravity", parsed.Agent);
+        Assert.Equal("gemini-4-argon-high", parsed.Model);
+        Assert.Equal("low", parsed.ReasoningEffort);
+        Assert.True(parsed.AutoApprove == false);
+        Assert.Null(parsed.Fast);
+        Assert.Null(parsed.RunMode);
+        Assert.Null(parsed.Skills);
+        Assert.Equal("\nImplement issue #123.\n", parsed.Prompt);
+
+        var effortWithoutModel = RelayInvocationParser.Parse(
+            "antigravity",
+            "$antigravity\n```facade-options\nreasoning_effort: high\n```\n\nImplement issue #123.\n");
+        Assert.True(effortWithoutModel.Succeeded, effortWithoutModel.Error);
+        Assert.Equal("high", effortWithoutModel.ReasoningEffort);
+        Assert.Null(effortWithoutModel.Model);
+
+        Assert.False(RelayInvocationParser.Parse(
+            "antigravity",
+            "$antigravity\n```facade-options\nfast: true\n```\n\nImplement issue #123.\n").Succeeded);
+        Assert.False(RelayInvocationParser.Parse(
+            "antigravity",
+            "$antigravity\n```facade-options\nfast: false\n```\n\nImplement issue #123.\n").Succeeded);
+        Assert.False(RelayInvocationParser.Parse(
+            "antigravity",
+            "$antigravity\n```facade-options\nfast\n```\n\nImplement issue #123.\n").Succeeded);
+        Assert.False(RelayInvocationParser.Parse(
+            "antigravity",
+            "$antigravity\n```facade-options\nplan\n```\n\nImplement issue #123.\n").Succeeded);
+        Assert.False(RelayInvocationParser.Parse(
+            "antigravity",
+            "$antigravity\n```facade-options\nskills: review\n```\n\nImplement issue #123.\n").Succeeded);
+
+        var text = LoadFacadeDelegationSkills().Single(skill => skill.Name == "antigravity").Text;
+        Assert.Contains("permission_soft_denied", text, StringComparison.Ordinal);
+        Assert.Contains("完全成功と言い換えない", text, StringComparison.Ordinal);
+        Assert.Contains("黙って省略せず", text, StringComparison.Ordinal);
+        Assert.Contains("Antigravity conversation", text, StringComparison.Ordinal);
+        Assert.Contains("同じ Codex thread だからという理由では渡さない", text, StringComparison.Ordinal);
+        Assert.Contains("--model", text, StringComparison.Ordinal);
+        Assert.Contains("--effort", text, StringComparison.Ordinal);
+        Assert.Contains("WAITING", text, StringComparison.Ordinal);
+        Assert.Contains("RUNNING", text, StringComparison.Ordinal);
+        var followUp = ReadHeadingSection(text, "## Follow-up continuation");
+        Assert.Contains("同じ Antigravity conversation", followUp, StringComparison.Ordinal);
+        Assert.Contains("同じ Codex thread だけではこの節を適用しない", followUp, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void JulesRelayKeepsWaitingInputAndRejectsUnsupportedOptions()
+    {
+        var fresh = RelayInvocationParser.Parse("jules", "$jules\n\nImplement issue #123.\n");
+        Assert.True(fresh.Succeeded, fresh.Error);
+        Assert.Null(fresh.Model);
+        Assert.Null(fresh.ReasoningEffort);
+        Assert.Null(fresh.Fast);
+        Assert.Null(fresh.AutoApprove);
+        Assert.Null(fresh.RunMode);
+        Assert.Null(fresh.Skills);
+
+        var explicitTrue = RelayInvocationParser.Parse(
+            "jules",
+            "$jules\n```facade-options\nauto_approve: true\n```\n\nImplement issue #123.\n");
+        Assert.True(explicitTrue.Succeeded, explicitTrue.Error);
+        Assert.True(explicitTrue.AutoApprove == true);
+
+        Assert.False(RelayInvocationParser.Parse(
+            "jules",
+            "$jules\n```facade-options\nmodel: gemini-4-argon-high\n```\n\nImplement issue #123.\n").Succeeded);
+        Assert.False(RelayInvocationParser.Parse(
+            "jules",
+            "$jules\n```facade-options\nreasoning_effort: high\n```\n\nImplement issue #123.\n").Succeeded);
+        Assert.False(RelayInvocationParser.Parse(
+            "jules",
+            "$jules\n```facade-options\nfast: false\n```\n\nImplement issue #123.\n").Succeeded);
+        Assert.False(RelayInvocationParser.Parse(
+            "jules",
+            "$jules\n```facade-options\nplan\n```\n\nImplement issue #123.\n").Succeeded);
+        Assert.False(RelayInvocationParser.Parse(
+            "jules",
+            "$jules\n```facade-options\nskills: review\n```\n\nImplement issue #123.\n").Succeeded);
+        Assert.False(RelayInvocationParser.Parse(
+            "jules",
+            "$jules\n```facade-options\nauto_approve: false\n```\n\nImplement issue #123.\n").Succeeded);
+
+        var text = LoadFacadeDelegationSkills().Single(skill => skill.Name == "jules").Text;
+        Assert.Contains("新規 Jules session では `session_id` を渡さない", text, StringComparison.Ordinal);
+        Assert.Contains("waiting_for_input", text, StringComparison.Ordinal);
+        Assert.Contains("タスク完了ではない", text, StringComparison.Ordinal);
+        Assert.Contains("`completed` と誤認しない", text, StringComparison.Ordinal);
+        Assert.Contains("submission_unknown", text, StringComparison.Ordinal);
+        Assert.Contains("再送しない", text, StringComparison.Ordinal);
+        Assert.Contains("communication_error", text, StringComparison.Ordinal);
+        Assert.Contains("session-level lock", text, StringComparison.Ordinal);
+        Assert.Contains("unsupported", text, StringComparison.Ordinal);
+        Assert.Contains("cancelled になったと報告しない", text, StringComparison.Ordinal);
+        Assert.Contains("自動適用しない", text, StringComparison.Ordinal);
+        Assert.Contains("最後の patch だけを全成果とは扱わない", text, StringComparison.Ordinal);
+        Assert.Contains("単発 CLI", text, StringComparison.Ordinal);
+        Assert.Contains("commit、push、fetch、rebase、checkout", text, StringComparison.Ordinal);
+        Assert.Contains("質問への回答を作らない", text, StringComparison.Ordinal);
+        var followUp = ReadActionBlock(
+            "jules",
+            ReadHeadingSection(text, "## Follow-up continuation"),
+            "Follow-up continuation");
+        Assert.Contains("新しい `request_id`", followUp, StringComparison.Ordinal);
+        Assert.Contains("`sessionId`", followUp, StringComparison.Ordinal);
+        Assert.Contains("`session_id`", followUp, StringComparison.Ordinal);
+        Assert.DoesNotContain("同じ `request_id`", followUp, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ExternalAgentOrchestrationNamesAntigravityAndJulesLifecycles()
+    {
+        var path = EnumerateSkillFiles(LocateRepoRoot())
+            .Single(path => path.Contains("external-agent-orchestration", StringComparison.Ordinal));
+        var text = File.ReadAllText(path);
+        Assert.Contains("`antigravity`", text, StringComparison.Ordinal);
+        Assert.Contains("`jules`", text, StringComparison.Ordinal);
+        Assert.Contains("waiting_for_input", text, StringComparison.Ordinal);
+        Assert.Contains("task 完了ではない", text, StringComparison.Ordinal);
+        Assert.Contains("submission_unknown", text, StringComparison.Ordinal);
+        Assert.Contains("再送しない", text, StringComparison.Ordinal);
+        Assert.Contains("permission_soft_denied", text, StringComparison.Ordinal);
+        Assert.Contains("unsupported", text, StringComparison.Ordinal);
+        Assert.Contains("cancelled になったと報告しない", text, StringComparison.Ordinal);
+        Assert.False(IsRelayOnlyFacadeDelegationSkill(text));
     }
 
     private static void AssertContains(string skillName, string text, string phrase)
@@ -3527,7 +3707,7 @@ public class FacadeDelegationSkillContractTests
             }
 
             var candidate = message[candidateIndex..];
-            if (!TryReadOptions(candidate, out var prompt, out var model, out var reasoningEffort, out var fast, out var runMode, out var error))
+            if (!TryReadOptions(candidate, out var prompt, out var model, out var reasoningEffort, out var fast, out var runMode, out var autoApprove, out var error))
             {
                 return RelayInvocation.Fail(agent, error ?? "Facade options are invalid.");
             }
@@ -3537,7 +3717,7 @@ public class FacadeDelegationSkillContractTests
                 return RelayInvocation.Fail(agent, "Delegated body is empty.");
             }
 
-            if ((agent is "grok-build" or "github-copilot") && fast is not null)
+            if ((agent is "grok-build" or "github-copilot" or "antigravity" or "jules") && fast is not null)
             {
                 return RelayInvocation.Fail(agent, "Independent fast is not supported.");
             }
@@ -3554,7 +3734,34 @@ public class FacadeDelegationSkillContractTests
                 return RelayInvocation.Fail(agent, "Plan-only run_mode is not supported.");
             }
 
-            return new RelayInvocation(agent, prompt, model, reasoningEffort, fast, Skills: null, Error: null, RunMode: runMode);
+            if (agent == "jules")
+            {
+                if (!string.IsNullOrWhiteSpace(model))
+                {
+                    return RelayInvocation.Fail(agent, "Jules does not support an explicit model.");
+                }
+
+                if (reasoningEffort is not null)
+                {
+                    return RelayInvocation.Fail(agent, "Jules does not support reasoning_effort.");
+                }
+
+                if (autoApprove == false)
+                {
+                    return RelayInvocation.Fail(agent, "Jules does not support auto_approve=false.");
+                }
+            }
+
+            return new RelayInvocation(
+                agent,
+                prompt,
+                model,
+                reasoningEffort,
+                fast,
+                Skills: null,
+                Error: null,
+                RunMode: runMode,
+                AutoApprove: autoApprove);
         }
 
         private static bool TryReadOptions(
@@ -3564,6 +3771,7 @@ public class FacadeDelegationSkillContractTests
             out string? reasoningEffort,
             out bool? fast,
             out string? runMode,
+            out bool? autoApprove,
             out string? error)
         {
             prompt = candidate;
@@ -3571,6 +3779,7 @@ public class FacadeDelegationSkillContractTests
             reasoningEffort = null;
             fast = null;
             runMode = null;
+            autoApprove = null;
             error = null;
 
             if (!TrySkipBlankLines(candidate, 0, out var contentIndex))
@@ -3588,6 +3797,7 @@ public class FacadeDelegationSkillContractTests
             var seenEffort = false;
             var seenFast = false;
             var seenPlan = false;
+            var seenAutoApprove = false;
             while (TryReadLine(candidate, nextIndex, out var line, out var lineEnd))
             {
                 nextIndex = lineEnd;
@@ -3659,6 +3869,22 @@ public class FacadeDelegationSkillContractTests
 
                         seenFast = true;
                         fast = value == "true";
+                        break;
+                    case "auto_approve":
+                        if (seenAutoApprove)
+                        {
+                            error = "Facade option auto_approve is duplicated.";
+                            return false;
+                        }
+
+                        if (value is not ("true" or "false"))
+                        {
+                            error = "Facade option auto_approve is invalid.";
+                            return false;
+                        }
+
+                        seenAutoApprove = true;
+                        autoApprove = value == "true";
                         break;
                     default:
                         error = "Facade option key is unknown.";
@@ -3784,7 +4010,8 @@ public class FacadeDelegationSkillContractTests
         bool? Fast,
         IReadOnlyList<string>? Skills,
         string? Error,
-        string? RunMode = null)
+        string? RunMode = null,
+        bool? AutoApprove = null)
     {
         internal bool Succeeded => Error is null;
 
