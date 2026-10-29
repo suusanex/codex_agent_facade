@@ -214,7 +214,7 @@ Cursor は terminal `result.result` とassistantイベントの対応を確認�
 
 - 完了済みなら保存してある result を返す
 - 実行中だったローカル agent の job は fail-closed で `failed`（error: facade process exited）。同じ作業をやり直すときは新しい `request_id` を使う
-- Jules で session ID を保存済みの running job は `facade_interrupted` にしない。次の `get_agent_job` / `wait_agent_job` が同じ job の監視を再開する。session ID が無い create の結果不明は `submission_unknown` で終わり、同じ request の retry は保存結果を返す。POST は自動再送しない
+- Jules で session ID を保存済みの running job は `facade_interrupted` にしない。次の `get_agent_job` / `wait_agent_job` が同じ job の監視を再開する。session ID を確定できない create は `submission_unknown` で終わり、同じ request の retry は保存結果を返す。POST は自動再送しない。同じ session の未完了 job がある継続は `session_locked` になる
 - 外部 agent の会話継続は従来どおり completed `result.sessionId` / `--resume`。Jules の質問への回答は、新しい `request_id` と同じ `session_id` を使う
 
 Codex が `start_agent` の応答だけを取り損ねた場合（Facade は生きている）は、同じ `request_id` で再試行すれば実行中の同じ `jobId` が返る。

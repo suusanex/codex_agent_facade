@@ -20,14 +20,15 @@ Issue [#40](https://github.com/suusanex/codex_agent_facade/issues/40) の実装�
 - 新規 Jules session は clean worktree だけを受ける。attached branch は configured upstream の tip が HEAD と一致するときだけ。detached HEAD は `git ls-remote` で HEAD と一致する一意の branch だけ。commit / push / fetch / checkout はしない。
 - 継続は Session の Source とローカル repository の一致だけを見る。dirty や branch の進行では拒否しない。継続できる state は `AWAITING_USER_FEEDBACK` だけ。
 - 継続の成果は、送信前に保存した Activity ID の baseline に無く、prompt の SHA-256 が一致する `userMessaged` がちょうど1件あるものだけを今回分として採用する。一覧順と時刻だけでは相関しない。複数件、または完了済み session に該当する `userMessaged` が無い場合は `activity_correlation_failed` とし、session lock は残す。
-- session GET が成功しているときの activities 一覧 404 は、一覧がまだ無いものとして poll を続ける。session 自体の 404 は `remote_rejected` である。
+- session GET が成功しているときの activities 一覧 404 は、一覧がまだ無いものとして poll を続ける。session 自体の 404 は `remote_rejected` である。session ID を保存したあとの 401/403 や、2xx でも JSON を読めない read は `communication_error` の running のままにする。remote task の FAILED にはしない。
 - `sessionCompleted` activity がある COMPLETED は、その場で完了する。activity が無くても session state が COMPLETED のまま activity 集合が次の poll で変わらなければ、今回分の agent message で完了する。create の文書は初回 prompt の `userMessaged` を保証しないため、新規 session では `userMessaged` を必須にしない。
-- create の結果が不明で session ID が無い job は terminal `submission_unknown`。同じ request の retry は保存結果を返し、POST は再送しない。
+- create の 2xx で body が空、JSON を読めない、または session ID を確定できない job は terminal `submission_unknown`。4xx の create は `remote_rejected`。同じ request の retry は保存結果を返し、POST は再送しない。
 - `sendMessage` の結果不明は running のまま `remotePhase=submission_unknown` とし、一意の Activity を確認するまで session lock を保持する。
+- 継続の開始は、同じ session ID を持つ未 settled の Jules job、または `SessionLockHeld` の job があると `session_locked` になる。create が session ID を公開したあとの running も対象である。lock file の owner 文字列だけでは拒否しない。settled で lock を持っていない古い owner は、次の送信が上書きする。lock を外すときは lock file を先に空にし、その後 `SessionLockHeld=false` を保存する。
 - session ID を保存済みの Jules job は、Facade 再起動時の一律 `facade_interrupted` から外す。次の get / wait が監視を再開する。通信不能は remote task の失敗と分け、remote の停止とは報告しない。
 - `waiting_for_input` は wait を終える settled state。回答は新しい request ID と同じ session ID の `start_agent`。
 - artifact は patch、base commit、Activity ID、生成時刻を保持する。patch 本文は改変しない。最後の patch を全成果とは扱わない。patch が無い正常完了も許す。
-- diff の無い `gitPatch` は保存しない。実測では progress 中の activity が `baseCommitId` だけで届いた。diff があるのに base commit が無いもの、または `createTime` が無いものは `artifact_persist_failed` とし、session lock を残す。
+- diff の無い `gitPatch` は保存しない。実測では progress 中の activity が `baseCommitId` だけで届いた。diff があるのに base commit が無いもの、または `createTime` が無いものは `artifact_persist_failed` とする。message の受理は解決済みなので、この terminal 失敗では session lock を外す。
 
 ## 2026-10-29 の Jules 実測
 
@@ -41,4 +42,4 @@ Issue [#40](https://github.com/suusanex/codex_agent_facade/issues/40) の実装�
 - session `14644344499652563347` へ `RESTART-MARKER` を送った job `20261029T112102Z-e0e23374` は、`polling` で session ID を保存したあと host を止めた。別の host が同じ job を再送せず追跡し、`completed` になった。user activity は `task-14644344499652563347-activity-step-14685163969043484571` の1件だけだった。出力は「回答を受け取りました。指示通り、セッションは完了せずにこのまま待機します。何か他にご用件はありますか？」で、session state は再び `COMPLETED` だった。
 - `agy` 1.4.9 の soft-deny 文面は、この環境では再実測していない。
 
-自動テストは process、HTTP、Git の stub と一時ディレクトリで行う。2026-10-29 の実行は 446 件中 445 件が成功し、1 件は Grok の live テストをスキップした。CI は実 Jules と実 `agy` を起動しない。
+自動テストは process、HTTP、Git の stub と一時ディレクトリで行う。2026-10-29 の実行は 453 件中 452 件が成功し、1 件は Grok の live テストをスキップした。CI は実 Jules と実 `agy` を起動しない。

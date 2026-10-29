@@ -204,9 +204,9 @@ public sealed class JulesDriver
         JulesJobState state;
         await using (gate)
         {
-            var owner = gate.ReadOwnerJobId();
-            if ((!string.IsNullOrWhiteSpace(owner) && !string.Equals(owner, context.JobId, StringComparison.Ordinal))
-                || context.IsSessionLockedByOther(sessionId))
+            // lock file の owner 文字列だけでは拒否しない。解放の途中で落ちると、誰も持っていない古い owner が残る。
+            // 二重送信の本体は、同じ session の非 settled job と SessionLockHeld である。ここを通過したあとの WriteOwner が古いファイルを上書きする。
+            if (context.IsSessionLockedByOther(sessionId))
             {
                 throw Reject(
                     "session_locked",
@@ -389,7 +389,7 @@ public sealed class JulesDriver
             {
                 CliJson.TraceException(ex);
                 context.Persist(state);
-                return Fail(ex, "artifact_persist_failed", releaseLock: false, state.SessionId);
+                return Fail(ex, "artifact_persist_failed", releaseLock: true, state.SessionId);
             }
 
             var messages = fresh
@@ -461,22 +461,34 @@ public sealed class JulesDriver
         if (exception is JulesTransportException)
         {
             CliJson.TraceException(exception);
-            var phase = state.RemotePhase is JulesRemotePhase.SubmissionUnknown or JulesRemotePhase.SubmittingMessage
-                ? JulesRemotePhase.SubmissionUnknown
-                : JulesRemotePhase.CommunicationError;
-            context.Persist(state with { RemotePhase = phase });
-            outcome = new JulesSuspendedOutcome();
+            outcome = SuspendMonitor(state, context);
             return true;
         }
 
-        if (exception is JulesRejectedException)
+        if (exception is JulesRejectedException rejected)
         {
             CliJson.TraceException(exception);
-            outcome = Fail(exception, "remote_rejected", releaseLock: false, state.SessionId);
+            // session GET の 404 だけは session 消失として terminal にする。401/403 や 2xx の parse 不能は監視側の失敗である。
+            if (rejected.StatusCode == HttpStatusCode.NotFound)
+            {
+                outcome = Fail(exception, "remote_rejected", releaseLock: false, state.SessionId);
+                return true;
+            }
+
+            outcome = SuspendMonitor(state, context);
             return true;
         }
 
         return false;
+    }
+
+    private static JulesSuspendedOutcome SuspendMonitor(JulesJobState state, JulesRunContext context)
+    {
+        var phase = state.RemotePhase is JulesRemotePhase.SubmissionUnknown or JulesRemotePhase.SubmittingMessage
+            ? JulesRemotePhase.SubmissionUnknown
+            : JulesRemotePhase.CommunicationError;
+        context.Persist(state with { RemotePhase = phase });
+        return new JulesSuspendedOutcome();
     }
 
     private static string ActivitySignature(IReadOnlyList<JulesActivity> activities)

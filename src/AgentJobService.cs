@@ -443,8 +443,10 @@ public sealed class AgentJobService
         }
 
         var sessionId = state.SessionId;
-        job.UpdateJules(state with { SessionLockHeld = false }, snapshot => Persist(ToRecord(snapshot, fingerprint)));
+        // 先に lock file を消す。ここで落ちても record の SessionLockHeld が残り、二重送信は止まる。
+        // 逆順だと record だけ unlocked になり、古い owner の lock file が session を永久に塞ぐ。
         await JulesSessionGate.ReleaseAsync(_storeDirectory, sessionId, job.JobId, CancellationToken.None).ConfigureAwait(false);
+        job.UpdateJules(state with { SessionLockHeld = false }, snapshot => Persist(ToRecord(snapshot, fingerprint)));
     }
 
     private bool IsJulesSessionLockedByOther(string sessionId, string jobId)
@@ -456,9 +458,7 @@ public sealed class AgentJobService
                 continue;
             }
 
-            var state = job.Jules;
-            if (state is { SessionLockHeld: true }
-                && string.Equals(state.SessionId, sessionId, StringComparison.Ordinal))
+            if (BlocksJulesSession(job.Jules, job.IsTerminal, sessionId))
             {
                 return true;
             }
@@ -472,14 +472,37 @@ public sealed class AgentJobService
                 continue;
             }
 
-            if (record.Jules is { SessionLockHeld: true }
-                && string.Equals(record.Jules.SessionId, sessionId, StringComparison.Ordinal))
+            if (BlocksJulesSession(record.Jules, IsSettledStatus(record.Status), sessionId))
             {
                 return true;
             }
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// 同じ session ID の他 job が送信中、または未 settled なら継続を始めない。
+    /// create の running job は SessionLockHeld が false のまま session ID を公開する。
+    /// </summary>
+    private static bool BlocksJulesSession(JulesJobState? state, bool settled, string sessionId)
+    {
+        if (state is null
+            || string.IsNullOrWhiteSpace(state.SessionId)
+            || !string.Equals(state.SessionId, sessionId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return state.SessionLockHeld || !settled;
+    }
+
+    private static bool IsSettledStatus(string status)
+    {
+        return status is AgentJobStatus.Completed
+            or AgentJobStatus.Failed
+            or AgentJobStatus.Cancelled
+            or AgentJobStatus.WaitingForInput;
     }
 
     private AgentJob AttachJules(AgentJobRecord stored)

@@ -157,7 +157,17 @@ public sealed class JulesApiClient
             throw new JulesTransportException("Jules session create returned an empty body.");
         }
 
-        return ToSession(Deserialize<SessionDto>(body, "session"), required: true);
+        // 2xx でも JSON を読めない、または session ID を確定できない応答は拒否ではない。
+        // session が作成済みの可能性があるため、呼び出し側は submission_unknown として再 POST しない。
+        try
+        {
+            return ToSession(Deserialize<SessionDto>(body, "session"), required: true);
+        }
+        catch (JulesRejectedException ex)
+        {
+            CliJson.TraceException(ex);
+            throw new JulesTransportException("Jules session create response could not be read.", ex);
+        }
     }
 
     public Task SendMessageAsync(string sessionId, string prompt, CancellationToken cancellationToken)
@@ -723,7 +733,8 @@ public sealed class GitWorktreeInspector : IGitWorktreeInspector
 
 /// <summary>
 /// 同じ job store を使う process 間で、Jules session への送信をファイル排他する。
-/// 排他の本体は job record の SessionLockHeld で、このファイルは送信区間の相互排除に使う。
+/// 排他の本体は、同じ session の未 settled job と job record の SessionLockHeld である。
+/// このファイルは送信区間の相互排除に使う。解放は file を先に空にし、その後 record の lock を下ろす。
 /// </summary>
 internal sealed class JulesSessionGate : IAsyncDisposable
 {
