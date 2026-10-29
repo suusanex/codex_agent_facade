@@ -832,6 +832,71 @@ public sealed class AntigravityJulesTests
     }
 
     [Fact]
+    public async Task JulesCompletedSessionWithoutTheUserMessageStaysOpenUntilItAppears()
+    {
+        using var harness = Harness();
+        var prompt = "follow up";
+        var sends = 0;
+        var activityReads = 0;
+        var reveal = 0;
+        harness.Http.Respond = path =>
+        {
+            if (path.Contains("/sources", StringComparison.Ordinal))
+            {
+                return Json(Sources(null, ("sources/src-1", "suusanex", "codex_agent_facade")));
+            }
+
+            if (path.Contains(":sendMessage", StringComparison.Ordinal))
+            {
+                Interlocked.Increment(ref sends);
+                return Status(HttpStatusCode.InternalServerError);
+            }
+
+            if (path.Contains("/activities", StringComparison.Ordinal))
+            {
+                Interlocked.Increment(ref activityReads);
+                return Volatile.Read(ref reveal) == 0
+                    ? Json(Activities(Activity("act-old", null, "Choose", completed: false)))
+                    : Json(Activities(
+                        Activity("act-old", null, "Choose", completed: false),
+                        Activity("act-user", prompt, null, completed: false),
+                        Activity("act-done", null, "done", completed: true)));
+            }
+
+            return Json(Session("sess-1", Volatile.Read(ref sends) == 0 ? "AWAITING_USER_FEEDBACK" : "COMPLETED"));
+        };
+
+        var started = harness.Jobs.Start("req-late-user", Request(AgentFacade.JulesAgent, prompt, sessionId: "sess-1"));
+        var observedReads = -1;
+        Assert.True(await WaitUntilAsync(() =>
+        {
+            var reads = Volatile.Read(ref activityReads);
+            var unresolved = JobFileContains(harness.Store, "req-late-user", "\"status\":\"running\"")
+                && JobFileContains(harness.Store, "req-late-user", "\"remotePhase\":\"submission_unknown\"")
+                && JobFileContains(harness.Store, "req-late-user", "\"sessionLockHeld\":true");
+            if (!unresolved || reads < 3)
+            {
+                observedReads = -1;
+                return false;
+            }
+
+            if (observedReads != reads)
+            {
+                observedReads = reads;
+                return false;
+            }
+
+            return true;
+        }));
+        Assert.Equal(1, Volatile.Read(ref sends));
+        Volatile.Write(ref reveal, 1);
+
+        var done = await harness.Jobs.WaitAsync(started.JobId, 5);
+        AssertCompleted(done, "done");
+        Assert.Equal(1, Volatile.Read(ref sends));
+    }
+
+    [Fact]
     public async Task JulesPollFailureStaysRunningAndResumes()
     {
         using var harness = Harness();

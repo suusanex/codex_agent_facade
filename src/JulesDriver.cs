@@ -340,11 +340,15 @@ public sealed class JulesDriver
 
                 if (completed && string.Equals(stableCompletedSignature, signature, StringComparison.Ordinal))
                 {
-                    return Fail(
-                        new InvalidOperationException("Jules session completed without one new userMessaged activity for this prompt."),
-                        "activity_correlation_failed",
-                        releaseLock: false,
-                        state.SessionId);
+                    // 該当する userMessaged がまだ無い。session が先に COMPLETED でも受理は未解決なので terminal にしない。
+                    // lock を残し、次の get / wait が同じ job を再照会する。
+                    state = state with
+                    {
+                        RemotePhase = JulesRemotePhase.SubmissionUnknown,
+                        SessionLockHeld = true,
+                    };
+                    context.Persist(state);
+                    return new JulesSuspendedOutcome();
                 }
 
                 if (state.RemotePhase == JulesRemotePhase.SubmittingMessage)
