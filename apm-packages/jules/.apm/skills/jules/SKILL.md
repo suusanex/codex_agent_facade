@@ -36,9 +36,9 @@ payload の出典は、この Skill を呼び出した実際のユーザー mess
 
 `request_id` は 1つの論理的な `start_agent` request / agent job に対する冪等キーである。Codex thread の ID でも、外部 agent session の ID でもない。
 
-新しい委譲 payload ごと、同じ Codex thread の新しいユーザー turn ごと、同じ Jules session への回答や follow-up ごと、同一 turn 内の別 agent job ごとに新しい UUID を生成する。Codex thread が同じ、または Jules session が同じ、という理由だけでは `request_id` を再利用しない。前回 job の `request_id` を次の回答や follow-up に流用しない。
+新しい委譲 payload ごと、同じ Codex thread の新しいユーザー turn ごと、`waiting_for_input` への回答ごと、同一 turn 内の別 agent job ごとに新しい UUID を生成する。Codex thread が同じ、または Jules session が同じ、という理由だけでは `request_id` を再利用しない。前回 job の `request_id` を次の回答に流用しない。
 
-`session_id` の lifetime は異なる。新規 Jules session では `session_id` を渡さない。`waiting_for_input` への回答、またはユーザーが同じ Jules session の継続を明示したときだけ、直前の対応する `result.sessionId` を次の新しい request の `session_id` に渡す。Jules の公開 snapshot 直下にある `sessionId` も同じ ID である。同じ Codex thread の新しい独立タスクへ、過去の Jules session を再利用しない。`session_id` の継続は `request_id` の再利用理由にならない。
+`session_id` の lifetime は異なる。新規 Jules session では `session_id` を渡さない。`waiting_for_input` / `AWAITING_USER_FEEDBACK` への回答のときだけ、直前の対応する `result.sessionId` を次の新しい request の `session_id` に渡す。Jules の公開 snapshot 直下にある `sessionId` も同じ ID である。完了後の新しい依頼は新規 session にし、`session_id` を渡さない。完了済み Jules session の明示継続は現在の Facade では unsupported であり、`session_id` を付けて `start_agent` を呼ばない。同じ Codex thread の新しい独立タスクへ、過去の Jules session を再利用しない。`session_id` の継続は `request_id` の再利用理由にならない。
 
 `request_id` を再利用してよいのは Exact retry だけである。その再試行は `agent`, `prompt`, `working_directory`, `session_id`, `skills`, `auto_approve`, `model`, `reasoning_effort`, `fast`, `run_mode` を前回と完全一致させる。lost-result retry 以外で同じ作業を新しい `request_id` として再送しない。
 
@@ -65,7 +65,7 @@ Facade が clean worktree、upstream、remote branch tip、Jules Source との r
    - `agent`: `jules`
    - `prompt`: Facade options が無いときは `$jules` より後ろの本文全体。一字も変更しない。Facade options があるときは終了フェンスの直後から末尾までだけを渡す。委譲ヘッダと Facade options は `prompt` に含めない。`$jules` や `/jules` を追加しない。Codex が書いた回答を混ぜない
    - `working_directory`: 今開いている Codex workspace / worktree の絶対パス（編集対象リポジトリ。Facade リポジトリではない）。新規 session でも回答でも毎回解決して渡す
-   - `session_id`: 新規 Jules session では渡さない。回答または明示継続のときだけ、直前の対応する `result.sessionId`
+   - `session_id`: 新規 Jules session では渡さない。`waiting_for_input` / `AWAITING_USER_FEEDBACK` への回答のときだけ、直前の対応する `result.sessionId`。完了済み session には渡さない
    - `skills`: 新規 job と継続では渡さない。`$jules` は委譲先 SKILL ではない。委譲本文から Skill 名を抽出しない。Exact retry で元 request に含まれていた場合だけ同じ値を再送する
    - `auto_approve`: `auto_approve: true` があるときだけ true を渡す。`false` は `start_agent` を呼ばず報告する。未指定は渡さない
    - `model`, `reasoning_effort`, `fast`: 渡さない。書かれていれば黙って省略せず `start_agent` を呼ばない
@@ -75,7 +75,7 @@ Facade が clean worktree、upstream、remote branch tip、Jules Source との r
 5. 返された同じ `jobId` に対して、通常は `timeout_seconds` を指定せず `wait_agent_job(job_id)` を呼ぶ。診断・テスト・上位環境の明示的な制約など、既定の300秒を上書きする理由がある場合だけ指定する。`waiting_for_input` もこの wait の戻りである。
 6. 戻った snapshot を見る。timeout で `running` が返り、`remotePhase` が `submission_unknown` でも `communication_error` でもない場合だけ、同じ `jobId` で再度 `wait_agent_job` する。受理不明は下の再照会に従う。`get_agent_job` の短周期 poll はしない。
 7. `waiting_for_input` なら質問を中継する。`completed` なら `result.outputText` を中継する。いずれもユーザーへの主たる応答である。`waiting_for_input` はタスク完了ではない。completed として扱わない。
-8. 回答や明示継続に使うため、対象 Jules session の `result.sessionId` を保持する。snapshot 直下の `sessionId` も同じ ID である。この値は次の `session_id` であり、次の `request_id` ではない。同じ thread の新しい独立タスクへは渡さない。
+8. `waiting_for_input` への回答に使うため、対象 Jules session の `result.sessionId` を保持する。snapshot 直下の `sessionId` も同じ ID である。この値は次の `session_id` であり、次の `request_id` ではない。完了後の新しい依頼と、同じ thread の新しい独立タスクへは渡さない。完了済み session の明示継続を求められても、現在の Facade では unsupported と報告し、その session へ `start_agent` を送らない。
 9. Facade / tool 呼び出しそのものが失敗した場合、その失敗をユーザーへ報告して停止する。対象作業をCodex自身で実行したり、成功した回答を作ったりしない。
 
 `start_agent` / `wait_agent_job` などのMCP toolが失敗したら、その失敗を報告して停止する。approval_requiredを含む失敗後に、対象作業をCodex自身で実行したり、CLIを直接起動したり、成功したような回答を生成したりしない。`completed` の `result.outputText` が無い限り、成功したと答えない。
@@ -90,7 +90,7 @@ Facade が clean worktree、upstream、remote branch tip、Jules Source との r
 - `agent` があり、この Skill の agent 名と一致する
 - `prompt` があり、実行オプションを除いた今回の作業 payload である。Codex が作った回答ではない
 - `working_directory` があり、現在の workspace / worktree の絶対パスである
-- 新規 Jules session では `session_id` を渡さない。回答または明示継続なら `session_id` は直前の対応する `result.sessionId` と一致する
+- 新規 Jules session では `session_id` を渡さない。`waiting_for_input` / `AWAITING_USER_FEEDBACK` への回答なら `session_id` は直前の対応する `result.sessionId` と一致する。完了済み session の `session_id` では `start_agent` を呼ばない
 - `model`、`reasoning_effort`、`fast` を渡さない。書かれていれば `start_agent` を呼ばない
 - `plan` があるときは `start_agent` を呼ばない。`run_mode` を渡さない
 - `skills` キーがあるときは `start_agent` を呼ばない
@@ -122,8 +122,9 @@ required field が欠けている場合は `start_agent` を呼ばず、その f
 
 対象:
 
-- `waiting_for_input` に対するユーザーの回答、または完了済み Jules session への明示的な継続
-- 新しいユーザー payload を同じ Jules session に渡す
+- `waiting_for_input` / `AWAITING_USER_FEEDBACK` に対するユーザーの回答だけ
+
+完了後の新しい依頼は新規 Jules session にする。完了済み Jules session の明示継続は現在の Facade では unsupported である。その要求が来ても `session_id` を渡して `start_agent` を呼ばず、unsupported と報告する。
 
 同じ Codex thread だけではこの節を適用しない。新しい独立タスクでは `session_id` を渡さない。
 
@@ -133,7 +134,7 @@ required field が欠けている場合は `start_agent` を呼ばず、その f
 - 新しい `prompt`
 - `agent` を再指定する
 - `working_directory` を現在の絶対パスとして再指定する。前回と同じ workspace でも省略しない
-- 直前の対応する `result.sessionId` を `session_id` に指定する。snapshot 直下の `sessionId` も同じ Jules session の ID である
+- 直前の対応する `result.sessionId` を `session_id` に指定する。対象は `waiting_for_input` の回答だけである。snapshot 直下の `sessionId` も同じ Jules session の ID である
 - この turn に `auto_approve: true` があるときだけそれを指定する。前回 session の値は継承しない
 - その他、その turn に必要な引数を完全に再構成する
 - 新規 job と継続では `skills` を渡さない。委譲ヘッダと前回の `skills` は継承しない
@@ -174,7 +175,7 @@ required field が欠けている場合は `start_agent` を呼ばず、その f
 
 `wait_agent_job` は Jules が `waiting_for_input` になったときも戻る。これは Jules task の完了ではない。ユーザー入力待ちの settled state である。`completed` と誤認しない。
 
-snapshot または result から `result.sessionId`、`inputPrompt`、既にある `artifacts`、あるときは `sessionUrl` を読む。Jules では snapshot 直下の `sessionId` も同じ ID である。質問をユーザーへ中継する。Codex は回答を作らない。ユーザーが次の turn で回答または明示的な継続を `$jules` に書いたとき、Follow-up continuation の新しい `start_agent` で同じ Jules session へ送る。
+snapshot または result から `result.sessionId`、`inputPrompt`、既にある `artifacts`、あるときは `sessionUrl` を読む。Jules では snapshot 直下の `sessionId` も同じ ID である。質問をユーザーへ中継する。Codex は回答を作らない。ユーザーが次の turn で回答を `$jules` に書いたとき、Follow-up continuation の新しい `start_agent` で同じ Jules session へ送る。完了済み session への明示継続は対象外である。
 
 ### submission_unknown
 
