@@ -57,29 +57,38 @@ if (string.IsNullOrWhiteSpace(profile))
     profile = processName;
 }
 
-Console.Out.Write(ProfileStdout(profile));
+Console.Out.Write(ProfileStdout(profile, args));
 return 0;
 
-static string ProfileStdout(string profile)
+static string? ArgumentValue(string[] args, string name)
 {
+    for (var i = 0; i < args.Length - 1; i++)
+    {
+        if (string.Equals(args[i], name, StringComparison.Ordinal))
+        {
+            return args[i + 1];
+        }
+    }
+
+    return null;
+}
+
+static string ProfileStdout(string profile, string[] args)
+{
+    var copilotSession = ArgumentValue(args, "--session-id") ?? ArgumentValue(args, "--resume") ?? "sess-copilot";
+    var grokSession = ArgumentValue(args, "--session-id") ?? ArgumentValue(args, "--resume") ?? "22222222-2222-2222-2222-222222222222";
     return profile switch
     {
         "github-copilot" or "copilot" =>
-            """
-            {"type":"assistant.turn_start"}
-            {"type":"assistant.message","data":{"content":"pong"}}
-            {"type":"tool","name":"RAW_TOOL_MARKER"}
-            {"type":"assistant.turn_end"}
-            {"type":"result","sessionId":"sess-copilot"}
-
-            """,
+            "{\"type\":\"assistant.turn_start\"}\n"
+            + "{\"type\":\"assistant.message\",\"data\":{\"content\":\"pong\"}}\n"
+            + "{\"type\":\"tool\",\"name\":\"RAW_TOOL_MARKER\"}\n"
+            + "{\"type\":\"assistant.turn_end\"}\n"
+            + "{\"type\":\"result\",\"sessionId\":\"" + copilotSession + "\"}\n",
         "grok-build" or "grok" =>
-            """
-            {"type":"text","data":"pong"}
-            {"type":"tool","name":"RAW_TOOL_MARKER"}
-            {"type":"end","sessionId":"22222222-2222-2222-2222-222222222222"}
-
-            """,
+            "{\"type\":\"text\",\"data\":\"pong\"}\n"
+            + "{\"type\":\"tool\",\"name\":\"RAW_TOOL_MARKER\"}\n"
+            + "{\"type\":\"end\",\"sessionId\":\"" + grokSession + "\"}\n",
         "cursor" or "cursor-agent" or "cursor-stub" =>
             """
             {"type":"system","subtype":"init","session_id":"c6b62c6f-7ead-4fd6-9922-e952131177ff"}

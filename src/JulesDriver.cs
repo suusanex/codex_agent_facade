@@ -837,6 +837,17 @@ internal sealed class NullAgentRunLog : IAgentRunLog
     {
     }
 
+    public string? BoundSessionId => null;
+
+    /// <summary>
+    /// 共有 singleton は run ごとの identity を持てない。検証と永続化は <see cref="AgentRunLog"/> が行う。
+    /// </summary>
+    public void BindSession(string sessionId, string bindingSource)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(bindingSource);
+    }
+
     public void WriteCompleted(AgentRunResult result)
     {
     }

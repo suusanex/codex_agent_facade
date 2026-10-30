@@ -421,6 +421,23 @@ internal static class CliJson
         }
     }
 
+    /// <summary>
+    /// stream callback が既に <c>session_mismatch</c> を付けている場合は、外側の汎用 kind で上書きしない。
+    /// </summary>
+    public static void MarkFailureIfMissing(
+        Exception exception,
+        string kind,
+        string? summary = null,
+        int? exitCode = null)
+    {
+        if (exception.Data[FailureKindKey] is string)
+        {
+            return;
+        }
+
+        MarkFailure(exception, kind, summary, exitCode);
+    }
+
     public static void AttachFailureLog(Exception exception, IAgentRunLog log)
     {
         exception.Data[FailureRunIdKey] = log.RunId;

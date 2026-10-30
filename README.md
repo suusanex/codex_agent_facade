@@ -332,13 +332,13 @@ apm uninstall jules
 GitHub Copilot（プロセス cwd = `working_directory`）:
 
 ```text
-<UTF-8 prompt source> | copilot --output-format json [--allow-all] [--model <model>] [--resume <session_id>]
+<UTF-8 prompt source> | copilot --output-format json [--allow-all] [--model <model>] [--session-id <new_session_id> | --resume <session_id>]
 ```
 
 Grok Build（`run_mode` 未指定）:
 
 ```text
-grok --no-auto-update -p <prompt> --cwd <working_directory> --output-format streaming-json [--always-approve] [--model <model>] [--resume <session_id>]
+grok --no-auto-update -p <prompt> --cwd <working_directory> --output-format streaming-json [--always-approve] [--model <model>] [--session-id <new_session_id> | --resume <session_id>]
 ```
 
 Grok Build（`run_mode=plan`）:
@@ -364,6 +364,10 @@ Antigravity CLI（process cwd = `working_directory`）:
 ```text
 agy -p <prompt> --output-format stream-json --print-timeout 0s [--mode plan] [--conversation <session_id>] [--model <model>] [--effort <reasoning_effort>] [--dangerously-skip-permissions]
 ```
+
+新規の GitHub Copilot と Grok Build（`run_mode` 未指定）は、Facade が UUID を作り、プロセス起動前に `--session-id` を渡す。継続は `--resume` だけで、新しい UUID は作らない。`--session-id` と `--resume` は同時に渡さない。Grok の plan は `--session-id` を使わない。新規 plan の ID は ACP の `session/new` が返した時点で、継続 plan の ID はプロセス起動前に、run log へ書く。Cursor、Codex、Antigravity の新規 ID は、それぞれの早期 stream を読んだ時点で書く。
+
+ID が確定した run は、`<runId>.events.jsonl` に `source=facade` / `type=session_bound` を終了前に残す。Facade が結果 JSON の前で落ちても、この行の `data.sessionId` を次の `session_id` に渡して継続する。`session_bound` は終了イベントではない。ID が一度も確定する前の強制終了では、継続できる外部 session は残らない。
 
 `--mode plan` は `run_mode=plan` のときだけ付ける。通常実行では付けない。成功した plan の `outputKind` は `plan` で、`outputText` は CLI の最終 response である。`planPath` は付けない。`--dangerously-skip-permissions` は `auto_approve=true` のときだけ付ける。`false` では付けない。`fast` と空でない `skills` は起動前に拒否する。Jules は単発 CLI を起動しない。
 

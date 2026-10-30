@@ -35,7 +35,7 @@ CLIに `CODEX_AGENT_FACADE_TOKEN` は不要である。tokenは常駐MCPホス�
 | `agent` | はい | `github-copilot`、`grok-build`、`cursor`、`codex`、`antigravity`。`jules` は起動前に拒否する |
 | `prompt` | はい | worker prompt。本文からmodel、effort、fastは推測しない |
 | `working_directory` | はい | agent processの作業場所。継続時も毎回指定する |
-| `session_id` | いいえ | 完了結果の `sessionId` による同一外部sessionの継続。省略時は新規 |
+| `session_id` | いいえ | 同一外部sessionの継続。結果 JSON の `sessionId`、または run log の `session_bound` を渡す。省略時は新規 |
 | `skills` | いいえ | 既存Driverの変換に従う。CursorとCodexはpromptへ変換しない。nullや空白の要素は起動前に `invalid_request` |
 | `auto_approve` | いいえ | 省略時は true |
 | `model` | いいえ | 省略時はCLIへmodel引数を付けない |
@@ -120,7 +120,9 @@ CLIは `%USERPROFILE%\.codex-agent-facade\jobs\` を読み書きしない。し�
 - 同じrequestの二重起動防止
 - Facade再起動後のfail-closed
 
-同じ結果を取り損ねた場合、終了済みCLIを再実行するとagentはもう一度動く。会話の続きが必要なら、前回stdoutの `result.sessionId` を次の `session_id` に渡す。stdoutを失った場合のsession IDは、対応するrun logから読む。
+同じ結果を取り損ねた場合、終了済みCLIを再実行するとagentはもう一度動く。会話の続きが必要なら、前回の外部 session ID を次の `session_id` に渡す。結果 JSON の `result.sessionId` が残っていればそれを使う。Facade が結果を書く前に落ちた場合は、対応する `<runId>.events.jsonl` の `session_bound` にある `data.sessionId` を使う。このイベントは終了行ではない。`completed`、`failed`、`cancelled` より前に残り、失敗や取消のあとも同じ ID を上書きしない。別 ID が後から届いた場合は `session_mismatch` で失敗し、先に書いた ID を置き換えない。
+
+新規の GitHub Copilot と、`run_mode` を付けない Grok Build は、Facade が UUID を作り、起動前に `--session-id` として渡してから `session_bound` を書く。継続は `--resume` であり、新しい UUID は作らない。Grok の plan は `--session-id` を使わない。新規は ACP の `session/new` が返した ID を、継続は起動前の要求 ID を書く。Cursor、Codex、Antigravity の新規 ID は、それぞれの早期 stream から書く。ID が一度も確定する前の強制終了では、継続できる外部 session は残らない。
 
 同一 `session_id` のCLIを重ねて起動する排他はしない。呼び出し側が同時に同じ外部sessionを使わない。別プロセスの別sessionは、MCPホスト内の並行jobとは独立に、起動した数だけ同時実行できる。
 

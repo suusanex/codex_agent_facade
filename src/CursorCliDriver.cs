@@ -27,6 +27,11 @@ public sealed class CursorCliDriver
     {
         var selectedModel = await ResolveSelectedModelAsync(request, cancellationToken).ConfigureAwait(false);
         var arguments = BuildArguments(request, selectedModel);
+        if (!string.IsNullOrWhiteSpace(request.SessionId))
+        {
+            runLog.BindSession(request.SessionId, SessionBinding.Resume);
+        }
+
         runLog.WriteStarted(new AgentRunStartedInfo(
             Agent: AgentFacade.CursorAgent,
             WorkingDirectory: request.WorkingDirectory,
@@ -72,7 +77,7 @@ public sealed class CursorCliDriver
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
-            CliJson.MarkFailure(ex, "internal_error");
+            CliJson.MarkFailureIfMissing(ex, "internal_error");
             throw;
         }
 
@@ -98,12 +103,12 @@ public sealed class CursorCliDriver
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
-            CliJson.MarkFailure(ex, "output_parse_failed");
+            CliJson.MarkFailureIfMissing(ex, "output_parse_failed");
             throw;
         }
         return new AgentRunResult(
             Agent: AgentFacade.CursorAgent,
-            SessionId: parsed.SessionId,
+            SessionId: SessionBinding.Resolve(runLog, parsed.SessionId),
             ExitCode: processResult.ExitCode,
             OutputText: parsed.OutputText,
             OutputKind: parsed.OutputKind,
@@ -585,7 +590,12 @@ internal sealed class CursorStreamAccumulator
         }
 
         _jsonEventCount++;
-        _sessionId ??= CliJson.FindExplicitSessionId(root);
+        var observedSessionId = CliJson.FindExplicitSessionId(root);
+        if (!string.IsNullOrWhiteSpace(observedSessionId))
+        {
+            _runLog.BindSession(observedSessionId, SessionBinding.EarlyStream);
+            _sessionId = observedSessionId;
+        }
         var type = CliJson.FindFirstString(root, "type") ?? "unknown";
 
         if (string.Equals(type, "assistant", StringComparison.OrdinalIgnoreCase))

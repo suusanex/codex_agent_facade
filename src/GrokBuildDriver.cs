@@ -14,6 +14,7 @@ public sealed class GrokBuildDriver
     private readonly TimeProvider _timeProvider;
     private readonly IGrokUnifiedLogReader _logReader;
     private readonly IGrokAcpProcessFactory _acpProcesses;
+    private readonly Func<string> _allocateSessionId;
 
     public GrokBuildDriver(IProcessRunner processRunner)
         : this(processRunner, TimeProvider.System, FileGrokUnifiedLogReader.CreateDefault(), null)
@@ -24,7 +25,8 @@ public sealed class GrokBuildDriver
         IProcessRunner processRunner,
         TimeProvider timeProvider,
         IGrokUnifiedLogReader logReader,
-        IGrokAcpProcessFactory? acpProcesses = null)
+        IGrokAcpProcessFactory? acpProcesses = null,
+        Func<string>? allocateSessionId = null)
     {
         ArgumentNullException.ThrowIfNull(processRunner);
         ArgumentNullException.ThrowIfNull(timeProvider);
@@ -33,6 +35,7 @@ public sealed class GrokBuildDriver
         _timeProvider = timeProvider;
         _logReader = logReader;
         _acpProcesses = acpProcesses ?? new GrokAcpProcessFactory();
+        _allocateSessionId = allocateSessionId ?? (() => Guid.NewGuid().ToString("D"));
     }
 
     public async Task<AgentRunResult> RunAsync(
@@ -51,7 +54,10 @@ public sealed class GrokBuildDriver
             return await RunPlanAsync(request, runLog, cancellationToken).ConfigureAwait(false);
         }
 
-        var arguments = BuildArguments(request);
+        var resume = !string.IsNullOrWhiteSpace(request.SessionId);
+        var sessionId = resume ? request.SessionId! : AllocateSessionId();
+        var arguments = BuildArguments(request, resume ? null : sessionId);
+        runLog.BindSession(sessionId, resume ? SessionBinding.Resume : SessionBinding.Preallocated);
         var prompt = ApplyGrokSkills(request.Prompt, request.Skills);
         runLog.WriteStarted(new AgentRunStartedInfo(
             Agent: AgentFacade.GrokBuildAgent,
@@ -74,7 +80,7 @@ public sealed class GrokBuildDriver
             _logReader,
             accumulator,
             signal,
-            request.SessionId,
+            sessionId,
             request.ReasoningEffort);
         GrokLogCursor cursor;
         try
@@ -142,7 +148,7 @@ public sealed class GrokBuildDriver
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
-            CliJson.MarkFailure(ex, "internal_error");
+            CliJson.MarkFailureIfMissing(ex, "internal_error");
             throw;
         }
         finally
@@ -211,13 +217,13 @@ public sealed class GrokBuildDriver
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
-            CliJson.MarkFailure(ex, "output_parse_failed");
+            CliJson.MarkFailureIfMissing(ex, "output_parse_failed");
             throw;
         }
 
         return new AgentRunResult(
             Agent: AgentFacade.GrokBuildAgent,
-            SessionId: parsed.SessionId,
+            SessionId: SessionBinding.Resolve(runLog, parsed.SessionId),
             ExitCode: processResult.ExitCode,
             OutputText: parsed.OutputText,
             OutputKind: parsed.OutputKind,
@@ -230,7 +236,7 @@ public sealed class GrokBuildDriver
             ProcessTermination: watch.Confirmed ? processResult.Termination : null);
     }
 
-    internal static List<string> BuildArguments(AgentRunRequest request)
+    internal static List<string> BuildArguments(AgentRunRequest request, string? allocatedSessionId = null)
     {
         var prompt = ApplyGrokSkills(request.Prompt, request.Skills);
         var arguments = new List<string>
@@ -261,6 +267,11 @@ public sealed class GrokBuildDriver
             // --session-id は新規作成用。実機では既存 ID に対して "already in use" になるため継続は --resume。
             arguments.Add("--resume");
             arguments.Add(request.SessionId);
+        }
+        else if (!string.IsNullOrWhiteSpace(allocatedSessionId))
+        {
+            arguments.Add("--session-id");
+            arguments.Add(allocatedSessionId);
         }
 
         return arguments;
@@ -295,6 +306,11 @@ public sealed class GrokBuildDriver
     {
         var arguments = BuildPlanArguments(request);
         var prompt = ApplyGrokSkills(request.Prompt, request.Skills);
+        if (!string.IsNullOrWhiteSpace(request.SessionId))
+        {
+            runLog.BindSession(request.SessionId, SessionBinding.Resume);
+        }
+
         runLog.WriteStarted(new AgentRunStartedInfo(
             Agent: AgentFacade.GrokBuildAgent,
             WorkingDirectory: request.WorkingDirectory,
@@ -354,10 +370,11 @@ public sealed class GrokBuildDriver
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            GrokPlanArtifact.Write(request.WorkingDirectory, outcome.SessionId, outcome.Content);
+            var sessionId = SessionBinding.Resolve(runLog, outcome.SessionId);
+            GrokPlanArtifact.Write(request.WorkingDirectory, sessionId, outcome.Content);
             result = new AgentRunResult(
                 Agent: AgentFacade.GrokBuildAgent,
-                SessionId: outcome.SessionId,
+                SessionId: sessionId,
                 ExitCode: null,
                 OutputText: outcome.Content,
                 OutputKind: "plan",
@@ -365,7 +382,7 @@ public sealed class GrokBuildDriver
                 RunId: runLog.RunId,
                 EventsLogPath: runLog.EventsPath,
                 TextLogPath: runLog.TextLogPath,
-                PlanPath: GrokPlanArtifact.RelativePath(outcome.SessionId));
+                PlanPath: GrokPlanArtifact.RelativePath(sessionId));
         }
 
         if (!process.ExitObserved)
@@ -450,6 +467,29 @@ public sealed class GrokBuildDriver
 
         return "/" + name;
     }
+
+    private string AllocateSessionId()
+    {
+        string sessionId;
+        try
+        {
+            sessionId = _allocateSessionId();
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            throw;
+        }
+
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            var failure = new InvalidOperationException("Allocated Grok session id was empty.");
+            CliJson.TraceException(failure);
+            throw failure;
+        }
+
+        return sessionId;
+    }
 }
 
 /// <summary>
@@ -501,6 +541,12 @@ internal sealed class GrokStreamAccumulator
 
             _jsonEventCount++;
             var type = CliJson.FindFirstString(root, "type") ?? "unknown";
+            var observedSessionId = CliJson.FindExplicitSessionId(root);
+            if (!string.IsNullOrWhiteSpace(observedSessionId))
+            {
+                _runLog.BindSession(observedSessionId, SessionBinding.EarlyStream);
+                _sessionId = observedSessionId;
+            }
             if (string.Equals(type, "thought", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(type, "text", StringComparison.OrdinalIgnoreCase))
             {
@@ -521,11 +567,6 @@ internal sealed class GrokStreamAccumulator
             else
             {
                 _runLog.WriteAgentEvent(type, root, GrokBuildHumanSummary.Format(type, root));
-            }
-
-            if (string.Equals(type, "end", StringComparison.OrdinalIgnoreCase))
-            {
-                _sessionId = CliJson.FindExplicitSessionId(root) ?? _sessionId;
             }
 
             return IsProgress(type, root);
