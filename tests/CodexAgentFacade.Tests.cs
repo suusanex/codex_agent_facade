@@ -34,9 +34,11 @@
 #:include GrokInternalCompletionTests.cs
 #:include GrokPlanTests.cs
 #:include AntigravityJulesTests.cs
+#:include SessionBindingTests.cs
 
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text.RegularExpressions;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
@@ -76,6 +78,17 @@ internal static class TestRunLogs
         using var reader = new StreamReader(stream);
         return reader.ReadToEnd();
     }
+
+    public static string RequiredArgument(IReadOnlyList<string> args, string name)
+    {
+        var index = args.ToList().IndexOf(name);
+        if (index < 0 || index + 1 >= args.Count)
+        {
+            throw new InvalidOperationException("Missing argument " + name + ".");
+        }
+
+        return args[index + 1];
+    }
 }
 
 public sealed class StubProcessLifetime : IProcessLifetime
@@ -107,6 +120,20 @@ public sealed class RecordingProcessRunner : IProcessRunner
 
         """;
     public ProcessRunRequest? LastRequest { get; private set; }
+
+    /// <summary>
+    /// スタブは引数を解釈しない。新規実行の <c>--session-id</c> を CLI が採用した体で、stdout の session フィールドを合わせる。
+    /// 不一致を見るテストは false にする。
+    /// </summary>
+    public bool HonorPreallocatedSessionId { get; set; } = true;
+
+    private static readonly Regex SessionFieldPattern = new(
+        "(\"(?:sessionId|session_id|sessionID)\"\\s*:\\s*\")[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(\")",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    private static readonly Regex ResumeHintPattern = new(
+        "(--resume(?:=|\\s+))[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
     public ProcessRunResult Result { get; set; } = new(0, "{}", "");
     public Exception? ExceptionToThrow { get; set; }
     public TaskCompletionSource<bool>? Gate { get; set; }
@@ -123,7 +150,7 @@ public sealed class RecordingProcessRunner : IProcessRunner
 
     public void EmitStdout(string line)
     {
-        _stdout?.Invoke(line);
+        _stdout?.Invoke(AdaptStdout(line, _stdoutSessionId));
     }
 
     public void EmitStderr(string line)
@@ -135,7 +162,7 @@ public sealed class RecordingProcessRunner : IProcessRunner
     {
         foreach (var line in SplitLines(result.StandardOutput))
         {
-            _stdout?.Invoke(line);
+            _stdout?.Invoke(AdaptStdout(line, _stdoutSessionId));
         }
 
         foreach (var line in SplitLines(result.StandardError))
@@ -161,6 +188,8 @@ public sealed class RecordingProcessRunner : IProcessRunner
         }
 
         LastRequest = request;
+        var stdoutSessionId = FindPreallocatedSessionId(request.Arguments);
+        _stdoutSessionId = stdoutSessionId;
         Interlocked.Increment(ref _callCount);
         LastCancellationToken = cancellationToken;
         cancellationToken.ThrowIfCancellationRequested();
@@ -203,7 +232,7 @@ public sealed class RecordingProcessRunner : IProcessRunner
 
                     foreach (var line in LinesAfterSignal)
                     {
-                        request.StdoutLineCallback?.Invoke(line);
+                        request.StdoutLineCallback?.Invoke(AdaptStdout(line, stdoutSessionId));
                     }
 
                     return CompletionResult ?? Result;
@@ -221,7 +250,7 @@ public sealed class RecordingProcessRunner : IProcessRunner
 
         foreach (var line in SplitLines(Result.StandardOutput))
         {
-            request.StdoutLineCallback?.Invoke(line);
+            request.StdoutLineCallback?.Invoke(AdaptStdout(line, stdoutSessionId));
         }
 
         foreach (var line in SplitLines(Result.StandardError))
@@ -251,6 +280,38 @@ public sealed class RecordingProcessRunner : IProcessRunner
         {
             yield return lines[i];
         }
+    }
+
+    private string? _stdoutSessionId;
+
+    private string? FindPreallocatedSessionId(IReadOnlyList<string> arguments)
+    {
+        if (!HonorPreallocatedSessionId)
+        {
+            return null;
+        }
+
+        for (var i = 0; i < arguments.Count - 1; i++)
+        {
+            if (string.Equals(arguments[i], "--session-id", StringComparison.Ordinal))
+            {
+                return arguments[i + 1];
+            }
+        }
+
+        return null;
+    }
+
+    private static string AdaptStdout(string line, string? sessionId)
+    {
+        if (sessionId is null)
+        {
+            return line;
+        }
+
+        // ${n} にする。$1 の直後が UUID の数字だと、存在しないグループ番号として置換が壊れる。
+        line = SessionFieldPattern.Replace(line, "${1}" + sessionId + "${2}");
+        return ResumeHintPattern.Replace(line, "${1}" + sessionId);
     }
 }
 
@@ -357,7 +418,7 @@ public class AgentFacadeTests
         Assert.Equal("grok", runner.LastRequest!.FileName);
         Assert.Equal(AgentFacade.GrokBuildAgent, result.Agent);
         Assert.Equal("hi", result.OutputText);
-        Assert.Equal("22222222-2222-2222-2222-222222222222", result.SessionId);
+        Assert.Equal(TestRunLogs.RequiredArgument(runner.LastRequest.Arguments, "--session-id"), result.SessionId);
     }
 
     [Fact]
@@ -492,7 +553,7 @@ public class CodexCliDriverTests
             log, onStdoutLine: null, CancellationToken.None));
 
         Assert.Equal("session_mismatch", failure.Data[CliJson.FailureKindKey]);
-        Assert.Contains("different session id", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("does not match the bound session", failure.Message, StringComparison.Ordinal);
         Assert.Contains("resume", runner.LastRequest!.Arguments);
         Assert.Contains("thread-requested", runner.LastRequest.Arguments);
     }
@@ -1687,7 +1748,7 @@ public class GitHubCopilotDriverTests
                 ""),
         };
         var result = await RunAsync(runner);
-        Assert.Equal("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", result.SessionId);
+        Assert.Equal(TestRunLogs.RequiredArgument(runner.LastRequest!.Arguments, "--session-id"), result.SessionId);
         Assert.Equal("first\nsecond", result.OutputText);
         Assert.Equal("assistant_transcript", result.OutputKind);
         Assert.Equal(0, result.ExitCode);
@@ -1709,7 +1770,7 @@ public class GitHubCopilotDriverTests
         };
         var result = await RunAsync(runner);
         Assert.Equal("pong", result.OutputText);
-        Assert.Equal("f3358158-943c-4355-a193-ccb669fe856d", result.SessionId);
+        Assert.Equal(TestRunLogs.RequiredArgument(runner.LastRequest!.Arguments, "--session-id"), result.SessionId);
     }
 
     [Fact]
@@ -1795,7 +1856,7 @@ public class GitHubCopilotDriverTests
         };
         var result = await RunAsync(runner);
         Assert.Equal("pong", result.OutputText);
-        Assert.Equal("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", result.SessionId);
+        Assert.Equal(TestRunLogs.RequiredArgument(runner.LastRequest!.Arguments, "--session-id"), result.SessionId);
     }
 
     [Fact]
@@ -1812,7 +1873,7 @@ public class GitHubCopilotDriverTests
                 ""),
         };
         var result = await RunAsync(runner);
-        Assert.Equal("cccccccc-cccc-cccc-cccc-cccccccccccc", result.SessionId);
+        Assert.Equal(TestRunLogs.RequiredArgument(runner.LastRequest!.Arguments, "--session-id"), result.SessionId);
         Assert.Equal("done", result.OutputText);
     }
 
@@ -1840,7 +1901,9 @@ public class GitHubCopilotDriverTests
                 ""),
         };
         var result = await RunAsync(runner);
-        Assert.Equal(string.Empty, result.SessionId);
+        var sessionId = TestRunLogs.RequiredArgument(runner.LastRequest!.Arguments, "--session-id");
+        Assert.Equal(sessionId, result.SessionId);
+        Assert.DoesNotContain("99999999-9999-9999-9999-999999999999", sessionId, StringComparison.Ordinal);
         Assert.Contains("99999999-9999-9999-9999-999999999999", result.OutputText, StringComparison.Ordinal);
     }
 
@@ -1899,7 +1962,10 @@ public class GitHubCopilotDriverTests
         var text = TestRunLogs.ReadShared(result.TextLogPath);
         Assert.Contains("\"type\":\"assistant.message\"", events, StringComparison.Ordinal);
         Assert.Contains("assistant: pong", text, StringComparison.Ordinal);
-        Assert.Contains("result sessionId=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", text, StringComparison.Ordinal);
+        Assert.Contains(
+            "result sessionId=" + TestRunLogs.RequiredArgument(runner.LastRequest!.Arguments, "--session-id"),
+            text,
+            StringComparison.Ordinal);
     }
 
     private static async Task<AgentRunResult> RunAsync(RecordingProcessRunner runner)
@@ -1988,11 +2054,12 @@ public class GrokBuildDriverTests
         };
         var result = await RunAsync(runner);
         Assert.Equal("pong", result.OutputText);
-        Assert.Equal("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", result.SessionId);
+        var sessionId = TestRunLogs.RequiredArgument(runner.LastRequest!.Arguments, "--session-id");
+        Assert.Equal(sessionId, result.SessionId);
         var text = TestRunLogs.ReadShared(result.TextLogPath);
         Assert.Contains("assistant: pong", text, StringComparison.Ordinal);
         Assert.Contains("thought: The user", text, StringComparison.Ordinal);
-        Assert.Contains("end stopReason=end_turn sessionId=eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", text, StringComparison.Ordinal);
+        Assert.Contains("end stopReason=end_turn sessionId=" + sessionId, text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2090,8 +2157,8 @@ public class GrokBuildDriverTests
         };
         var result = await RunAsync(runner);
         Assert.Equal("done", result.OutputText);
-        Assert.Equal("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", result.SessionId);
-        Assert.Equal("grok", runner.LastRequest!.FileName);
+        Assert.Equal(TestRunLogs.RequiredArgument(runner.LastRequest!.Arguments, "--session-id"), result.SessionId);
+        Assert.Equal("grok", runner.LastRequest.FileName);
     }
 
     [Fact]
@@ -2110,7 +2177,7 @@ public class GrokBuildDriverTests
         };
         var result = await RunAsync(runner);
         Assert.Equal("nested", result.OutputText);
-        Assert.Equal("ffffffff-ffff-ffff-ffff-ffffffffffff", result.SessionId);
+        Assert.Equal(TestRunLogs.RequiredArgument(runner.LastRequest!.Arguments, "--session-id"), result.SessionId);
     }
 
     [Fact]
@@ -2128,7 +2195,9 @@ public class GrokBuildDriverTests
                 ""),
         };
         var result = await RunAsync(runner);
-        Assert.Equal(string.Empty, result.SessionId);
+        var sessionId = TestRunLogs.RequiredArgument(runner.LastRequest!.Arguments, "--session-id");
+        Assert.Equal(sessionId, result.SessionId);
+        Assert.DoesNotContain("88888888-8888-8888-8888-888888888888", sessionId, StringComparison.Ordinal);
         Assert.Equal("ok", result.OutputText);
     }
 
@@ -6233,7 +6302,7 @@ public class McpHttpHostTests
         Assert.Equal(AgentJobStatus.Completed, payload.Status);
         Assert.Equal(AgentFacade.GrokBuildAgent, payload.Result!.Agent);
         Assert.Equal("ok", payload.Result.OutputText);
-        Assert.Equal("22222222-2222-2222-2222-222222222222", payload.Result.SessionId);
+        Assert.Equal(TestRunLogs.RequiredArgument(session.Runner.LastRequest!.Arguments, "--session-id"), payload.Result.SessionId);
         Assert.Equal(1, session.Runner.CallCount);
         Assert.Equal("grok", session.Runner.LastRequest!.FileName);
     }
@@ -7968,7 +8037,9 @@ public class AgentCliTests
         Assert.Equal(AgentCli.ExitCompleted, completed.ExitCode);
         Assert.Equal("completed", completed.Status);
         Assert.Equal("pong", completed.Root.GetProperty("result").GetProperty("outputText").GetString());
-        Assert.Equal("sess-copilot", completed.Root.GetProperty("result").GetProperty("sessionId").GetString());
+        Assert.Equal(
+            TestRunLogs.RequiredArgument(runner.LastRequest!.Arguments, "--session-id"),
+            completed.Root.GetProperty("result").GetProperty("sessionId").GetString());
         Assert.False(completed.Root.GetProperty("result").TryGetProperty("rawOutput", out _));
         Assert.DoesNotContain("RAW_TOOL_MARKER", completed.Text, StringComparison.Ordinal);
         var events = TestRunLogs.ReadShared(completed.Root.GetProperty("result").GetProperty("eventsLogPath").GetString()!);
@@ -7985,7 +8056,7 @@ public class AgentCliTests
     public async Task ContinuationPassesSessionAndCursorCodexOptions()
     {
         var facade = CreateFacade(out var runner);
-        runner.Result = CopilotSuccess();
+        runner.Result = CopilotSuccess("sess-existing");
         var continued = await RunAsync(facade, Request(new
         {
             Agent = AgentFacade.GitHubCopilotAgent,
@@ -8121,17 +8192,15 @@ public class AgentCliTests
         Assert.Equal("timeout", timedOut.FailureKind);
     }
 
-    private static ProcessRunResult CopilotSuccess()
+    private static ProcessRunResult CopilotSuccess(string sessionId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
     {
         return new ProcessRunResult(
             0,
-            """
-            {"type":"assistant.turn_start"}
-            {"type":"assistant.message","data":{"content":"pong"}}
-            {"type":"tool","name":"RAW_TOOL_MARKER"}
-            {"type":"assistant.turn_end"}
-            {"type":"result","sessionId":"sess-copilot"}
-            """,
+            "{\"type\":\"assistant.turn_start\"}\n"
+            + "{\"type\":\"assistant.message\",\"data\":{\"content\":\"pong\"}}\n"
+            + "{\"type\":\"tool\",\"name\":\"RAW_TOOL_MARKER\"}\n"
+            + "{\"type\":\"assistant.turn_end\"}\n"
+            + "{\"type\":\"result\",\"sessionId\":\"" + sessionId + "\"}\n",
             "");
     }
 

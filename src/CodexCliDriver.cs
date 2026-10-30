@@ -21,6 +21,11 @@ public sealed class CodexCliDriver
         CancellationToken cancellationToken)
     {
         var arguments = BuildArguments(request);
+        if (!string.IsNullOrWhiteSpace(request.SessionId))
+        {
+            runLog.BindSession(request.SessionId, SessionBinding.Resume);
+        }
+
         runLog.WriteStarted(new AgentRunStartedInfo(
             Agent: AgentFacade.CodexAgent,
             WorkingDirectory: request.WorkingDirectory,
@@ -67,7 +72,7 @@ public sealed class CodexCliDriver
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
-            CliJson.MarkFailure(ex, "internal_error");
+            CliJson.MarkFailureIfMissing(ex, "internal_error");
             throw;
         }
 
@@ -92,12 +97,21 @@ public sealed class CodexCliDriver
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
-            CliJson.MarkFailure(ex, accumulator.FailureKind ?? "output_parse_failed", ex.Message);
+            CliJson.MarkFailureIfMissing(ex, accumulator.FailureKind ?? "output_parse_failed", ex.Message);
             throw;
         }
 
+        var sessionId = SessionBinding.Resolve(runLog, parsed.SessionId);
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            var missing = new InvalidOperationException("Codex CLI did not report a session id.");
+            CliJson.MarkFailure(missing, "output_parse_failed");
+            CliJson.TraceException(missing);
+            throw missing;
+        }
+
         if (!string.IsNullOrWhiteSpace(request.SessionId)
-            && !string.Equals(request.SessionId, parsed.SessionId, StringComparison.Ordinal))
+            && !string.Equals(request.SessionId, sessionId, StringComparison.Ordinal))
         {
             var failure = new InvalidOperationException("Codex CLI resumed with a different session id than requested.");
             CliJson.MarkFailure(failure, "session_mismatch");
@@ -107,7 +121,7 @@ public sealed class CodexCliDriver
 
         return new AgentRunResult(
             Agent: AgentFacade.CodexAgent,
-            SessionId: parsed.SessionId,
+            SessionId: sessionId,
             ExitCode: processResult.ExitCode,
             OutputText: parsed.OutputText,
             OutputKind: parsed.OutputKind,
@@ -205,12 +219,8 @@ internal sealed class CodexJsonlAccumulator
         }
 
         var type = GetString(root, "type") ?? "unknown";
-        _sessionId ??= GetString(root, "thread_id") ?? GetString(root, "threadId");
-        if (string.Equals(type, "thread.started", StringComparison.OrdinalIgnoreCase))
-        {
-            _sessionId ??= GetString(root, "thread_id") ?? GetString(root, "threadId");
-        }
-        else if (string.Equals(type, "item.completed", StringComparison.OrdinalIgnoreCase))
+        NoteSession(GetString(root, "thread_id") ?? GetString(root, "threadId"));
+        if (string.Equals(type, "item.completed", StringComparison.OrdinalIgnoreCase))
         {
             var item = GetProperty(root, "item");
             if (item is { ValueKind: JsonValueKind.Object })
@@ -277,12 +287,19 @@ internal sealed class CodexJsonlAccumulator
             throw new InvalidOperationException("Codex CLI did not report a completed turn.");
         }
 
-        if (string.IsNullOrWhiteSpace(_sessionId))
+        // 空のエコーはここで失敗させない。継続時は driver が bind 済み ID を結果にする。
+        return new ParsedCliOutput(_sessionId ?? string.Empty, string.Join("\n", _assistantMessages));
+    }
+
+    private void NoteSession(string? sessionId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
         {
-            throw new InvalidOperationException("Codex CLI did not report a session id.");
+            return;
         }
 
-        return new ParsedCliOutput(_sessionId, string.Join("\n", _assistantMessages));
+        _runLog.BindSession(sessionId, SessionBinding.EarlyStream);
+        _sessionId = sessionId;
     }
 
     private static bool IsUnsupportedPriorityWarning(string? message)

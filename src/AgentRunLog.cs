@@ -18,9 +18,37 @@ public interface IAgentRunLog : IAsyncDisposable, IDisposable
     void WriteProcessLine(string stream, string line);
     void NoteExternalOutput();
     void AttachProcess(IProcessLifetime process);
+    void BindSession(string sessionId, string bindingSource);
+    string? BoundSessionId { get; }
     void WriteCompleted(AgentRunResult result);
     void WriteFailed(Exception exception);
     void WriteCancelled();
+}
+
+/// <summary>
+/// external session identity の確定方法。値は run log の <c>bindingSource</c> にそのまま書く。
+/// </summary>
+public static class SessionBinding
+{
+    public const string Preallocated = "preallocated";
+    public const string EarlyStream = "early_stream";
+    public const string Resume = "resume";
+
+    /// <summary>
+    /// 観測した session ID を bind し、空なら既に bind 済みの ID を返す。
+    /// 別 ID は <see cref="IAgentRunLog.BindSession"/> が <c>session_mismatch</c> にする。
+    /// </summary>
+    public static string Resolve(IAgentRunLog log, string? observedSessionId)
+    {
+        ArgumentNullException.ThrowIfNull(log);
+        if (!string.IsNullOrWhiteSpace(observedSessionId))
+        {
+            log.BindSession(observedSessionId, EarlyStream);
+            return observedSessionId;
+        }
+
+        return log.BoundSessionId ?? string.Empty;
+    }
 }
 
 public interface IAgentRunLogFactory
@@ -170,6 +198,7 @@ internal sealed class AgentRunLog : IAgentRunLog
     private Exception? _backgroundError;
     private bool _disposed;
     private bool _terminalEventPublished;
+    private string? _boundSessionId;
     private string? _fragmentKind;
     private DateTimeOffset _fragmentStartedAt;
     private readonly StringBuilder _fragmentBuffer = new();
@@ -310,6 +339,53 @@ internal sealed class AgentRunLog : IAgentRunLog
         {
             ThrowIfUnavailable();
             _process = process;
+        }
+    }
+
+    public string? BoundSessionId
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _boundSessionId;
+            }
+        }
+    }
+
+    /// <summary>
+    /// session ID が確定した時点で events へ書く。同じ ID は再書き込みしない。別 ID は上書きせず失敗する。
+    /// </summary>
+    public void BindSession(string sessionId, string bindingSource)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(bindingSource);
+        lock (_gate)
+        {
+            ThrowIfUnavailable();
+            if (_boundSessionId is not null)
+            {
+                if (string.Equals(_boundSessionId, sessionId, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                var failure = new InvalidOperationException(
+                    "External session id '" + sessionId + "' does not match the bound session id '" + _boundSessionId + "'.");
+                CliJson.MarkFailure(failure, "session_mismatch");
+                CliJson.TraceException(failure);
+                throw failure;
+            }
+
+            var data = JsonSerializer.SerializeToElement(
+                new SessionBoundPayload(sessionId, bindingSource),
+                AgentJson.Options);
+            WriteEnvelope(
+                "facade",
+                "session_bound",
+                data,
+                "session_bound sessionId=" + sessionId + " source=" + bindingSource);
+            _boundSessionId = sessionId;
         }
     }
 
@@ -762,6 +838,8 @@ internal sealed class AgentRunLog : IAgentRunLog
         string Wrapper,
         bool HasStandardInput,
         long? StandardInputByteCount);
+
+    private sealed record SessionBoundPayload(string SessionId, string BindingSource);
 
     private sealed record StartedPayload(
         string Agent,

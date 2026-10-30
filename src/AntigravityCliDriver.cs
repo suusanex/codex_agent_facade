@@ -25,6 +25,11 @@ public sealed class AntigravityCliDriver
         CancellationToken cancellationToken)
     {
         var arguments = BuildArguments(request);
+        if (!string.IsNullOrWhiteSpace(request.SessionId))
+        {
+            runLog.BindSession(request.SessionId.Trim(), SessionBinding.Resume);
+        }
+
         runLog.WriteStarted(new AgentRunStartedInfo(
             Agent: AgentFacade.AntigravityAgent,
             WorkingDirectory: request.WorkingDirectory,
@@ -74,7 +79,7 @@ public sealed class AntigravityCliDriver
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
-            CliJson.MarkFailure(ex, "internal_error");
+            CliJson.MarkFailureIfMissing(ex, "internal_error");
             throw;
         }
 
@@ -124,7 +129,7 @@ public sealed class AntigravityCliDriver
 
         return new AgentRunResult(
             Agent: AgentFacade.AntigravityAgent,
-            SessionId: parsed.ConversationId,
+            SessionId: SessionBinding.Resolve(runLog, parsed.ConversationId),
             ExitCode: processResult.ExitCode,
             OutputText: parsed.Response,
             RawOutput: processResult.StandardOutput,
@@ -358,10 +363,13 @@ internal sealed class AntigravityStreamAccumulator
 
         if (string.IsNullOrWhiteSpace(_conversationId))
         {
-            throw Fail("output_parse_failed", "Antigravity CLI did not report a conversation id.");
+            // 継続で conversation id が無いのは不一致ではない。新規だけ ID 不足で失敗する。
+            if (string.IsNullOrWhiteSpace(requestedSessionId))
+            {
+                throw Fail("output_parse_failed", "Antigravity CLI did not report a conversation id.");
+            }
         }
-
-        if (!string.IsNullOrWhiteSpace(requestedSessionId)
+        else if (!string.IsNullOrWhiteSpace(requestedSessionId)
             && !string.Equals(requestedSessionId.Trim(), _conversationId, StringComparison.Ordinal))
         {
             throw Fail("session_mismatch", "Antigravity CLI resumed with a different conversation id than requested.");
@@ -378,7 +386,9 @@ internal sealed class AntigravityStreamAccumulator
             return new AntigravityParsedOutput
             {
                 Succeeded = true,
-                ConversationId = _conversationId,
+                ConversationId = string.IsNullOrWhiteSpace(_conversationId)
+                    ? requestedSessionId!.Trim()
+                    : _conversationId,
                 Response = _response,
                 PermissionSoftDenied = _permissionSoftDenied || IsAutoDeniedNotice(_stderr.ToString()),
             };
@@ -410,6 +420,7 @@ internal sealed class AntigravityStreamAccumulator
             return;
         }
 
+        _runLog.BindSession(conversationId, SessionBinding.EarlyStream);
         if (_conversationId is null)
         {
             _conversationId = conversationId;

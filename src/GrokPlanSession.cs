@@ -184,6 +184,8 @@ internal static class GrokPlanSession
                     "internal_error",
                     cancellationToken).ConfigureAwait(false);
                 sessionId = ReadNewSessionId(sessionDocument.RootElement);
+                // ACP の session/new が ID を返すまで事前確定できない。返った時点で永続化する。
+                runLog.BindSession(sessionId, SessionBinding.EarlyStream);
             }
             else
             {
@@ -193,6 +195,7 @@ internal static class GrokPlanSession
                     "internal_error",
                     cancellationToken).ConfigureAwait(false);
                 sessionId = ResolveLoadedSessionId(requestedSessionId, sessionDocument.RootElement);
+                runLog.BindSession(sessionId, SessionBinding.Resume);
             }
 
             using (sessionDocument)

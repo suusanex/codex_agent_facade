@@ -268,7 +268,7 @@ public class GrokInternalCompletionTests
             ""));
         var result = await harness.AwaitRunAsync(run);
         Assert.Equal("natural", result.OutputText);
-        Assert.Equal("22222222-2222-2222-2222-222222222222", result.SessionId);
+        Assert.Equal(SessionId, result.SessionId);
         Assert.Equal(0, result.ExitCode);
         Assert.Null(result.CompletionReason);
         Assert.Null(result.CompletionEvidence);
@@ -359,10 +359,7 @@ public class GrokInternalCompletionTests
         Assert.False(harness.Runner.LastRequest!.Completion!.IsSignaled);
         harness.Runner.CompleteNaturally(new ProcessRunResult(
             0,
-            """
-            {"type":"text","data":"natural"}
-            {"type":"end","sessionId":"22222222-2222-2222-2222-222222222222"}
-            """,
+            "{\"type\":\"text\",\"data\":\"natural\"}\n{\"type\":\"end\",\"sessionId\":\"" + SessionId + "\"}",
             ""));
         var result = await harness.AwaitRunAsync(run);
         Assert.Null(result.CompletionReason);
@@ -1398,7 +1395,7 @@ internal sealed class GrokRescueHarness : IDisposable
         Runner.ProcessLifetime.Id = GrokInternalCompletionTests.Pid;
         Runner.StartedAtClock = () => Time.GetUtcNow();
         Log = new CountingGrokLogReader(LogPath);
-        Driver = new GrokBuildDriver(Runner, Time, Log);
+        Driver = new GrokBuildDriver(Runner, Time, Log, allocateSessionId: static () => GrokInternalCompletionTests.SessionId);
     }
 
     public string Root { get; }

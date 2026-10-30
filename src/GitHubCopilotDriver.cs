@@ -8,10 +8,13 @@ public sealed class GitHubCopilotDriver
 {
     internal static readonly string[] SupportedReasoningEfforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
     private readonly IProcessRunner _processRunner;
+    private readonly Func<string> _allocateSessionId;
 
-    public GitHubCopilotDriver(IProcessRunner processRunner)
+    public GitHubCopilotDriver(IProcessRunner processRunner, Func<string>? allocateSessionId = null)
     {
+        ArgumentNullException.ThrowIfNull(processRunner);
         _processRunner = processRunner;
+        _allocateSessionId = allocateSessionId ?? (() => Guid.NewGuid().ToString("D"));
     }
 
     public async Task<AgentRunResult> RunAsync(
@@ -20,7 +23,10 @@ public sealed class GitHubCopilotDriver
         Action<string>? onStdoutLine,
         CancellationToken cancellationToken)
     {
-        var arguments = BuildArguments(request);
+        var resume = !string.IsNullOrWhiteSpace(request.SessionId);
+        var sessionId = resume ? request.SessionId! : AllocateSessionId();
+        var arguments = BuildArguments(request, resume ? null : sessionId);
+        runLog.BindSession(sessionId, resume ? SessionBinding.Resume : SessionBinding.Preallocated);
         var prompt = ApplyCopilotSkills(request.Prompt, request.Skills);
         runLog.WriteStarted(new AgentRunStartedInfo(
             Agent: AgentFacade.GitHubCopilotAgent,
@@ -68,7 +74,7 @@ public sealed class GitHubCopilotDriver
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
-            CliJson.MarkFailure(ex, "internal_error");
+            CliJson.MarkFailureIfMissing(ex, "internal_error");
             throw;
         }
 
@@ -94,12 +100,12 @@ public sealed class GitHubCopilotDriver
         catch (Exception ex)
         {
             CliJson.TraceException(ex);
-            CliJson.MarkFailure(ex, "output_parse_failed");
+            CliJson.MarkFailureIfMissing(ex, "output_parse_failed");
             throw;
         }
         return new AgentRunResult(
             Agent: AgentFacade.GitHubCopilotAgent,
-            SessionId: parsed.SessionId,
+            SessionId: SessionBinding.Resolve(runLog, parsed.SessionId),
             ExitCode: processResult.ExitCode,
             OutputText: parsed.OutputText,
             OutputKind: parsed.OutputKind,
@@ -109,7 +115,7 @@ public sealed class GitHubCopilotDriver
             TextLogPath: runLog.TextLogPath);
     }
 
-    internal static List<string> BuildArguments(AgentRunRequest request)
+    internal static List<string> BuildArguments(AgentRunRequest request, string? allocatedSessionId = null)
     {
         var arguments = new List<string>
         {
@@ -134,8 +140,37 @@ public sealed class GitHubCopilotDriver
             arguments.Add("--resume");
             arguments.Add(request.SessionId);
         }
+        else if (!string.IsNullOrWhiteSpace(allocatedSessionId))
+        {
+            // v1.0.51 以降の新規 session 指定。--resume とは同時に渡さない。
+            arguments.Add("--session-id");
+            arguments.Add(allocatedSessionId);
+        }
 
         return arguments;
+    }
+
+    private string AllocateSessionId()
+    {
+        string sessionId;
+        try
+        {
+            sessionId = _allocateSessionId();
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            throw;
+        }
+
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            var failure = new InvalidOperationException("Allocated GitHub Copilot session id was empty.");
+            CliJson.TraceException(failure);
+            throw failure;
+        }
+
+        return sessionId;
     }
 
     private static void AppendModelArgument(List<string> arguments, string? model)
@@ -230,21 +265,20 @@ internal sealed class GitHubCopilotStreamAccumulator
         {
             _lastJsonError = ex;
             CliJson.TraceException(ex);
-            _sessionId ??= CliJson.FindCopilotResumeHint(line);
+            NoteSession(CliJson.FindCopilotResumeHint(line));
             _runLog.WriteProcessLine("stdout", line);
             return;
         }
 
         if (root.ValueKind != JsonValueKind.Object)
         {
-            _sessionId ??= CliJson.FindCopilotResumeHint(line);
+            NoteSession(CliJson.FindCopilotResumeHint(line));
             _runLog.WriteProcessLine("stdout", line);
             return;
         }
 
         _jsonLineCount++;
-        _sessionId ??= CliJson.FindExplicitSessionId(root);
-        _sessionId ??= CliJson.FindCopilotResumeHint(line);
+        NoteSession(CliJson.FindExplicitSessionId(root) ?? CliJson.FindCopilotResumeHint(line));
         var type = CliJson.FindFirstString(root, "type") ?? "unknown";
         if (GitHubCopilotOutputParser.IsAssistantTurnStart(type))
         {
@@ -323,6 +357,17 @@ internal sealed class GitHubCopilotStreamAccumulator
             ? "final_response"
             : "assistant_transcript";
         return new ParsedCliOutput(_sessionId ?? string.Empty, output, outputKind);
+    }
+
+    private void NoteSession(string? sessionId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return;
+        }
+
+        _runLog.BindSession(sessionId, SessionBinding.EarlyStream);
+        _sessionId = sessionId;
     }
 
     private void CommitTurn()
