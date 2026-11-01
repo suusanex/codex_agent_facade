@@ -5421,6 +5421,22 @@ public class AgentRunLogTests
         Assert.Equal("done", result.OutputText);
     }
 
+    [Fact]
+    public async Task ThoughtWithApiKeyAssignmentStaysValidJson()
+    {
+        await using var log = (AgentRunLog)TestRunLogs.CreateLog();
+        const string secret = "dummysecret";
+        WriteThoughtEvent(log, " env example JULES_API_KEY=" + secret);
+        var events = TestRunLogs.ReadShared(log.EventsPath);
+        var thought = events.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Single(line => line.Contains("\"type\":\"thought\"", StringComparison.Ordinal));
+        using var document = JsonDocument.Parse(thought);
+        Assert.EndsWith("}", thought, StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, thought, StringComparison.Ordinal);
+        Assert.Contains(SecretRedactor.Replacement, thought, StringComparison.Ordinal);
+        Assert.Equal(JsonValueKind.Object, document.RootElement.ValueKind);
+    }
+
     private static void WriteThoughtEvent(IAgentRunLog log, string data)
     {
         var payload = JsonSerializer.SerializeToElement(new { type = "thought", data });

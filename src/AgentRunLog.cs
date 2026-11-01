@@ -683,7 +683,9 @@ internal sealed class AgentRunLog : IAgentRunLog
         {
             redactedData = SecretRedactor.Redact(data);
             var envelope = new LogEnvelope(ts, RunId, source, type, redactedData);
-            json = SecretRedactor.RedactText(JsonSerializer.Serialize(envelope, AgentJson.Options));
+            // serialize 後の行へ RedactText を掛けると、\S+ が閉じ引用符と括弧まで置換する。
+            // 秘密の置換は直前の Redact が文字列値に対して済ませている。
+            json = JsonSerializer.Serialize(envelope, AgentJson.Options);
         }
         catch (Exception ex)
         {
