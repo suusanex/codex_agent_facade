@@ -2,7 +2,7 @@
 
 この一覧は、relay SKILL の `facade-options` ブロック内 `model:` 行、および MCP `start_agent` の `model` 引数へ渡す **CLI 識別子** を記録する。Codex App / Cursor IDE / GitHub Copilot App など UI 上のモデル名とは文字列が一致しない場合がある。Facade は、Cursor で `reasoning_effort` または `fast` を指定したときを除き、識別子を変換せず指定時だけ各 CLI の `--model` へそのまま渡す。Cursor の選択規則は下の effort / fast 表を参照する。
 
-**スナップショット取得日:** Cursor と GitHub Copilot は 2026-10-06。Grok Build は 2026-10-15。Antigravity は 2026-11-14。Jules に model 識別子は無い。
+**スナップショット取得日:** Cursor は 2026-10-06。Grok Build は 2026-10-15。GitHub Copilot と Antigravity は 2026-11-14。Jules に model 識別子は無い。
 
 ## 使い方
 
@@ -274,37 +274,53 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 
 ## GitHub Copilot CLI
 
-- **CLI バージョン:** `1.0.87`（2026-10-06 の実機は `1.0.92`。この表は 2026-09-26 の `models.list` スナップショットのまま。再取得はしていない）
-- **取得方法:** ログイン済み CLI を `copilot --headless --no-auto-update --stdio` で起動し、JSON-RPC `models.list` を呼び出した
-- **件数:** 24
-- **注意:** 利用可能モデルは Copilot プラン、組織ポリシー、認証アカウントにより変わる。下表は **このスナップショット取得環境で `models.list` が返した一覧** である。CLI 組み込みカタログ (`models.getBuiltInCatalog`) には、現アカウントでは選択できない ID も含まれる。
+- **CLI バージョン:** `1.0.112`
+- **調査日:** 2026-11-14
+- **取得方法:** ログイン済み CLI で `copilot --model` を引数不足として実行し、CLI が出した `[possible values: ...]` を取得した
+- **件数:** 30
+- **注意:** 利用可能モデルは Copilot プラン、組織ポリシー、ロールアウト状態、認証アカウントにより変わる。下表は **この CLI とアカウント環境で `--model` の候補として出た一覧** である。
+- **Fusion:** `fusion` は単一の AI model 名ではない。GitHub Copilot Fusion は prompt ごとに model と実行パターン（Single / Cascade / Critique）を選ぶ runtime router / orchestrator である。effort は Facade の `reasoning_effort` に `standard` / `high` / `max` をそのまま書かず、CLI が受理する値と対象 model の組み合わせを確認する。公式情報: [About GitHub Copilot Fusion](https://docs.github.com/en/copilot/concepts/models/copilot-fusion)
+- **公式カタログとの差:** 2026-11-13 に GA となった `Gemini 4 Hydrogen` は公式資料で Copilot CLI 対応とされるが、今回の `copilot 1.0.112` の候補にはまだ現れなかった。`grok-4.5` は公式サポート一覧には残る一方で今回の CLI 候補にはなかったため、旧スナップショットから削除した。候補に現れない名前を推測で `--model` に足さない。
 
 | CLI 識別子 (`model:` / `--model`) | UI 表示名 |
 | --- | --- |
 | `auto` | Auto |
+| `fusion` | Copilot Fusion |
+| `claude-sonnet-5.5` | Claude Sonnet 5.5 |
 | `claude-sonnet-5` | Claude Sonnet 5 |
+| `claude-fable-5.2` | Claude Fable 5.2 |
 | `claude-fable-5.1` | Claude Fable 5.1 |
 | `claude-fable-5` | Claude Fable 5 |
+| `claude-opus-5.5` | Claude Opus 5.5 |
 | `claude-opus-5` | Claude Opus 5 |
 | `claude-opus-4.8` | Claude Opus 4.8 |
 | `claude-opus-4.8-fast` | Claude Opus 4.8 (fast mode) |
-| `claude-opus-4.7` | Claude Opus 4.7 |
+| `claude-sonnet-4.6` | Claude Sonnet 4.6 |
+| `claude-haiku-5.5` | Claude Haiku 5.5 |
 | `claude-haiku-4.5` | Claude Haiku 4.5 |
+| `gpt-6.1-sol` | GPT-6.1 Sol |
+| `gpt-6.1-terra` | GPT-6.1 Terra |
+| `gpt-6-sol` | GPT-6 Sol |
+| `gpt-6-luna` | GPT-6 Luna |
 | `gpt-6-astra` | GPT-6 Astra |
 | `gpt-5.6-sol` | GPT-5.6 Sol |
 | `gpt-5.6-terra` | GPT-5.6 Terra |
 | `gpt-5.6-luna` | GPT-5.6 Luna |
-| `gpt-5.5` | GPT-5.5 |
-| `gpt-5.4` | GPT-5.4 |
-| `gpt-5.4-mini` | GPT-5.4 mini |
 | `gpt-5.3-codex` | GPT-5.3-Codex |
-| `gpt-5-mini` | GPT-5 mini |
 | `mai-code-1.1-flash` | MAI-Code-1.1-Flash |
-| `grok-4.5` | Grok 4.5 |
-| `kimi-k3` | Kimi K3 |
-| `kimi-k2.7-code` | Kimi K2.7 Code |
-| `grok-4.6` | Grok 4.6 |
+| `gemini-4-carbon` | Gemini 4 Carbon |
+| `gemini-4-argon` | Gemini 4 Argon |
+| `gemini-3.8-flash` | Gemini 3.8 Flash |
 | `grok-4.7` | Grok 4.7 |
+| `grok-4.6` | Grok 4.6 |
+| `kimi-k3` | Kimi K3 |
+
+**新規・更新情報:**
+
+- `fusion`、`claude-fable-5.2`、`gemini-4-carbon` は 2026-10-28 から 2026-11-10 の公式リリースで追加された。
+- `gemini-4-hydrogen` は 2026-11-13 の公式リリース後、段階的 rollout 中である。Copilot CLI 対応が公式に案内されているが、今回の候補一覧にはない。
+- Claude Fable 5 / 5.1 / 5.2 は既定で Anthropic による安全性 classifier 用の data retention が必要で、Enterprise の条件と model policy 設定に依存する。
+- 2026-12-14 に `claude-fable-5`、`claude-haiku-4.5`、`gemini-3.8-flash`、`gemini-4-argon`、`grok-4.6`、`kimi-k3` が廃止予定である（Haiku 4.5 は annual plan の個人契約者を除く）。代替と最新状況は [GitHub Changelog](https://github.blog/changelog/2026-11-13-upcoming-deprecation-of-selected-github-copilot-models-in-december/) と [Supported AI models in GitHub Copilot](https://docs.github.com/en/copilot/reference/ai-models/supported-models) を確認する。
 
 ## Grok Build CLI
 
@@ -418,7 +434,7 @@ Jules に model 識別子は無い。`model`、`reasoning_effort`、`fast`、`ru
 ## 更新方法
 
 1. **Cursor:** `cursor-agent models` を実行し、`識別子 - 表示名` 形式の出力を反映する。CLI は一部行を特殊な区切り文字で連結するため、連結された行は区切ってから表へ変換する。識別子は CLI 出力から得た値だけを使い、推測で補わない。
-2. **GitHub Copilot:** 対話 CLI で `/model` を実行するか、上記 headless stdio 経路で `models.list` を取得する。公式ドキュメント: [GitHub Copilot CLI programmatic reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference)
+2. **GitHub Copilot:** 対話 CLI で `/model` を実行し、script では `copilot --model` の引数不足エラーに出る `possible values` を `copilot --no-auto-update --model` から取得する。候補が実際に指定可能かは model policy と rollout に左右されるため、公式の [Supported AI models](https://docs.github.com/en/copilot/reference/ai-models/supported-models) と [GitHub Copilot CLI programmatic reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference) も確認する。
 3. **Grok Build:** `grok models` を実行し、CLI が出した識別子だけを反映する。未ログイン時のカタログと、ログイン後に実際に選べる集合は分けて記録する。
 4. **Antigravity:** `agy models` を実行し、CLI が出した slug だけを反映する。effort の受理範囲は公開資料と、その model が拒否した実エラーを分けて記録する。推測で token を足さない。
 5. このファイルのスナップショット日、CLI バージョン、表本体を更新する。
