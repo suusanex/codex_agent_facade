@@ -211,7 +211,7 @@ public sealed class GrokBuildDriver
 
         if (!watch.Confirmed)
         {
-            watch.EnsureNaturalExitCompleted(processResult.ExitCode);
+            watch.EnsureBackgroundWorkCompleted(processResult.ExitCode);
         }
 
         ParsedCliOutput parsed;
@@ -224,6 +224,11 @@ public sealed class GrokBuildDriver
             CliJson.TraceException(ex);
             CliJson.MarkFailureIfMissing(ex, "output_parse_failed");
             throw;
+        }
+
+        if (!watch.Confirmed)
+        {
+            watch.EnsureNaturalExitCompleted(processResult.ExitCode);
         }
 
         return new AgentRunResult(
@@ -1001,12 +1006,20 @@ internal sealed class GrokStreamAccumulator
             return true;
         }
 
-        if (string.Equals(toolName, "spawn_subagent", StringComparison.OrdinalIgnoreCase)
-            && TryGetObjectProperty(root, "rawInput", out var rawInput)
-            && TryGetPropertyIgnoreCase(rawInput, "background", out var bgElement)
-            && bgElement.ValueKind == JsonValueKind.True)
+        if (TryGetObjectProperty(root, "rawInput", out var rawInput))
         {
-            return true;
+            if (TryGetPropertyIgnoreCase(rawInput, "run_in_background", out var bgRunElement)
+                && bgRunElement.ValueKind == JsonValueKind.True)
+            {
+                return true;
+            }
+
+            if (string.Equals(toolName, "spawn_subagent", StringComparison.OrdinalIgnoreCase)
+                && TryGetPropertyIgnoreCase(rawInput, "background", out var bgElement)
+                && bgElement.ValueKind == JsonValueKind.True)
+            {
+                return true;
+            }
         }
 
         return false;
@@ -1192,6 +1205,7 @@ internal sealed class GrokCompletionWatch
     private bool _stopped;
     private bool _logReadFailed;
     private bool _loggedBackgroundWaitSuppression;
+    private bool _inspectedAtNaturalExit;
 
     public GrokCompletionWatch(
         TimeProvider timeProvider,
@@ -1270,18 +1284,9 @@ internal sealed class GrokCompletionWatch
         return WatchAsync(process.Id, launchedAt, cancellationToken);
     }
 
-    public void EnsureNaturalExitCompleted(int? exitCode)
+    public void EnsureBackgroundWorkCompleted(int? exitCode)
     {
-        var snapshot = _accumulator.GetWatchSnapshot(_correlation.WokenTaskIds);
-        if (!_stopped
-            && _cursor is not null
-            && _processId > 0
-            && !_correlation.IsAbandoned)
-        {
-            ObservePendingLogLines(_processId, _launchedAt, stopOnFailure: false);
-            snapshot = _accumulator.GetWatchSnapshot(_correlation.WokenTaskIds);
-        }
-
+        var snapshot = CaptureSnapshotAtNaturalExit();
         if (snapshot.HasPendingBackgroundWork
             || _correlation.HasUnresolvedMonitorWait(snapshot.ResolvedMonitorToolCalls))
         {
@@ -1292,6 +1297,12 @@ internal sealed class GrokCompletionWatch
                 $"Grok exited before background work completed: {detail}",
                 exitCode);
         }
+    }
+
+    public void EnsureNaturalExitCompleted(int? exitCode)
+    {
+        EnsureBackgroundWorkCompleted(exitCode);
+        var snapshot = CaptureSnapshotAtNaturalExit();
 
         if (snapshot.HasSeenEndEvent)
         {
@@ -1305,17 +1316,17 @@ internal sealed class GrokCompletionWatch
             }
 
             if (_correlation.HasObservedEvents
-                && _correlation.SawMonitorOrWakeAdmission
-                && (_correlation.IsPromptInFlight
-                    || _correlation.IsWakePending
-                    || _correlation.PromptFailed
-                    || _correlation.IsAbandoned
-                    || _correlation.HasIndeterminateState))
+                && (_correlation.IsWakePending
+                    || (_correlation.SawMonitorOrWakeAdmission
+                        && (_correlation.IsPromptInFlight
+                            || _correlation.PromptFailed
+                            || _correlation.IsAbandoned
+                            || _correlation.HasIndeterminateState))))
             {
                 var detail = _correlation.IndeterminateReason
                     ?? _correlation.AbandonReason
                     ?? (_correlation.IsWakePending
-                        ? "background wake admission was still pending"
+                        ? "queued or background wake prompt remained pending"
                         : _correlation.IsPromptInFlight
                             ? "a prompt turn was still in flight"
                             : "internal prompt failed");
@@ -1328,7 +1339,7 @@ internal sealed class GrokCompletionWatch
             return;
         }
 
-        // type:"end" を受信しない自然終了で、内部状態が失敗・継続中・不整合・読み取り不能なら completed に偽装しない。
+        // type:"end" を受信しない自然終了で、内部完了証拠が無い・失敗・継続中・不整合・読み取り不能なら completed に偽装しない。
         if (_logReadFailed
             || snapshot.HasInFlightForegroundTool
             || _correlation.HasIndeterminateState
@@ -1336,8 +1347,7 @@ internal sealed class GrokCompletionWatch
             || _correlation.PromptFailed
             || _correlation.IsPromptInFlight
             || _correlation.IsWakePending
-            || (_correlation.HasObservedEvents
-                && _correlation.TryGetConfirmedCompletion(snapshot.ResolvedMonitorToolCalls) is null))
+            || _correlation.TryGetConfirmedCompletion(snapshot.ResolvedMonitorToolCalls) is null)
         {
             var reason = _correlation.IndeterminateReason
                 ?? _correlation.AbandonReason
@@ -1564,6 +1574,23 @@ internal sealed class GrokCompletionWatch
         }
 
         return true;
+    }
+
+    private GrokStreamSnapshot CaptureSnapshotAtNaturalExit()
+    {
+        if (!_inspectedAtNaturalExit)
+        {
+            _inspectedAtNaturalExit = true;
+            if (!_stopped
+                && _cursor is not null
+                && _processId > 0
+                && !_correlation.IsAbandoned)
+            {
+                ObservePendingLogLines(_processId, _launchedAt, stopOnFailure: false);
+            }
+        }
+
+        return _accumulator.GetWatchSnapshot(_correlation.WokenTaskIds);
     }
 
     private static void ThrowMarkedFailure(string kind, string message, int? exitCode)

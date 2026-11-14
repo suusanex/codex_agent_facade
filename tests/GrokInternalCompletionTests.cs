@@ -780,6 +780,7 @@ public class GrokInternalCompletionTests
     [InlineData("unresolved-monitor-no-end")]
     [InlineData("unresolved-monitor-with-end")]
     [InlineData("background-bash-no-end")]
+    [InlineData("background-bash-in-flight-with-end")]
     [InlineData("spawn-subagent-bg-with-end")]
     [InlineData("ambiguous-monitor-without-id")]
     [InlineData("monitor-timed-out-false-only")]
@@ -806,6 +807,10 @@ public class GrokInternalCompletionTests
                 harness.Runner.EmitStdout("""{"type":"tool_call","toolCallId":"call_b1","toolName":"Bash","kind":"execute","rawInput":{"command":"sleep 10","run_in_background":true}}""");
                 harness.Runner.EmitStdout("""{"type":"tool_call_update","toolCallId":"call_b1","status":"completed","rawOutput":{"type":"BackgroundTaskStarted","taskId":"bg_bash"}}""");
                 break;
+            case "background-bash-in-flight-with-end":
+                harness.Runner.EmitStdout("""{"type":"tool_call","toolCallId":"call_b1","toolName":"Bash","kind":"execute","rawInput":{"command":"sleep 10","run_in_background":true}}""");
+                harness.Runner.CompleteNaturally(NaturalResult());
+                break;
             case "spawn-subagent-bg-with-end":
                 harness.Runner.EmitStdout("""{"type":"tool_call","toolCallId":"call_s1","toolName":"spawn_subagent","kind":"other","rawInput":{"background":true}}""");
                 harness.Runner.EmitStdout("""{"type":"tool_call_update","toolCallId":"call_s1","status":"completed","rawOutput":{"text":"subagent_id: sub_1"}}""");
@@ -823,7 +828,7 @@ public class GrokInternalCompletionTests
                 throw new ArgumentOutOfRangeException(nameof(caseKind), caseKind, null);
         }
 
-        if (caseKind is not ("unresolved-monitor-with-end" or "spawn-subagent-bg-with-end"))
+        if (caseKind is not ("unresolved-monitor-with-end" or "spawn-subagent-bg-with-end" or "background-bash-in-flight-with-end"))
         {
             harness.Runner.CompleteNaturally(new ProcessRunResult(0, string.Empty, string.Empty));
         }
@@ -839,7 +844,9 @@ public class GrokInternalCompletionTests
     [InlineData("no-end-prompt-in-flight")]
     [InlineData("no-end-wake-pending")]
     [InlineData("no-end-unreadable-log")]
+    [InlineData("no-end-empty-log")]
     [InlineData("end-with-wake-conflict")]
+    [InlineData("end-with-queued-followup")]
     public async Task NaturalExitWithIndeterminateStateFailsAndPreservesSessionId(string caseKind)
     {
         using var harness = new GrokRescueHarness();
@@ -870,6 +877,7 @@ public class GrokInternalCompletionTests
                     + "\n");
                 break;
             case "no-end-unreadable-log":
+            case "no-end-empty-log":
                 break;
             case "end-with-wake-conflict":
                 harness.Append(
@@ -878,11 +886,18 @@ public class GrokInternalCompletionTests
                     + "\n");
                 harness.Runner.CompleteNaturally(NaturalResult());
                 break;
+            case "end-with-queued-followup":
+                harness.Append(
+                    MeasuredLog()
+                    + Shell("2026-10-18T23:00:00.000Z", "shell.prompt.queued", Pid, SessionId, Version, new { prompt_id = "followup-prompt-1" })
+                    + "\n");
+                harness.Runner.CompleteNaturally(NaturalResult());
+                break;
             default:
                 throw new ArgumentOutOfRangeException(nameof(caseKind), caseKind, null);
         }
 
-        if (caseKind != "end-with-wake-conflict")
+        if (caseKind is not ("end-with-wake-conflict" or "end-with-queued-followup"))
         {
             harness.Runner.CompleteNaturally(new ProcessRunResult(0, string.Empty, string.Empty));
         }
@@ -1191,6 +1206,32 @@ public class GrokPromptCorrelationTests
 
         Assert.False(correlation.HasUnresolvedMonitorWait());
         Assert.Equal("task-completed-bg2", correlation.Success?.PromptId);
+    }
+
+    [Fact]
+    public void WakeAdmissionWithoutTaskIdDoesNotResolvePendingMonitor()
+    {
+        var lines = new List<string>(Lines(GrokInternalCompletionTests.MeasuredLog(includeDone: false)))
+        {
+            """{"ts":"2026-10-18T22:51:28.000Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.tool.exec_done","ctx":{"tool_name":"monitor","tool_call_id":"m1","success":true}}""",
+            """{"ts":"2026-10-18T22:51:29.000Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.handle_prompt.done","ctx":{"prompt_id":"ca33ed71-5085-487c-98d4-360d23921419","ok":true}}""",
+            """{"ts":"2026-10-18T23:00:00.000Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.task_wake.bridge_admission","ctx":{"admitted":true,"enqueued":true,"monitor":true}}""",
+        };
+
+        var correlation = Observe(lines);
+        Assert.False(correlation.IsAbandoned, correlation.AbandonReason);
+        Assert.True(correlation.HasUnresolvedMonitorWait());
+        Assert.Null(correlation.Success);
+    }
+
+    [Fact]
+    public void DuplicateFailedDoneDoesNotFlipConfirmedCompletion()
+    {
+        var lines = Lines(GrokInternalCompletionTests.MeasuredLog(ok: true)).ToList();
+        lines.Add("""{"ts":"2026-10-19T01:00:00.000Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.handle_prompt.done","ctx":{"prompt_id":"ca33ed71-5085-487c-98d4-360d23921419","ok":false}}""");
+        var correlation = Observe(lines);
+        Assert.False(correlation.IsAbandoned, correlation.AbandonReason);
+        Assert.Equal(GrokInternalCompletionTests.PromptId, correlation.Success?.PromptId);
     }
 
     private static GrokCompletionEvidence Accept(IEnumerable<string> lines)
