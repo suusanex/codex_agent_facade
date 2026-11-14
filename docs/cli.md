@@ -62,7 +62,7 @@ CLIに `CODEX_AGENT_FACADE_TOKEN` は不要である。tokenは常駐MCPホス�
 {"status":"failed","error":"agent run failed. See the CLI diagnostic log for details: C:\\Users\\example\\.codex-agent-facade\\cli.4242.log","failure":{"kind":"non_zero_exit","summary":"GitHub Copilot CLI exited with code 7. stderr: fake agent failed","exitCode":7,"runId":"...","eventsLogPath":"...","textLogPath":"..."}}
 ```
 
-`failure.kind` はMCPと同じ `process_start_failed`、`non_zero_exit`、`output_parse_failed`、`option_not_applied`、`session_mismatch`、`facade_interrupted`、`internal_error` に加え、CLIでは `invalid_request`、`timeout`、`cancelled` を使う。`summary` は改行を除いた最大512文字で、secret redactionを通す。失敗時の `summary` には、MCPと同様に短いstderr抜粋が含まれることがある。stream全文はrun log側である。
+`failure.kind` はMCPと同じ `process_start_failed`、`non_zero_exit`、`output_parse_failed`、`option_not_applied`、`session_mismatch`、`facade_interrupted`、`internal_error`（Grok Build の `grok_incomplete_background_wait`、`grok_internal_state_indeterminate` を含む）に加え、CLIでは `invalid_request`、`timeout`、`cancelled` を使う。`summary` は改行を除いた最大512文字で、secret redactionを通す。失敗時の `summary` には、MCPと同様に短いstderr抜粋が含まれることがある。stream全文はrun log側である。
 
 PowerShellからの起動例:
 

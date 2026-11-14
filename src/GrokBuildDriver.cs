@@ -209,6 +209,11 @@ public sealed class GrokBuildDriver
             throw failure;
         }
 
+        if (!watch.Confirmed)
+        {
+            watch.EnsureNaturalExitCompleted(processResult.ExitCode);
+        }
+
         ParsedCliOutput parsed;
         try
         {
@@ -492,23 +497,104 @@ public sealed class GrokBuildDriver
     }
 }
 
+internal readonly record struct GrokStreamSnapshot(
+    bool HasPendingBackgroundWork,
+    bool HasInFlightForegroundTool,
+    bool HasSeenEndEvent,
+    string? EndStopReason,
+    string? PendingDescription,
+    IReadOnlySet<string> ResolvedMonitorToolCalls);
+
 /// <summary>
 /// streaming-json の NDJSON を 1 パスで蓄積する。終了後に stdout 全体は再 parse しない。
 /// </summary>
 internal sealed class GrokStreamAccumulator
 {
+    private static readonly HashSet<string> TerminalToolStatuses = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "completed",
+        "failed",
+        "error",
+        "cancelled",
+        "canceled",
+        "killed",
+        "timed_out",
+        "stopped",
+    };
+
+    private static readonly HashSet<string> ActiveToolStatuses = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "pending",
+        "running",
+        "in_progress",
+        "queued",
+    };
+
+    private sealed record ToolInvocationState(string? ToolName, string? Kind, bool IsBackgroundCapable);
+
     private readonly IAgentRunLog _runLog;
     private readonly StringBuilder _text = new();
     private readonly object _gate = new();
+    private readonly Dictionary<string, ToolInvocationState> _inFlightToolCalls = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _activeBackgroundTasks = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _monitorToolCallToTaskId = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _backgroundTaskToMonitorToolCall = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _resolvedMonitorToolCalls = new(StringComparer.Ordinal);
     private string _sessionId = string.Empty;
     private int _jsonEventCount;
     private bool _sawNonWhitespace;
     private bool _frozen;
     private string? _frozenText;
+    private bool _hasAmbiguousBackgroundWait;
+    private string? _ambiguousReason;
+    private bool _hasSeenEndEvent;
+    private string? _endStopReason;
 
     public GrokStreamAccumulator(IAgentRunLog runLog)
     {
         _runLog = runLog;
+    }
+
+    public GrokStreamSnapshot GetWatchSnapshot(IReadOnlySet<string>? externalCompletedTaskIds = null)
+    {
+        lock (_gate)
+        {
+            var remainingActiveTasks = 0;
+            foreach (var taskId in _activeBackgroundTasks)
+            {
+                if (externalCompletedTaskIds is null || !externalCompletedTaskIds.Contains(taskId))
+                {
+                    remainingActiveTasks++;
+                }
+            }
+
+            var hasInFlightBackgroundTool = false;
+            var hasInFlightForegroundTool = false;
+            foreach (var invocation in _inFlightToolCalls.Values)
+            {
+                if (invocation.IsBackgroundCapable)
+                {
+                    hasInFlightBackgroundTool = true;
+                }
+                else
+                {
+                    hasInFlightForegroundTool = true;
+                }
+            }
+
+            var hasPendingBackground = remainingActiveTasks > 0
+                || hasInFlightBackgroundTool
+                || _hasAmbiguousBackgroundWait;
+            return new GrokStreamSnapshot(
+                HasPendingBackgroundWork: hasPendingBackground,
+                HasInFlightForegroundTool: hasInFlightForegroundTool,
+                HasSeenEndEvent: _hasSeenEndEvent,
+                EndStopReason: _endStopReason,
+                PendingDescription: BuildPendingDescription(remainingActiveTasks),
+                ResolvedMonitorToolCalls: _resolvedMonitorToolCalls.Count == 0
+                    ? new HashSet<string>(StringComparer.Ordinal)
+                    : new HashSet<string>(_resolvedMonitorToolCalls, StringComparer.Ordinal));
+        }
     }
 
     public bool OnStdoutLine(string line)
@@ -547,6 +633,9 @@ internal sealed class GrokStreamAccumulator
                 _runLog.BindSession(observedSessionId, SessionBinding.EarlyStream);
                 _sessionId = observedSessionId;
             }
+
+            TrackStreamLifecycle(type, root);
+
             if (string.Equals(type, "thought", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(type, "text", StringComparison.OrdinalIgnoreCase))
             {
@@ -571,6 +660,442 @@ internal sealed class GrokStreamAccumulator
 
             return IsProgress(type, root);
         }
+    }
+
+    private void TrackStreamLifecycle(string type, JsonElement root)
+    {
+        if (string.Equals(type, "end", StringComparison.OrdinalIgnoreCase))
+        {
+            _hasSeenEndEvent = true;
+            _endStopReason = ReadStringProperty(root, "stopReason", "stop_reason");
+            // end を受信しても未解決のバックグラウンド待機や曖昧状態は消去しない。
+            return;
+        }
+
+        if (string.Equals(type, "tool_call", StringComparison.OrdinalIgnoreCase))
+        {
+            ObserveToolCall(root);
+            return;
+        }
+
+        if (string.Equals(type, "tool_call_update", StringComparison.OrdinalIgnoreCase))
+        {
+            ObserveToolCallUpdate(root);
+        }
+    }
+
+    private void ObserveToolCall(JsonElement root)
+    {
+        var toolCallId = ReadStringProperty(root, "toolCallId", "tool_call_id");
+        var toolName = ReadStringProperty(root, "toolName", "tool_name", "title");
+        var kind = ReadStringProperty(root, "kind");
+        var status = ReadStringProperty(root, "status");
+        var isBgCapable = IsBackgroundCapableTool(toolName, kind, root);
+
+        if (IsTerminalStatus(status))
+        {
+            if (isBgCapable && string.Equals(status, "completed", StringComparison.OrdinalIgnoreCase))
+            {
+                if (TryGetObjectProperty(root, "rawOutput", out _))
+                {
+                    ObserveToolCallUpdate(root, new ToolInvocationState(toolName, kind, true));
+                }
+                else
+                {
+                    MarkAmbiguous("Background-capable tool_call closed cleanly without registration metadata.");
+                }
+            }
+
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(toolCallId))
+        {
+            if (isBgCapable)
+            {
+                MarkAmbiguous("Background-capable tool_call omitted toolCallId.");
+            }
+
+            return;
+        }
+
+        _inFlightToolCalls[toolCallId] = new ToolInvocationState(toolName, kind, isBgCapable);
+    }
+
+    private void ObserveToolCallUpdate(JsonElement root, ToolInvocationState? inlineInvocation = null)
+    {
+        var toolCallId = ReadStringProperty(root, "toolCallId", "tool_call_id");
+        var status = ReadStringProperty(root, "status");
+        var hasRawOutput = TryGetObjectProperty(root, "rawOutput", out var rawOutput);
+        var rawType = hasRawOutput ? ReadStringProperty(rawOutput, "type") : null;
+
+        ToolInvocationState? inFlight = inlineInvocation;
+        if (!string.IsNullOrWhiteSpace(toolCallId) && _inFlightToolCalls.TryGetValue(toolCallId, out var existing))
+        {
+            inFlight ??= existing;
+        }
+
+        if (string.Equals(rawType, "Monitor", StringComparison.OrdinalIgnoreCase))
+        {
+            RemoveInFlight(toolCallId);
+            var taskId = ReadStringProperty(rawOutput, "taskId", "task_id") ?? toolCallId;
+            if (string.IsNullOrWhiteSpace(taskId))
+            {
+                MarkAmbiguous("Monitor registration update omitted taskId and toolCallId.");
+                return;
+            }
+
+            if (HasMonitorCompletionEvidence(status, hasRawOutput, rawOutput))
+            {
+                ResolveTaskId(taskId);
+                if (!string.IsNullOrWhiteSpace(toolCallId))
+                {
+                    _resolvedMonitorToolCalls.Add(toolCallId);
+                }
+
+                return;
+            }
+
+            _activeBackgroundTasks.Add(taskId);
+            if (!string.IsNullOrWhiteSpace(toolCallId))
+            {
+                _monitorToolCallToTaskId[toolCallId] = taskId;
+                _backgroundTaskToMonitorToolCall[taskId] = toolCallId;
+            }
+
+            return;
+        }
+
+        if (string.Equals(rawType, "BackgroundTaskStarted", StringComparison.OrdinalIgnoreCase))
+        {
+            RemoveInFlight(toolCallId);
+            var bgStatus = ReadStringProperty(rawOutput, "status");
+            if (!IsTerminalStatus(bgStatus))
+            {
+                var bgTaskId = ReadStringProperty(rawOutput, "task_id", "taskId");
+                if (string.IsNullOrWhiteSpace(bgTaskId))
+                {
+                    MarkAmbiguous("BackgroundTaskStarted omitted task_id.");
+                }
+                else
+                {
+                    _activeBackgroundTasks.Add(bgTaskId);
+                }
+            }
+
+            return;
+        }
+
+        if (string.Equals(rawType, "TaskOutput", StringComparison.OrdinalIgnoreCase))
+        {
+            RemoveInFlight(toolCallId);
+            HandleTaskOutputUpdate(rawOutput);
+            return;
+        }
+
+        if (string.Equals(rawType, "KillTask", StringComparison.OrdinalIgnoreCase))
+        {
+            RemoveInFlight(toolCallId);
+            HandleKillTaskUpdate(rawOutput);
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(toolCallId)
+            && _monitorToolCallToTaskId.TryGetValue(toolCallId, out var linkedTaskId))
+        {
+            if (HasMonitorCompletionEvidence(status, hasRawOutput, rawOutput))
+            {
+                RemoveInFlight(toolCallId);
+                ResolveTaskId(linkedTaskId);
+                _resolvedMonitorToolCalls.Add(toolCallId);
+            }
+            else if (IsTerminalStatus(status))
+            {
+                RemoveInFlight(toolCallId);
+                MarkAmbiguous("Registered monitor emitted a terminal status without completion evidence.");
+            }
+
+            return;
+        }
+
+        if (inFlight is not null
+            && IsSpawnSubagentBackground(inFlight, hasRawOutput, rawOutput)
+            && string.Equals(status, "completed", StringComparison.OrdinalIgnoreCase))
+        {
+            RemoveInFlight(toolCallId);
+            var subagentId = hasRawOutput ? TryExtractSubagentId(rawOutput) : null;
+            if (string.IsNullOrWhiteSpace(subagentId))
+            {
+                MarkAmbiguous("Background spawn_subagent completed without parseable subagent_id.");
+            }
+            else
+            {
+                _activeBackgroundTasks.Add(subagentId);
+            }
+
+            return;
+        }
+
+        if (IsTerminalStatus(status))
+        {
+            RemoveInFlight(toolCallId);
+            if (inFlight is { IsBackgroundCapable: true }
+                && string.Equals(status, "completed", StringComparison.OrdinalIgnoreCase))
+            {
+                MarkAmbiguous($"Background-capable tool '{inFlight.ToolName ?? inFlight.Kind}' completed without task metadata.");
+            }
+
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(toolCallId) && !_inFlightToolCalls.ContainsKey(toolCallId))
+        {
+            _inFlightToolCalls[toolCallId] = inFlight ?? new ToolInvocationState(null, null, false);
+        }
+    }
+
+    private void HandleTaskOutputUpdate(JsonElement rawOutput)
+    {
+        if (!TryGetObjectProperty(rawOutput, "Result", out var result))
+        {
+            MarkAmbiguous("TaskOutput update did not include a Result object.");
+            return;
+        }
+
+        var taskId = ReadStringProperty(result, "task_id", "taskId");
+        var taskStatus = ReadStringProperty(result, "status");
+        if (string.IsNullOrWhiteSpace(taskId))
+        {
+            if (!IsTerminalStatus(taskStatus))
+            {
+                MarkAmbiguous("TaskOutput update omitted task_id for a non-terminal result.");
+            }
+
+            return;
+        }
+
+        if (IsTerminalStatus(taskStatus))
+        {
+            ResolveTaskId(taskId);
+            return;
+        }
+
+        _activeBackgroundTasks.Add(taskId);
+    }
+
+    private void HandleKillTaskUpdate(JsonElement rawOutput)
+    {
+        if (!TryGetObjectProperty(rawOutput, "Result", out var result))
+        {
+            return;
+        }
+
+        var taskId = ReadStringProperty(result, "task_id", "taskId");
+        var outcome = ReadStringProperty(result, "outcome");
+        var status = ReadStringProperty(result, "status");
+        if (!string.IsNullOrWhiteSpace(taskId)
+            && (string.Equals(outcome, "killed", StringComparison.OrdinalIgnoreCase)
+                || IsTerminalStatus(status)))
+        {
+            ResolveTaskId(taskId);
+        }
+    }
+
+    private static bool HasMonitorCompletionEvidence(string? status, bool hasRawOutput, JsonElement rawOutput)
+    {
+        if (!hasRawOutput)
+        {
+            return IsTerminalStatus(status);
+        }
+
+        // rawOutput がある場合、親 tool_call_update.status == "completed" は登録応答や途中通知でも出るため、rawOutput 本体で判定する。
+        var rawStatus = ReadStringProperty(rawOutput, "status");
+        if (IsActiveStatus(rawStatus))
+        {
+            return false;
+        }
+
+        if (IsTerminalStatus(rawStatus))
+        {
+            return true;
+        }
+
+        // exit_code が数値で返っている場合、または timed_out が true の場合は終了を確定できる。
+        // timed_out: false 単独では終了証明にならない。
+        if ((TryGetPropertyIgnoreCase(rawOutput, "exit_code", out var exitCodeElement)
+                || TryGetPropertyIgnoreCase(rawOutput, "exitCode", out exitCodeElement))
+            && exitCodeElement.ValueKind == JsonValueKind.Number)
+        {
+            return true;
+        }
+
+        if (TryGetPropertyIgnoreCase(rawOutput, "timed_out", out var timedOutElement)
+            && timedOutElement.ValueKind == JsonValueKind.True)
+        {
+            return true;
+        }
+
+        return TryGetObjectProperty(rawOutput, "Result", out var nestedResult)
+            && IsTerminalStatus(ReadStringProperty(nestedResult, "status"));
+    }
+
+    private void ResolveTaskId(string taskId)
+    {
+        _activeBackgroundTasks.Remove(taskId);
+        if (_backgroundTaskToMonitorToolCall.TryGetValue(taskId, out var monitorToolCallId))
+        {
+            _resolvedMonitorToolCalls.Add(monitorToolCallId);
+        }
+    }
+
+    private void RemoveInFlight(string? toolCallId)
+    {
+        if (!string.IsNullOrWhiteSpace(toolCallId))
+        {
+            _inFlightToolCalls.Remove(toolCallId);
+        }
+    }
+
+    private void MarkAmbiguous(string reason)
+    {
+        _hasAmbiguousBackgroundWait = true;
+        _ambiguousReason ??= reason;
+    }
+
+    private string? BuildPendingDescription(int remainingActiveTasks)
+    {
+        var parts = new List<string>();
+        if (remainingActiveTasks > 0)
+        {
+            parts.Add($"activeTasks={remainingActiveTasks}");
+        }
+
+        if (_inFlightToolCalls.Count > 0)
+        {
+            parts.Add($"inFlightTools={_inFlightToolCalls.Count}");
+        }
+
+        if (_hasAmbiguousBackgroundWait)
+        {
+            parts.Add("ambiguous=" + (_ambiguousReason ?? "unspecified"));
+        }
+
+        return parts.Count == 0 ? null : string.Join("; ", parts);
+    }
+
+    private static bool IsTerminalStatus(string? status)
+    {
+        return !string.IsNullOrWhiteSpace(status) && TerminalToolStatuses.Contains(status);
+    }
+
+    private static bool IsActiveStatus(string? status)
+    {
+        return !string.IsNullOrWhiteSpace(status) && ActiveToolStatuses.Contains(status);
+    }
+
+    private static bool IsBackgroundCapableTool(string? toolName, string? kind, JsonElement root)
+    {
+        if (string.Equals(toolName, "monitor", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(kind, "monitor", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (string.Equals(toolName, "spawn_subagent", StringComparison.OrdinalIgnoreCase)
+            && TryGetObjectProperty(root, "rawInput", out var rawInput)
+            && TryGetPropertyIgnoreCase(rawInput, "background", out var bgElement)
+            && bgElement.ValueKind == JsonValueKind.True)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsSpawnSubagentBackground(
+        ToolInvocationState invocation,
+        bool hasRawOutput,
+        JsonElement rawOutput)
+    {
+        if (string.Equals(invocation.ToolName, "spawn_subagent", StringComparison.OrdinalIgnoreCase)
+            && invocation.IsBackgroundCapable)
+        {
+            return true;
+        }
+
+        if (!hasRawOutput)
+        {
+            return false;
+        }
+
+        var text = ReadStringProperty(rawOutput, "text");
+        return !string.IsNullOrWhiteSpace(text)
+            && text.Contains("subagent_id:", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? TryExtractSubagentId(JsonElement rawOutput)
+    {
+        var direct = ReadStringProperty(rawOutput, "subagent_id", "task_id", "taskId");
+        if (!string.IsNullOrWhiteSpace(direct))
+        {
+            return direct;
+        }
+
+        var text = ReadStringProperty(rawOutput, "text");
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        const string marker = "subagent_id:";
+        var idx = text.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (idx < 0)
+        {
+            return null;
+        }
+
+        var span = text.AsSpan(idx + marker.Length).TrimStart();
+        var end = 0;
+        while (end < span.Length && !char.IsWhiteSpace(span[end]))
+        {
+            end++;
+        }
+
+        return end > 0 ? span[..end].ToString() : null;
+    }
+
+    private static string? ReadStringProperty(JsonElement element, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            if (TryGetPropertyIgnoreCase(element, name, out var value)
+                && value.ValueKind == JsonValueKind.String)
+            {
+                var s = value.GetString();
+                if (!string.IsNullOrWhiteSpace(s))
+                {
+                    return s;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static bool TryGetObjectProperty(JsonElement element, string name, out JsonElement value)
+    {
+        if (TryGetPropertyIgnoreCase(element, name, out value) && value.ValueKind == JsonValueKind.Object)
+        {
+            return true;
+        }
+
+        value = default;
+        return false;
+    }
+
+    private static bool TryGetPropertyIgnoreCase(JsonElement element, string name, out JsonElement value)
+    {
+        return CliJson.TryGetPropertyIgnoreCase(element, name, out value);
     }
 
     public string? FreezeIfNonEmpty()
@@ -661,8 +1186,12 @@ internal sealed class GrokCompletionWatch
     private readonly string? _reasoningEffort;
     private GrokLogCursor? _cursor;
     private IProcessLifetime? _process;
+    private int _processId;
+    private DateTimeOffset _launchedAt;
     private int _confirmed;
     private bool _stopped;
+    private bool _logReadFailed;
+    private bool _loggedBackgroundWaitSuppression;
 
     public GrokCompletionWatch(
         TimeProvider timeProvider,
@@ -721,6 +1250,8 @@ internal sealed class GrokCompletionWatch
         // 監視を始めた時刻だと、その前に出た今回の session 記録を過去分として落とす。
         var launchedAt = process.StartedAt;
         _process = process;
+        _processId = process.Id;
+        _launchedAt = launchedAt;
         _activity.Start(launchedAt);
         if (process.Id <= 0)
         {
@@ -730,12 +1261,102 @@ internal sealed class GrokCompletionWatch
 
         if (cursor.Abandoned)
         {
+            _logReadFailed = true;
             Stop("Grok internal log could not be read before launch: " + (cursor.Problem ?? "unreadable"));
             return Task.CompletedTask;
         }
 
         _cursor = cursor;
         return WatchAsync(process.Id, launchedAt, cancellationToken);
+    }
+
+    public void EnsureNaturalExitCompleted(int? exitCode)
+    {
+        var snapshot = _accumulator.GetWatchSnapshot(_correlation.WokenTaskIds);
+        if (!_stopped
+            && _cursor is not null
+            && _processId > 0
+            && !_correlation.IsAbandoned)
+        {
+            ObservePendingLogLines(_processId, _launchedAt, stopOnFailure: false);
+            snapshot = _accumulator.GetWatchSnapshot(_correlation.WokenTaskIds);
+        }
+
+        if (snapshot.HasPendingBackgroundWork
+            || _correlation.HasUnresolvedMonitorWait(snapshot.ResolvedMonitorToolCalls))
+        {
+            var detail = snapshot.PendingDescription
+                ?? "unresolved monitor background wait remained active when Grok exited.";
+            ThrowMarkedFailure(
+                "grok_incomplete_background_wait",
+                $"Grok exited before background work completed: {detail}",
+                exitCode);
+        }
+
+        if (snapshot.HasSeenEndEvent)
+        {
+            if (!string.IsNullOrWhiteSpace(snapshot.EndStopReason)
+                && !string.Equals(snapshot.EndStopReason, "end_turn", StringComparison.OrdinalIgnoreCase))
+            {
+                ThrowMarkedFailure(
+                    "grok_internal_state_indeterminate",
+                    $"Grok stream ended with non-terminal stopReason '{snapshot.EndStopReason}'.",
+                    exitCode);
+            }
+
+            if (_correlation.HasObservedEvents
+                && _correlation.SawMonitorOrWakeAdmission
+                && (_correlation.IsPromptInFlight
+                    || _correlation.IsWakePending
+                    || _correlation.PromptFailed
+                    || _correlation.IsAbandoned
+                    || _correlation.HasIndeterminateState))
+            {
+                var detail = _correlation.IndeterminateReason
+                    ?? _correlation.AbandonReason
+                    ?? (_correlation.IsWakePending
+                        ? "background wake admission was still pending"
+                        : _correlation.IsPromptInFlight
+                            ? "a prompt turn was still in flight"
+                            : "internal prompt failed");
+                ThrowMarkedFailure(
+                    "grok_internal_state_indeterminate",
+                    $"Grok stream ended while internal monitor/wake state remained inconsistent: {detail}",
+                    exitCode);
+            }
+
+            return;
+        }
+
+        // type:"end" を受信しない自然終了で、内部状態が失敗・継続中・不整合・読み取り不能なら completed に偽装しない。
+        if (_logReadFailed
+            || snapshot.HasInFlightForegroundTool
+            || _correlation.HasIndeterminateState
+            || _correlation.IsAbandoned
+            || _correlation.PromptFailed
+            || _correlation.IsPromptInFlight
+            || _correlation.IsWakePending
+            || (_correlation.HasObservedEvents
+                && _correlation.TryGetConfirmedCompletion(snapshot.ResolvedMonitorToolCalls) is null))
+        {
+            var reason = _correlation.IndeterminateReason
+                ?? _correlation.AbandonReason
+                ?? (_logReadFailed
+                    ? "Grok internal log could not be read reliably."
+                    : snapshot.HasInFlightForegroundTool
+                        ? snapshot.PendingDescription ?? "Grok exited while a tool call was still in flight."
+                        : _correlation.PromptFailed
+                        ? "Grok internal prompt failed."
+                        : _correlation.IsWakePending
+                            ? "Grok background wake admission remained pending."
+                            : _correlation.IsPromptInFlight
+                                ? "Grok internal prompt was still in flight."
+                                : "Grok exited without terminal end event and without confirmed completion.");
+            ThrowMarkedFailure(
+                "grok_internal_state_indeterminate",
+                $"Grok exited without confirmed completion: {reason}",
+                exitCode);
+        }
     }
 
     private async Task WatchAsync(int processId, DateTimeOffset launchedAt, CancellationToken cancellationToken)
@@ -827,36 +1448,45 @@ internal sealed class GrokCompletionWatch
             return true;
         }
 
-        GrokLogRead read;
-        try
+        if (!ObservePendingLogLines(processId, launchedAt, stopOnFailure: true))
         {
-            read = _logReader.Read(_cursor);
-        }
-        catch (Exception ex)
-        {
-            CliJson.TraceException(ex);
-            Stop("Grok internal log read failed.");
             return true;
         }
 
-        _cursor = read.Cursor;
-        if (read.Cursor.Abandoned)
+        var snapshot = _accumulator.GetWatchSnapshot(_correlation.WokenTaskIds);
+        if (_correlation.HasIndeterminateState)
         {
-            Stop("Grok internal log correlation stopped: " + (read.Cursor.Problem ?? "unreadable"));
+            Stop(
+                "Grok internal completion recovery suppressed due to indeterminate internal state: "
+                + (_correlation.IndeterminateReason ?? "indeterminate"));
             return true;
         }
 
-        foreach (var line in read.Lines)
+        if (snapshot.HasPendingBackgroundWork
+            || snapshot.HasInFlightForegroundTool
+            || _correlation.HasUnresolvedMonitorWait(snapshot.ResolvedMonitorToolCalls)
+            || _correlation.IsPromptInFlight
+            || _correlation.IsWakePending)
         {
-            _correlation.Observe(line, processId, launchedAt, _resumeSessionId);
-            if (_correlation.IsAbandoned)
+            if (!_loggedBackgroundWaitSuppression)
             {
-                Stop("Grok internal log correlation stopped: " + (_correlation.AbandonReason ?? "inconsistent"));
-                return true;
+                _loggedBackgroundWaitSuppression = true;
+                var waitReason = snapshot.HasPendingBackgroundWork || snapshot.HasInFlightForegroundTool
+                    ? snapshot.PendingDescription ?? "active tool or background task"
+                    : _correlation.HasUnresolvedMonitorWait(snapshot.ResolvedMonitorToolCalls)
+                        ? "unresolved monitor wait"
+                        : _correlation.IsWakePending
+                            ? "pending background wake admission"
+                            : "active prompt in flight";
+                FacadeLog.Information(
+                    $"Grok internal completion recovery is suppressed while waiting for background work: {waitReason}.");
             }
+
+            return false;
         }
 
-        var success = _correlation.Success;
+        _loggedBackgroundWaitSuppression = false;
+        var success = _correlation.TryGetConfirmedCompletion(snapshot.ResolvedMonitorToolCalls);
         if (success is null || cancellationToken.IsCancellationRequested)
         {
             return success is not null;
@@ -881,6 +1511,67 @@ internal sealed class GrokCompletionWatch
         Evidence = success;
         _signal.Notify();
         return true;
+    }
+
+    private bool ObservePendingLogLines(int processId, DateTimeOffset launchedAt, bool stopOnFailure)
+    {
+        if (_cursor is null)
+        {
+            return false;
+        }
+
+        GrokLogRead read;
+        try
+        {
+            read = _logReader.Read(_cursor);
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            _logReadFailed = true;
+            if (stopOnFailure)
+            {
+                Stop("Grok internal log read failed.");
+            }
+
+            return false;
+        }
+
+        _cursor = read.Cursor;
+        if (read.Cursor.Abandoned)
+        {
+            _logReadFailed = true;
+            if (stopOnFailure)
+            {
+                Stop("Grok internal log correlation stopped: " + (read.Cursor.Problem ?? "unreadable"));
+            }
+
+            return false;
+        }
+
+        foreach (var line in read.Lines)
+        {
+            _correlation.Observe(line, processId, launchedAt, _resumeSessionId);
+            if (_correlation.IsAbandoned)
+            {
+                if (stopOnFailure)
+                {
+                    Stop("Grok internal log correlation stopped: " + (_correlation.AbandonReason ?? "inconsistent"));
+                }
+
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static void ThrowMarkedFailure(string kind, string message, int? exitCode)
+    {
+        var failure = new InvalidOperationException(message);
+        CliJson.MarkFailure(failure, kind, message, exitCode);
+        CliJson.TraceException(failure);
+        throw failure;
     }
 
     private static Task DelayUntil(TimeProvider timeProvider, TimeSpan delay, CancellationToken cancellationToken)

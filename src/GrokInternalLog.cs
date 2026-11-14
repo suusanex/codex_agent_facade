@@ -234,28 +234,105 @@ internal sealed class FileGrokUnifiedLogReader : IGrokUnifiedLogReader
 }
 
 /// <summary>
-/// 今回の起動以降の shell ログから、最初の prompt の内部成功だけを確定する。
+/// 今回の起動以降の shell ログから、プロンプト実行・バックグラウンド monitor 待機・再起床の状態を確定する。
 /// Grok は起動 PID・session・prompt を結び付ける公開 API を出していない。
-/// 実測形式（src、pid、ts、sid、msg、ctx.prompt_id、ctx.ok）の一致だけを見る。
+/// 実測形式（src、pid、ts、sid、msg、ctx）の一致だけを見る。
 /// 作業ディレクトリはジャンクションで表記が分かれるため照合しない。
 /// </summary>
 internal sealed class GrokPromptCorrelation
 {
+    private readonly HashSet<string> _pendingMonitorCallIds = new(StringComparer.Ordinal);
+    private readonly Queue<string> _pendingMonitorCallOrder = new();
+    private readonly HashSet<string> _wokenTaskIds = new(StringComparer.Ordinal);
     private bool _abandoned;
     private string? _abandonReason;
+    private string? _indeterminateReason;
     private bool _sessionBound;
     private string? _sessionId;
     private string? _version;
-    private string? _promptId;
-    private DateTimeOffset _promptStartedAt;
+    private string? _activePromptId;
+    private string? _lastFinishedPromptId;
+    private DateTimeOffset _activePromptStartedAt;
     private bool _promptFailed;
+    private bool _isWakePending;
+    private bool _sawMonitorOrWakeAdmission;
+    private int _observedEventCount;
+    private int _anonymousPendingMonitorCount;
     private GrokCompletionEvidence? _success;
+    private GrokCompletionEvidence? _latestDoneEvidence;
 
     public bool IsAbandoned => _abandoned;
 
     public string? AbandonReason => _abandonReason;
 
-    public GrokCompletionEvidence? Success => _abandoned ? null : _success;
+    public bool HasIndeterminateState => _indeterminateReason is not null;
+
+    public string? IndeterminateReason => _indeterminateReason;
+
+    public bool HasObservedEvents => _observedEventCount > 0;
+
+    public bool IsPromptInFlight => _activePromptId is not null;
+
+    public bool IsWakePending => _isWakePending;
+
+    public bool PromptFailed => _promptFailed;
+
+    public bool SawMonitorOrWakeAdmission => _sawMonitorOrWakeAdmission;
+
+    public IReadOnlySet<string> WokenTaskIds => _wokenTaskIds;
+
+    public GrokCompletionEvidence? Success => TryGetConfirmedCompletion();
+
+    /// <summary>
+    /// 進行中ターン・wake待ち・未解消 monitor・異常状態がすべて無い場合のみ、直近完了ターンの完了証拠を返す。
+    /// stdout 側で終了・Kill を確認できた monitor toolCallId は除外して整合させる。
+    /// </summary>
+    public GrokCompletionEvidence? TryGetConfirmedCompletion(IReadOnlySet<string>? resolvedMonitorToolCallIds = null)
+    {
+        if (_abandoned
+            || _indeterminateReason is not null
+            || _promptFailed
+            || _activePromptId is not null
+            || _isWakePending
+            || HasUnresolvedMonitorWait(resolvedMonitorToolCallIds))
+        {
+            return null;
+        }
+
+        return _success ?? _latestDoneEvidence;
+    }
+
+    /// <summary>
+    /// 内部ログ上で未解消の monitor 実行が残っているかを返す。
+    /// stdout 側で終了・Kill を確認できた toolCallId は除外して二重待機を防ぐ。
+    /// </summary>
+    public bool HasUnresolvedMonitorWait(IReadOnlySet<string>? resolvedMonitorToolCallIds = null)
+    {
+        if (_anonymousPendingMonitorCount > 0)
+        {
+            return true;
+        }
+
+        if (_pendingMonitorCallIds.Count == 0)
+        {
+            return false;
+        }
+
+        if (resolvedMonitorToolCallIds is null || resolvedMonitorToolCallIds.Count == 0)
+        {
+            return true;
+        }
+
+        foreach (var callId in _pendingMonitorCallIds)
+        {
+            if (!resolvedMonitorToolCallIds.Contains(callId))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     public void Observe(string line, int processId, DateTimeOffset launchedAt, string? resumeSessionId)
     {
@@ -302,10 +379,42 @@ internal sealed class GrokPromptCorrelation
             return;
         }
 
+        _observedEventCount++;
+
         if (string.Equals(message, "session created", StringComparison.Ordinal)
             || string.Equals(message, "session loaded", StringComparison.Ordinal))
         {
             ObserveSession(root, timestamp, message, resumeSessionId);
+            return;
+        }
+
+        if (string.Equals(message, "shell.tool.exec_done", StringComparison.Ordinal))
+        {
+            ObserveToolExecDone(root);
+            return;
+        }
+
+        if (string.Equals(message, "shell.task_wake.bridge_admission", StringComparison.Ordinal))
+        {
+            ObserveTaskWakeBridgeAdmission(root);
+            return;
+        }
+
+        if (string.Equals(message, "shell.task_wake.actor_admission", StringComparison.Ordinal))
+        {
+            ObserveTaskWakeActorAdmission(root);
+            return;
+        }
+
+        if (string.Equals(message, "shell.task_wake.suppressed", StringComparison.Ordinal))
+        {
+            ObserveTaskWakeSuppressed(root);
+            return;
+        }
+
+        if (string.Equals(message, "shell.prompt.queued", StringComparison.Ordinal))
+        {
+            ObservePromptQueued(root);
             return;
         }
 
@@ -354,6 +463,147 @@ internal sealed class GrokPromptCorrelation
         _ = timestamp;
     }
 
+    private void ObserveToolExecDone(JsonElement root)
+    {
+        if (!ValidateBoundSessionIfPresent(root))
+        {
+            return;
+        }
+
+        if (!TryGetProperty(root, "ctx", out var context) || context.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        var toolName = ReadOptionalString(context, "tool_name");
+        if (!string.Equals(toolName, "monitor", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var succeeded = TryReadBoolean(context, "success", out var flag)
+            ? flag
+            : string.Equals(ReadOptionalString(context, "outcome"), "success", StringComparison.OrdinalIgnoreCase);
+        if (!succeeded)
+        {
+            return;
+        }
+
+        _sawMonitorOrWakeAdmission = true;
+        var toolCallId = ReadOptionalString(context, "tool_call_id");
+        if (!string.IsNullOrWhiteSpace(toolCallId))
+        {
+            if (_pendingMonitorCallIds.Add(toolCallId))
+            {
+                _pendingMonitorCallOrder.Enqueue(toolCallId);
+            }
+        }
+        else
+        {
+            _anonymousPendingMonitorCount++;
+        }
+    }
+
+    private void ObserveTaskWakeBridgeAdmission(JsonElement root)
+    {
+        if (!ValidateBoundSessionIfPresent(root))
+        {
+            return;
+        }
+
+        if (!TryGetProperty(root, "ctx", out var context) || context.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        var admitted = TryReadBoolean(context, "admitted", out var a) && a;
+        var enqueued = TryReadBoolean(context, "enqueued", out var e) && e;
+        var isMonitor = TryReadBoolean(context, "monitor", out var m) && m;
+        var taskId = ReadOptionalString(context, "task_id");
+
+        if (isMonitor && (admitted || enqueued) && TryMarkWokenTask(taskId))
+        {
+            ResolveOnePendingMonitor();
+        }
+
+        if (admitted || enqueued)
+        {
+            _sawMonitorOrWakeAdmission = true;
+            _isWakePending = true;
+            _success = null;
+            _latestDoneEvidence = null;
+        }
+    }
+
+    private void ObserveTaskWakeActorAdmission(JsonElement root)
+    {
+        if (!ValidateBoundSessionIfPresent(root))
+        {
+            return;
+        }
+
+        if (!TryGetProperty(root, "ctx", out var context) || context.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        if (TryReadBoolean(context, "admitted", out var admitted) && admitted)
+        {
+            _sawMonitorOrWakeAdmission = true;
+            _isWakePending = true;
+            _success = null;
+            _latestDoneEvidence = null;
+        }
+    }
+
+    private void ObserveTaskWakeSuppressed(JsonElement root)
+    {
+        if (!ValidateBoundSessionIfPresent(root))
+        {
+            return;
+        }
+
+        if (!TryGetProperty(root, "ctx", out var context) || context.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        if (TryReadBoolean(context, "explicitly_killed", out var killed) && killed)
+        {
+            var taskId = ReadOptionalString(context, "task_id");
+            if (TryMarkWokenTask(taskId))
+            {
+                ResolveOnePendingMonitor();
+            }
+        }
+    }
+
+    private void ObservePromptQueued(JsonElement root)
+    {
+        if (!_sessionBound || !ValidateBoundSessionIfPresent(root))
+        {
+            return;
+        }
+
+        if (!TryGetProperty(root, "ctx", out var context) || context.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        var queuedPromptId = ReadOptionalString(context, "prompt_id");
+        if (string.IsNullOrWhiteSpace(queuedPromptId))
+        {
+            return;
+        }
+
+        if (!string.Equals(queuedPromptId, _activePromptId, StringComparison.Ordinal))
+        {
+            _isWakePending = true;
+            _success = null;
+            _latestDoneEvidence = null;
+        }
+    }
+
     private void ObserveStart(JsonElement root, DateTimeOffset timestamp)
     {
         if (!_sessionBound || _sessionId is null)
@@ -380,23 +630,41 @@ internal sealed class GrokPromptCorrelation
             return;
         }
 
-        if (_promptId is null)
+        if (_activePromptId is not null)
         {
-            _promptId = promptId;
-            _promptStartedAt = timestamp;
-            _version ??= version;
+            if (string.Equals(_activePromptId, promptId, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            Abandon("Grok internal log started another prompt before the target prompt completed.");
             return;
         }
 
-        if (_success is null)
+        // 前ターンが閉じ終わった後の再起床・継続ターン。直前ターンの完了証拠は一旦無効化して最新ターンを追う。
+        _success = null;
+        _latestDoneEvidence = null;
+        _isWakePending = false;
+        _lastFinishedPromptId = null;
+        _activePromptId = promptId;
+        _activePromptStartedAt = timestamp;
+        _version ??= version;
+
+        const string wakePrefix = "task-completed-";
+        if (promptId.StartsWith(wakePrefix, StringComparison.Ordinal))
         {
-            Abandon("Grok internal log started another prompt before the target prompt completed.");
+            _sawMonitorOrWakeAdmission = true;
+            var taskId = promptId[wakePrefix.Length..];
+            if (TryMarkWokenTask(taskId))
+            {
+                ResolveOnePendingMonitor();
+            }
         }
     }
 
     private void ObserveDone(JsonElement root, DateTimeOffset timestamp, int processId)
     {
-        if (_promptId is null || _sessionId is null)
+        if (_sessionId is null || (_activePromptId is null && _lastFinishedPromptId is null))
         {
             Abandon("Grok internal log recorded a prompt completion before the prompt start.");
             return;
@@ -404,22 +672,45 @@ internal sealed class GrokPromptCorrelation
 
         if (!TryReadDone(root, out var sessionId, out var promptId, out var version, out var ok))
         {
+            MarkIndeterminate("Grok internal log prompt completion did not include the expected identifiers or boolean ok.");
             Abandon("Grok internal log prompt completion did not include a boolean ok.");
             return;
         }
 
-        if (!string.Equals(sessionId, _sessionId, StringComparison.Ordinal)
-            || !string.Equals(promptId, _promptId, StringComparison.Ordinal))
+        if (_activePromptId is null)
         {
-            if (_success is null)
+            if (string.Equals(sessionId, _sessionId, StringComparison.Ordinal)
+                && string.Equals(promptId, _lastFinishedPromptId, StringComparison.Ordinal))
             {
-                Abandon("Grok internal log completion identifiers did not match the target prompt.");
+                if (_version is not null && !string.Equals(_version, version, StringComparison.Ordinal))
+                {
+                    Abandon("Grok internal log version changed while correlating the prompt.");
+                    return;
+                }
+
+                if (!ok)
+                {
+                    _promptFailed = true;
+                    _success = null;
+                    _latestDoneEvidence = null;
+                }
+
+                // 直前に確定した同一 prompt_id への重複 done（ok=false 後の ok=true 等）では状態を反転させない。
+                return;
             }
 
+            Abandon("Grok internal log completion identifiers did not match the target prompt.");
             return;
         }
 
-        if (timestamp < _promptStartedAt)
+        if (!string.Equals(sessionId, _sessionId, StringComparison.Ordinal)
+            || !string.Equals(promptId, _activePromptId, StringComparison.Ordinal))
+        {
+            Abandon("Grok internal log completion identifiers did not match the target prompt.");
+            return;
+        }
+
+        if (timestamp < _activePromptStartedAt)
         {
             Abandon("Grok internal log prompt completion preceded its start.");
             return;
@@ -431,19 +722,106 @@ internal sealed class GrokPromptCorrelation
             return;
         }
 
+        _lastFinishedPromptId = _activePromptId;
+        _activePromptId = null;
+
         if (!ok)
         {
             _promptFailed = true;
+            _success = null;
+            _latestDoneEvidence = null;
             return;
         }
 
-        if (_promptFailed || _success is not null)
+        if (_promptFailed)
         {
             return;
         }
 
         _version ??= version;
-        _success = new GrokCompletionEvidence(processId, sessionId, promptId, timestamp, version);
+        var evidence = new GrokCompletionEvidence(processId, sessionId, promptId, timestamp, version);
+        _latestDoneEvidence = evidence;
+
+        // monitor 待機または再起床待ちが残っている段階の prompt.done はターン区切りであり、全体完了にはしない。
+        if (_anonymousPendingMonitorCount > 0 || _pendingMonitorCallIds.Count > 0 || _isWakePending)
+        {
+            _success = null;
+            return;
+        }
+
+        _success = evidence;
+    }
+
+    private bool ValidateBoundSessionIfPresent(JsonElement root)
+    {
+        if (!_sessionBound || _sessionId is null)
+        {
+            return true;
+        }
+
+        var sid = ReadOptionalString(root, "sid");
+        if (!string.IsNullOrWhiteSpace(sid) && !string.Equals(sid, _sessionId, StringComparison.Ordinal))
+        {
+            Abandon("Grok internal log event session did not match the bound session.");
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool TryMarkWokenTask(string? taskId)
+    {
+        if (string.IsNullOrWhiteSpace(taskId))
+        {
+            return true;
+        }
+
+        return _wokenTaskIds.Add(taskId);
+    }
+
+    private void ResolveOnePendingMonitor()
+    {
+        if (_anonymousPendingMonitorCount > 0)
+        {
+            _anonymousPendingMonitorCount--;
+            return;
+        }
+
+        while (_pendingMonitorCallOrder.Count > 0)
+        {
+            var next = _pendingMonitorCallOrder.Dequeue();
+            if (_pendingMonitorCallIds.Remove(next))
+            {
+                return;
+            }
+        }
+    }
+
+    private void MarkIndeterminate(string reason)
+    {
+        _indeterminateReason ??= reason;
+        _success = null;
+        _latestDoneEvidence = null;
+    }
+
+    private static string? ReadOptionalString(JsonElement element, string propertyName)
+    {
+        return TryGetProperty(element, propertyName, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+    }
+
+    private static bool TryReadBoolean(JsonElement element, string propertyName, out bool result)
+    {
+        result = false;
+        if (!TryGetProperty(element, propertyName, out var value)
+            || value.ValueKind is not JsonValueKind.True and not JsonValueKind.False)
+        {
+            return false;
+        }
+
+        result = value.GetBoolean();
+        return true;
     }
 
     private static bool TryReadEnvelope(
@@ -594,5 +972,6 @@ internal sealed class GrokPromptCorrelation
         _abandoned = true;
         _abandonReason = reason;
         _success = null;
+        _latestDoneEvidence = null;
     }
 }

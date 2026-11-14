@@ -661,6 +661,350 @@ public class GrokInternalCompletionTests
         };
     }
 
+    [Fact]
+    public async Task MonitorWaitWithTurn1DoneAnd5MinuteSilenceDoesNotRescueAndCompletesAfterTurn2End()
+    {
+        using var harness = new GrokRescueHarness();
+        var run = harness.Start(Request());
+        await harness.StartedAsync();
+        harness.Runner.EmitStdout("""{"type":"text","data":"turn1 "}""");
+        harness.Runner.EmitStdout("""{"type":"tool_call","toolCallId":"call_m1","toolName":"Monitor","kind":"think"}""");
+        harness.Runner.EmitStdout("""{"type":"tool_call_update","toolCallId":"call_m1","status":"completed","rawOutput":{"type":"Monitor","taskId":"bg1","status":"monitoring","command":"sleep 3"}}""");
+        harness.Append(
+            MeasuredLog(includeDone: false)
+            + Shell("2026-10-18T22:51:28.000Z", "shell.tool.exec_done", Pid, SessionId, Version, new { tool_name = "monitor", tool_call_id = "call_m1", success = true })
+            + "\n"
+            + DoneLine()
+            + "\n");
+
+        // Turn 1 完了後に 5 分以上無音でも monitor が未解消の間は強制終了・早期回収しない。
+        await harness.AdvanceUntilReadAsync(run, minimumReads: 3);
+        Assert.False(run.IsCompleted);
+        Assert.False(harness.Runner.LastRequest!.Completion!.IsSignaled);
+
+        // Monitor 完了 → Turn 2 wake → 自然終了 (end)
+        harness.Runner.EmitStdout("""{"type":"tool_call_update","toolCallId":"call_out1","status":"completed","rawOutput":{"type":"TaskOutput","Result":{"task_id":"bg1","status":"completed","exitCode":0}}}""");
+        harness.Append(
+            Shell("2026-10-18T23:00:00.000Z", "shell.task_wake.bridge_admission", Pid, SessionId, Version, new { admitted = true, enqueued = true, monitor = true, task_id = "bg1" })
+            + "\n"
+            + Shell("2026-10-18T23:00:00.100Z", "shell.handle_prompt.start", Pid, SessionId, Version, new { prompt_id = "task-completed-bg1", block_count = 1 })
+            + "\n"
+            + DoneLine("2026-10-18T23:00:02.000Z", Pid, SessionId, "task-completed-bg1", Version, ok: true)
+            + "\n");
+        harness.Runner.EmitStdout("""{"type":"text","data":"turn2 done"}""");
+        harness.Runner.EmitStdout("""{"type":"end","stopReason":"end_turn","sessionId":"01a15136-771a-7363-924b-9e5bb063b27b"}""");
+        harness.Runner.CompleteNaturally(new ProcessRunResult(0, string.Empty, string.Empty));
+
+        var result = await harness.AwaitRunAsync(run);
+        Assert.Equal(0, result.ExitCode);
+        Assert.Null(result.CompletionReason);
+        Assert.Null(result.CompletionEvidence);
+        Assert.Equal("turn1 turn2 done", result.OutputText);
+        Assert.Null(result.ProcessTermination);
+    }
+
+    [Fact]
+    public async Task MultiTurnWakePostTurn2HangRescuesTurn2WhenAllMonitorsResolved()
+    {
+        using var harness = new GrokRescueHarness();
+        var run = harness.Start(Request());
+        await harness.StartedAsync();
+        harness.Runner.EmitStdout("""{"type":"text","data":"turn1 "}""");
+        harness.Runner.EmitStdout("""{"type":"tool_call","toolCallId":"call_m1","toolName":"Monitor","kind":"think"}""");
+        harness.Runner.EmitStdout("""{"type":"tool_call_update","toolCallId":"call_m1","status":"completed","rawOutput":{"type":"Monitor","taskId":"bg1","status":"monitoring"}}""");
+        harness.Append(
+            MeasuredLog(includeDone: false)
+            + Shell("2026-10-18T22:51:28.000Z", "shell.tool.exec_done", Pid, SessionId, Version, new { tool_name = "monitor", tool_call_id = "call_m1", success = true })
+            + "\n"
+            + DoneLine()
+            + "\n");
+
+        await harness.AdvanceUntilReadAsync(run, minimumReads: 2);
+        Assert.False(run.IsCompleted);
+
+        // Turn 2 で monitor が解消し、Turn 2 自体の完了後に end 無しでハングする場合は Turn 2 を回収する。
+        harness.Runner.EmitStdout("""{"type":"text","data":"turn2 body"}""");
+        harness.Append(
+            Shell("2026-10-18T23:00:00.000Z", "shell.task_wake.bridge_admission", Pid, SessionId, Version, new { admitted = true, enqueued = true, monitor = true, task_id = "bg1" })
+            + "\n"
+            + Shell("2026-10-18T23:00:00.100Z", "shell.handle_prompt.start", Pid, SessionId, Version, new { prompt_id = "task-completed-bg1", block_count = 1 })
+            + "\n"
+            + DoneLine("2026-10-18T23:00:02.000Z", Pid, SessionId, "task-completed-bg1", Version, ok: true)
+            + "\n");
+
+        await harness.AdvanceUntilReadAsync(run, minimumReads: harness.Log.Reads + 1);
+        var result = await harness.AwaitRunAsync(run);
+        Assert.Equal(GrokBuildDriver.InternalPromptDoneReason, result.CompletionReason);
+        Assert.Equal("task-completed-bg1", result.CompletionEvidence?.PromptId);
+        Assert.Equal("turn1 turn2 body", result.OutputText);
+        Assert.NotNull(result.ProcessTermination);
+    }
+
+    [Theory]
+    [InlineData("task-output")]
+    [InlineData("kill-task")]
+    [InlineData("monitor-timed-out-true")]
+    [InlineData("monitor-exit-code")]
+    public async Task ResolvedBackgroundWorkBeforeTurn1DonePreservesIssue35HangRescue(string resolutionKind)
+    {
+        using var harness = new GrokRescueHarness();
+        var run = harness.Start(Request());
+        await harness.StartedAsync();
+        harness.Runner.EmitStdout("""{"type":"text","data":"report"}""");
+        harness.Runner.EmitStdout("""{"type":"tool_call","toolCallId":"call_m1","toolName":"Monitor","kind":"think"}""");
+        harness.Runner.EmitStdout("""{"type":"tool_call_update","toolCallId":"call_m1","status":"completed","rawOutput":{"type":"Monitor","taskId":"bg1","status":"monitoring"}}""");
+        var followUp = resolutionKind switch
+        {
+            "task-output" => """{"type":"tool_call_update","toolCallId":"call_out1","status":"completed","rawOutput":{"type":"TaskOutput","Result":{"task_id":"bg1","status":"completed","exitCode":0}}}""",
+            "kill-task" => """{"type":"tool_call_update","toolCallId":"call_kill1","status":"completed","rawOutput":{"type":"KillTask","Result":{"task_id":"bg1","outcome":"killed"}}}""",
+            "monitor-timed-out-true" => """{"type":"tool_call_update","toolCallId":"call_m1","status":"completed","rawOutput":{"type":"Monitor","taskId":"bg1","timed_out":true}}""",
+            "monitor-exit-code" => """{"type":"tool_call_update","toolCallId":"call_m1","status":"completed","rawOutput":{"type":"Monitor","taskId":"bg1","timed_out":false,"exit_code":0}}""",
+            _ => throw new ArgumentOutOfRangeException(nameof(resolutionKind), resolutionKind, null),
+        };
+        harness.Runner.EmitStdout(followUp);
+        harness.Append(
+            MeasuredLog(includeDone: false)
+            + Shell("2026-10-18T22:51:28.000Z", "shell.tool.exec_done", Pid, SessionId, Version, new { tool_name = "monitor", tool_call_id = "call_m1", success = true })
+            + "\n"
+            + DoneLine()
+            + "\n");
+
+        harness.Time.Advance(GrokBuildDriver.IdleBeforeLogCheck);
+        var result = await harness.AwaitRunAsync(run);
+        Assert.Equal(GrokBuildDriver.InternalPromptDoneReason, result.CompletionReason);
+        Assert.Equal(PromptId, result.CompletionEvidence?.PromptId);
+        Assert.NotNull(result.ProcessTermination);
+    }
+
+    [Theory]
+    [InlineData("unresolved-monitor-no-end")]
+    [InlineData("unresolved-monitor-with-end")]
+    [InlineData("background-bash-no-end")]
+    [InlineData("spawn-subagent-bg-with-end")]
+    [InlineData("ambiguous-monitor-without-id")]
+    [InlineData("monitor-timed-out-false-only")]
+    public async Task PrematureExitWithUnresolvedBackgroundWorkFailsAndPreservesSessionId(string caseKind)
+    {
+        using var harness = new GrokRescueHarness();
+        await using var runLog = TestRunLogs.CreateLog(harness.Time);
+        var run = harness.Driver.RunAsync(Request(), runLog, onStdoutLine: null, CancellationToken.None);
+        await harness.StartedAsync();
+        harness.Runner.EmitStdout("""{"type":"text","data":"partial"}""");
+
+        switch (caseKind)
+        {
+            case "unresolved-monitor-no-end":
+                harness.Runner.EmitStdout("""{"type":"tool_call","toolCallId":"call_m1","toolName":"Monitor","kind":"think"}""");
+                harness.Runner.EmitStdout("""{"type":"tool_call_update","toolCallId":"call_m1","status":"completed","rawOutput":{"type":"Monitor","taskId":"bg1","status":"monitoring"}}""");
+                break;
+            case "unresolved-monitor-with-end":
+                harness.Runner.EmitStdout("""{"type":"tool_call","toolCallId":"call_m1","toolName":"Monitor","kind":"think"}""");
+                harness.Runner.EmitStdout("""{"type":"tool_call_update","toolCallId":"call_m1","status":"completed","rawOutput":{"type":"Monitor","taskId":"bg1","status":"monitoring"}}""");
+                harness.Runner.CompleteNaturally(NaturalResult());
+                break;
+            case "background-bash-no-end":
+                harness.Runner.EmitStdout("""{"type":"tool_call","toolCallId":"call_b1","toolName":"Bash","kind":"execute","rawInput":{"command":"sleep 10","run_in_background":true}}""");
+                harness.Runner.EmitStdout("""{"type":"tool_call_update","toolCallId":"call_b1","status":"completed","rawOutput":{"type":"BackgroundTaskStarted","taskId":"bg_bash"}}""");
+                break;
+            case "spawn-subagent-bg-with-end":
+                harness.Runner.EmitStdout("""{"type":"tool_call","toolCallId":"call_s1","toolName":"spawn_subagent","kind":"other","rawInput":{"background":true}}""");
+                harness.Runner.EmitStdout("""{"type":"tool_call_update","toolCallId":"call_s1","status":"completed","rawOutput":{"text":"subagent_id: sub_1"}}""");
+                harness.Runner.CompleteNaturally(NaturalResult());
+                break;
+            case "ambiguous-monitor-without-id":
+                harness.Runner.EmitStdout("""{"type":"tool_call","toolName":"Monitor","kind":"think"}""");
+                break;
+            case "monitor-timed-out-false-only":
+                harness.Runner.EmitStdout("""{"type":"tool_call","toolCallId":"call_m1","toolName":"Monitor","kind":"think"}""");
+                harness.Runner.EmitStdout("""{"type":"tool_call_update","toolCallId":"call_m1","status":"completed","rawOutput":{"type":"Monitor","taskId":"bg1","status":"monitoring"}}""");
+                harness.Runner.EmitStdout("""{"type":"tool_call_update","toolCallId":"call_m1","status":"completed","rawOutput":{"type":"Monitor","taskId":"bg1","timed_out":false}}""");
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(caseKind), caseKind, null);
+        }
+
+        if (caseKind is not ("unresolved-monitor-with-end" or "spawn-subagent-bg-with-end"))
+        {
+            harness.Runner.CompleteNaturally(new ProcessRunResult(0, string.Empty, string.Empty));
+        }
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(async () => await run.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal("grok_incomplete_background_wait", failure.Data[CliJson.FailureKindKey]);
+        Assert.Equal(SessionId, runLog.BoundSessionId);
+    }
+
+    [Theory]
+    [InlineData("non-terminal-stop-reason")]
+    [InlineData("no-end-prompt-failed")]
+    [InlineData("no-end-prompt-in-flight")]
+    [InlineData("no-end-wake-pending")]
+    [InlineData("no-end-unreadable-log")]
+    [InlineData("end-with-wake-conflict")]
+    public async Task NaturalExitWithIndeterminateStateFailsAndPreservesSessionId(string caseKind)
+    {
+        using var harness = new GrokRescueHarness();
+        IGrokUnifiedLogReader reader = caseKind == "no-end-unreadable-log"
+            ? new ThrowingGrokLogReader()
+            : harness.Log;
+        var driver = new GrokBuildDriver(harness.Runner, harness.Time, reader, allocateSessionId: static () => SessionId);
+        await using var runLog = TestRunLogs.CreateLog(harness.Time);
+        var run = driver.RunAsync(Request(), runLog, onStdoutLine: null, CancellationToken.None);
+        await harness.StartedAsync();
+        harness.Runner.EmitStdout("""{"type":"text","data":"partial"}""");
+
+        switch (caseKind)
+        {
+            case "non-terminal-stop-reason":
+                harness.Runner.EmitStdout("""{"type":"end","stopReason":"tool_use","sessionId":"01a15136-771a-7363-924b-9e5bb063b27b"}""");
+                break;
+            case "no-end-prompt-failed":
+                harness.Append(MeasuredLog(ok: false));
+                break;
+            case "no-end-prompt-in-flight":
+                harness.Append(MeasuredLog(includeDone: false));
+                break;
+            case "no-end-wake-pending":
+                harness.Append(
+                    MeasuredLog()
+                    + Shell("2026-10-18T23:00:00.000Z", "shell.task_wake.bridge_admission", Pid, SessionId, Version, new { admitted = true, enqueued = true, monitor = true, task_id = "bg1" })
+                    + "\n");
+                break;
+            case "no-end-unreadable-log":
+                break;
+            case "end-with-wake-conflict":
+                harness.Append(
+                    MeasuredLog()
+                    + Shell("2026-10-18T23:00:00.000Z", "shell.task_wake.bridge_admission", Pid, SessionId, Version, new { admitted = true, enqueued = true, monitor = true, task_id = "bg1" })
+                    + "\n");
+                harness.Runner.CompleteNaturally(NaturalResult());
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(caseKind), caseKind, null);
+        }
+
+        if (caseKind != "end-with-wake-conflict")
+        {
+            harness.Runner.CompleteNaturally(new ProcessRunResult(0, string.Empty, string.Empty));
+        }
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(async () => await run.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal("grok_internal_state_indeterminate", failure.Data[CliJson.FailureKindKey]);
+        Assert.Equal(SessionId, runLog.BoundSessionId);
+    }
+
+    [Fact]
+    public async Task UnrelatedPidAndSessionMonitorEventsDoNotSuppressTargetRescue()
+    {
+        using var harness = new GrokRescueHarness();
+        var run = harness.Start(Request());
+        await harness.StartedAsync();
+        harness.EmitReport();
+        harness.Append(
+            Shell("2026-10-18T22:51:28.000Z", "shell.tool.exec_done", Pid + 99, "99999999-9999-9999-9999-999999999999", Version, new { tool_name = "monitor", tool_call_id = "other_call", success = true })
+            + "\n"
+            + Shell("2026-10-18T22:51:28.100Z", "shell.task_wake.bridge_admission", Pid + 99, "99999999-9999-9999-9999-999999999999", Version, new { admitted = true, enqueued = true, monitor = true, task_id = "other_bg" })
+            + "\n"
+            + MeasuredLog());
+
+        harness.Time.Advance(GrokBuildDriver.IdleBeforeLogCheck);
+        var result = await harness.AwaitRunAsync(run);
+        Assert.Equal(GrokBuildDriver.InternalPromptDoneReason, result.CompletionReason);
+        Assert.Equal(PromptId, result.CompletionEvidence?.PromptId);
+    }
+
+    [Theory]
+    [InlineData("turn1-ok-false")]
+    [InlineData("turn2-ok-false")]
+    public async Task OkFalseInTurn1OrPostWakeTurn2DoesNotRescue(string caseKind)
+    {
+        using var harness = new GrokRescueHarness();
+        var run = harness.Start(Request());
+        await harness.StartedAsync();
+        harness.Runner.EmitStdout("""{"type":"text","data":"partial"}""");
+        if (caseKind == "turn1-ok-false")
+        {
+            harness.Append(MeasuredLog(ok: false));
+        }
+        else
+        {
+            harness.Append(
+                MeasuredLog()
+                + Shell("2026-10-18T23:00:00.000Z", "shell.task_wake.bridge_admission", Pid, SessionId, Version, new { admitted = true, enqueued = true, monitor = true, task_id = "bg1" })
+                + "\n"
+                + Shell("2026-10-18T23:00:00.100Z", "shell.handle_prompt.start", Pid, SessionId, Version, new { prompt_id = "task-completed-bg1", block_count = 1 })
+                + "\n"
+                + DoneLine("2026-10-18T23:00:02.000Z", Pid, SessionId, "task-completed-bg1", Version, ok: false)
+                + "\n");
+        }
+
+        await harness.AdvanceUntilReadAsync(run, minimumReads: 2);
+        Assert.False(run.IsCompleted);
+        Assert.False(harness.Runner.LastRequest!.Completion!.IsSignaled);
+
+        harness.Runner.CompleteNaturally(new ProcessRunResult(0, string.Empty, string.Empty));
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(async () => await harness.AwaitRunAsync(run));
+        Assert.Equal("grok_internal_state_indeterminate", failure.Data[CliJson.FailureKindKey]);
+    }
+
+    [Fact]
+    public async Task CancellationWhileMonitorWaitIsSuppressedCancelsCleanly()
+    {
+        using var harness = new GrokRescueHarness();
+        using var cts = new CancellationTokenSource();
+        var run = harness.Start(Request(), cts.Token);
+        await harness.StartedAsync();
+        harness.Runner.EmitStdout("""{"type":"text","data":"waiting"}""");
+        harness.Runner.EmitStdout("""{"type":"tool_call","toolCallId":"call_m1","toolName":"Monitor","kind":"think"}""");
+        harness.Runner.EmitStdout("""{"type":"tool_call_update","toolCallId":"call_m1","status":"completed","rawOutput":{"type":"Monitor","taskId":"bg1","status":"monitoring"}}""");
+        harness.Append(MeasuredLog());
+
+        await harness.AdvanceUntilReadAsync(run, minimumReads: 2);
+        Assert.False(run.IsCompleted);
+
+        cts.Cancel();
+        harness.Runner.CompleteNaturally(new ProcessRunResult(null, string.Empty, string.Empty, new ProcessTerminationInfo(ProcessTerminationStatus.Exited, true)));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await run.WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
+    public async Task StreamProgressAfterMonitorSuppressionResetsIdleCheckAndRescuesLaterHang()
+    {
+        using var harness = new GrokRescueHarness();
+        var run = harness.Start(Request());
+        await harness.StartedAsync();
+        harness.Runner.EmitStdout("""{"type":"text","data":"step1 "}""");
+        harness.Runner.EmitStdout("""{"type":"tool_call","toolCallId":"call_m1","toolName":"Monitor","kind":"think"}""");
+        harness.Runner.EmitStdout("""{"type":"tool_call_update","toolCallId":"call_m1","status":"completed","rawOutput":{"type":"Monitor","taskId":"bg1","status":"monitoring"}}""");
+        harness.Append(MeasuredLog());
+
+        // 初回 5 分アイドルは monitor 継続中のため抑止される。
+        await harness.AdvanceUntilReadAsync(run, minimumReads: 1);
+        Assert.False(run.IsCompleted);
+
+        // その後 Turn 2 の進捗が出力され、monitor が解決した後に無音ハングすると再度 5 分後に回収される。
+        harness.Runner.EmitStdout("""{"type":"tool_call_update","toolCallId":"call_out1","status":"completed","rawOutput":{"type":"TaskOutput","Result":{"task_id":"bg1","status":"completed","exitCode":0}}}""");
+        harness.Runner.EmitStdout("""{"type":"text","data":"step2"}""");
+        harness.Append(
+            Shell("2026-10-18T23:00:00.000Z", "shell.task_wake.bridge_admission", Pid, SessionId, Version, new { admitted = true, enqueued = true, monitor = true, task_id = "bg1" })
+            + "\n"
+            + Shell("2026-10-18T23:00:00.100Z", "shell.handle_prompt.start", Pid, SessionId, Version, new { prompt_id = "task-completed-bg1", block_count = 1 })
+            + "\n"
+            + DoneLine("2026-10-18T23:00:02.000Z", Pid, SessionId, "task-completed-bg1", Version, ok: true)
+            + "\n");
+
+        // Progress 直後は再チェックしないこと（20s では未完了）。
+        harness.Time.Advance(GrokBuildDriver.LogRecheckInterval);
+        await Task.Delay(50);
+        Assert.False(run.IsCompleted);
+
+        // Progress から 5 分後に Turn 2 を回収する。
+        harness.Time.Advance(GrokBuildDriver.IdleBeforeLogCheck);
+        var result = await harness.AwaitRunAsync(run);
+        Assert.Equal(GrokBuildDriver.InternalPromptDoneReason, result.CompletionReason);
+        Assert.Equal("task-completed-bg1", result.CompletionEvidence?.PromptId);
+        Assert.Equal("step1 step2", result.OutputText);
+    }
+
     internal static string MeasuredLog(
         string version = Version,
         int pid = Pid,
@@ -778,6 +1122,75 @@ public class GrokPromptCorrelationTests
         Assert.True(correlation.IsAbandoned);
         Assert.Null(correlation.Success);
         Assert.False(string.IsNullOrWhiteSpace(correlation.AbandonReason));
+    }
+
+    [Fact]
+    public void MonitorFollowUpTimedOutFalseAloneDoesNotClearWaitUntilExitCodeOrTimedOutTrue()
+    {
+        using var log = TestRunLogs.CreateLog();
+        var accumulator = new GrokStreamAccumulator(log);
+        accumulator.OnStdoutLine("""{"type":"tool_call","toolCallId":"call_m1","toolName":"Monitor","kind":"think"}""");
+        accumulator.OnStdoutLine("""{"type":"tool_call_update","toolCallId":"call_m1","status":"completed","rawOutput":{"type":"Monitor","taskId":"bg1","status":"monitoring"}}""");
+
+        // timed_out:false だけでは完了証拠にならず、monitor wait は維持される。
+        accumulator.OnStdoutLine("""{"type":"tool_call_update","toolCallId":"call_m1","status":"completed","rawOutput":{"type":"Monitor","taskId":"bg1","timed_out":false}}""");
+        var pendingSnapshot = accumulator.GetWatchSnapshot();
+        Assert.True(pendingSnapshot.HasPendingBackgroundWork);
+        Assert.DoesNotContain("call_m1", pendingSnapshot.ResolvedMonitorToolCalls);
+
+        var monitorLog = Lines(GrokInternalCompletionTests.MeasuredLog(includeDone: false))
+            .Append("""{"ts":"2026-10-18T22:51:28.000Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.tool.exec_done","ctx":{"tool_name":"monitor","tool_call_id":"call_m1","success":true}}""")
+            .Append("""{"ts":"2026-10-19T00:59:04.377Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.handle_prompt.done","ctx":{"prompt_id":"ca33ed71-5085-487c-98d4-360d23921419","ok":true}}""");
+        var correlation = Observe(monitorLog);
+        Assert.True(correlation.HasUnresolvedMonitorWait(pendingSnapshot.ResolvedMonitorToolCalls));
+        Assert.Null(correlation.TryGetConfirmedCompletion(pendingSnapshot.ResolvedMonitorToolCalls));
+
+        // 数値 exit_code（または timed_out:true / terminal Result.status）が来たら解消する。
+        accumulator.OnStdoutLine("""{"type":"tool_call_update","toolCallId":"call_m1","status":"completed","rawOutput":{"type":"Monitor","taskId":"bg1","timed_out":false,"exit_code":0}}""");
+        var resolvedSnapshot = accumulator.GetWatchSnapshot();
+        Assert.False(resolvedSnapshot.HasPendingBackgroundWork);
+        Assert.Contains("call_m1", resolvedSnapshot.ResolvedMonitorToolCalls);
+        Assert.False(correlation.HasUnresolvedMonitorWait(resolvedSnapshot.ResolvedMonitorToolCalls));
+        Assert.NotNull(correlation.TryGetConfirmedCompletion(resolvedSnapshot.ResolvedMonitorToolCalls));
+    }
+
+    [Fact]
+    public void TaskWakeSuppressedDoesNotDoubleResolveTwoPendingMonitors()
+    {
+        var lines = new List<string>(Lines(GrokInternalCompletionTests.MeasuredLog()))
+        {
+            """{"ts":"2026-10-18T22:51:28.000Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.tool.exec_done","ctx":{"tool_name":"monitor","tool_call_id":"m1","success":true}}""",
+            """{"ts":"2026-10-18T22:51:28.100Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.tool.exec_done","ctx":{"tool_name":"monitor","tool_call_id":"m2","success":true}}""",
+            """{"ts":"2026-10-18T23:00:00.000Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.task_wake.suppressed","ctx":{"task_id":"bg1"}}""",
+            """{"ts":"2026-10-18T23:00:00.100Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.task_wake.bridge_admission","ctx":{"admitted":true,"enqueued":true,"monitor":true,"task_id":"bg1"}}""",
+            """{"ts":"2026-10-18T23:00:00.200Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.handle_prompt.start","ctx":{"prompt_id":"task-completed-bg1","block_count":1}}""",
+            """{"ts":"2026-10-18T23:00:01.000Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.handle_prompt.done","ctx":{"prompt_id":"task-completed-bg1","ok":true}}""",
+        };
+
+        var correlation = Observe(lines);
+        Assert.False(correlation.IsAbandoned, correlation.AbandonReason);
+        Assert.True(correlation.HasUnresolvedMonitorWait());
+        Assert.Null(correlation.Success);
+
+        // 2 つ目の task_wake + Turn 3 完了で全 monitor が解消される。
+        correlation.Observe(
+            """{"ts":"2026-10-18T23:00:02.000Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.task_wake.bridge_admission","ctx":{"admitted":true,"enqueued":true,"monitor":true,"task_id":"bg2"}}""",
+            GrokInternalCompletionTests.Pid,
+            GrokInternalCompletionTests.Launch,
+            null);
+        correlation.Observe(
+            """{"ts":"2026-10-18T23:00:02.100Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.handle_prompt.start","ctx":{"prompt_id":"task-completed-bg2","block_count":1}}""",
+            GrokInternalCompletionTests.Pid,
+            GrokInternalCompletionTests.Launch,
+            null);
+        correlation.Observe(
+            """{"ts":"2026-10-18T23:00:03.000Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.handle_prompt.done","ctx":{"prompt_id":"task-completed-bg2","ok":true}}""",
+            GrokInternalCompletionTests.Pid,
+            GrokInternalCompletionTests.Launch,
+            null);
+
+        Assert.False(correlation.HasUnresolvedMonitorWait());
+        Assert.Equal("task-completed-bg2", correlation.Success?.PromptId);
     }
 
     private static GrokCompletionEvidence Accept(IEnumerable<string> lines)
@@ -1521,8 +1934,9 @@ internal sealed class CountingGrokLogReader : IGrokUnifiedLogReader
 
     public GrokLogRead Read(GrokLogCursor cursor)
     {
+        var read = _inner.Read(cursor);
         Interlocked.Increment(ref _reads);
-        return _inner.Read(cursor);
+        return read;
     }
 }
 
