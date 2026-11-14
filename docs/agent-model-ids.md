@@ -2,7 +2,7 @@
 
 この一覧は、relay SKILL の `facade-options` ブロック内 `model:` 行、および MCP `start_agent` の `model` 引数へ渡す **CLI 識別子** を記録する。Codex App / Cursor IDE / GitHub Copilot App など UI 上のモデル名とは文字列が一致しない場合がある。Facade は、Cursor で `reasoning_effort` または `fast` を指定したときを除き、識別子を変換せず指定時だけ各 CLI の `--model` へそのまま渡す。Cursor の選択規則は下の effort / fast 表を参照する。
 
-**スナップショット取得日:** Cursor と GitHub Copilot は 2026-10-06。Grok Build は 2026-10-15。Antigravity は 2026-10-29。Jules に model 識別子は無い。
+**スナップショット取得日:** Cursor と GitHub Copilot は 2026-10-06。Grok Build は 2026-10-15。Antigravity は 2026-11-14。Jules に model 識別子は無い。
 
 ## 使い方
 
@@ -361,10 +361,10 @@ Facade は `reasoning_effort` を `--reasoning-effort` へそのまま渡す。C
 
 ## Antigravity CLI
 
-- **CLI バージョン:** `agy` 1.4.9
+- **CLI バージョン:** `agy` 1.5.8
 - **取得コマンド:** `agy models`
-- **件数:** 13
-- **確認日:** 2026-10-29
+- **件数:** 18
+- **確認日:** 2026-11-14
 
 `model:` には、このコマンドが出した slug をそのまま書く。Facade は空白以外を `--model` へ変換せず渡す。省略時は引数を付けない。未知 slug を別モデルへ替えない。slug の末尾にある level 名は model 識別子の一部であり、`reasoning_effort` ではない。
 
@@ -373,6 +373,11 @@ Facade は `reasoning_effort` を `--reasoning-effort` へそのまま渡す。C
 | `gemini-4-argon-medium` | Gemini 4 Argon (Medium) |
 | `gemini-4-argon-high` | Gemini 4 Argon (High) |
 | `gemini-4-argon-low` | Gemini 4 Argon (Low) |
+| `gemini-4-hydrogen-high` | Gemini 4 Hydrogen (High) |
+| `gemini-4-hydrogen-xhigh` | Gemini 4 Hydrogen (XHigh) |
+| `gemini-4-hydrogen-medium` | Gemini 4 Hydrogen (Medium) |
+| `gemini-4-hydrogen-low` | Gemini 4 Hydrogen (Low) |
+| `gemini-pro-orchestrator-g1-pro` | Orchestrator (Argon) |
 | `gemini-3.8-flash-high` | Gemini 3.8 Flash (High) |
 | `gemini-3.8-flash-medium` | Gemini 3.8 Flash (Medium) |
 | `gemini-3.8-flash-low` | Gemini 3.8 Flash (Low) |
@@ -384,7 +389,23 @@ Facade は `reasoning_effort` を `--reasoning-effort` へそのまま渡す。C
 | `claude-sonnet-5-5-high` | Claude Sonnet 5.5 (High) |
 | `gpt-oss-120b-medium` | GPT-OSS 120B (Medium) |
 
-`reasoning_effort` は `--effort` へそのまま渡す。2026-10-29 の公開 headless flag 表の例は `low` / `medium` / `high` である。CLI reference はモデル依存で low から max まで、と書いている。この環境では effort 一覧コマンドを再実行していない。Facade は token を絞らず、未指定なら `--effort` を付けない。
+### 追加モデルと認証方式によるモデル差分
+
+1.5.8 では Gemini 4 Hydrogen 系（High, XHigh, Medium, Low）および Orchestrator (Argon) (`gemini-pro-orchestrator-g1-pro`) がカタログに追加された。また、公式 changelog（1.5.8 / 1.5.5）によると接続環境や認証方法により提供されるモデルが異なる：
+- `GEMINI_API_KEY` 接続時: Gemini 4 Hydrogen (Low, Medium, High, XHigh) および Gemini 4 Carbon (Low, Medium, High) が `/model` と `--model` に追加される。
+- `AGY_ADC_AUTH`（Google Cloud Application Default Credentials）接続時: Gemini 4 Hydrogen (Low, Medium, High, XHigh) および Gemini 4 Carbon (Low, Medium, High) が追加される。
+- Enterprise model gateway 経由: Gemini 4 Hydrogen がサポートされる。
+
+### Reasoning Effort と無効値の検証
+
+`reasoning_effort` は `--effort` へそのまま渡す。`agy --help` および実機でのエラー出力により、受け付ける effort トークンは `low`, `medium`, `high`, `xhigh`, `max` であることが確認されている。
+
+| 指定 | 結果 |
+| --- | --- |
+| `--effort invalid` | exit 1。stderr: `error: invalid model selection (--model "" --effort "invalid"): invalid --effort "invalid" (valid: low, medium, high, xhigh, max)` |
+| `--model invalid-model` | exit 1。stderr: `error: invalid model selection (--model "invalid-model" --effort ""): model invalid-model is not recognized as a known model or custom model in settings`（続けて `Available models:` として有効な表示名一覧が出力される） |
+
+Facade は token を絞らず、未指定なら `--effort` を付けない。
 
 `fast` は非対応である。relay は送らない。指定されていれば起動前に拒否し、黙って省略しない。`run_mode=plan` は `--mode plan` になる。通常実行では `--mode` を付けない。成功時の `outputKind` は `plan` で、`planPath` は付けない。`plan` 以外の `run_mode` は起動前に拒否する。`auto_approve: true` は `--dangerously-skip-permissions`、`false` はその flag を付けない。`false` は headless の対話承認にはならず、tool が soft-deny され得る。未指定は引数を渡さず Facade 既定の true になる。`session_id` は Antigravity conversation id で、継続するときだけ `--conversation` に渡る。
 
@@ -417,7 +438,7 @@ Jules に model 識別子は無い。`model`、`reasoning_effort`、`fast`、`ru
 | GitHub Copilot | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | 非対応。両booleanを拒否 | `--reasoning-effort <token>` |
 | Grok Build | CLI canonicalまたはmodel固有token | 非対応。両booleanを拒否 | `--reasoning-effort <token>`。CLIがeffortを無視したwarningを出せばexit 0でも失敗 |
 | Codex CLI | CLIが許すeffort token | `true` / `false` | `-c model_reasoning_effort="<token>"`; fastは `-c service_tier="priority"` / `"default"` |
-| Antigravity | 呼び出し側の token。公開 headless 例は `low` / `medium` / `high` | 非対応。両booleanを拒否 | `--model` と `--effort`。`run_mode=plan` は `--mode plan`。未指定は付けない |
+| Antigravity | `low`, `medium`, `high`, `xhigh`, `max`（未指定時は付与しない） | 非対応。両booleanを拒否 | `--model` と `--effort`。`run_mode=plan` は `--mode plan`。未指定は付けない |
 | Jules | 非対応 | 非対応。両booleanを拒否 | `model`、`reasoning_effort`、`fast` は起動前に拒否 |
 
 Cursorは `reasoning_effort` と `fast` を両方省略したとき、渡された `model` をそのまま `--model` に渡す。どちらかを指定したときは、その実行の直前に `cursor-agent models` を読み、基底・effort・fastが一致する識別子だけを渡す。bracketは作らない。一覧の取得に失敗した場合や、一致する識別子が無い場合は起動しない。モデル文字列に既に effort や `-fast` があり、同じ項目を独立fieldでも指定した場合は重複として拒否する。
@@ -434,4 +455,4 @@ Fastの利用条件と費用はproviderとmodelに依存する。OpenAIの現行
 - [GitHub Copilot CLI reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference)
 - [Grok Build CLI option handling](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/src/headless.rs)
 
-コード上の引数生成、MCP schema、mock runnerによるnew/resume/result/failure検証と、実CLIの実推論・backend tier提供確認は別の証拠である。この節の Cursor / Codex / Copilot についての実推論は、明示的な承認後に実施する。Grok Build のモデルカタログは 2026-10-15 に `grok models` で再取得した。reasoning effort の実機表は 2026-10-14、invalid effort の stderr は 2026-10-15 に再確認した。
+コード上の引数生成、MCP schema、mock runnerによるnew/resume/result/failure検証と、実CLIの実推論・backend tier提供確認は別の証拠である。この節の Cursor / Codex / Copilot についての実推論は、明示的な承認後に実施する。Grok Build のモデルカタログは 2026-10-15 に `grok models` で再取得した。reasoning effort の実機表は 2026-10-14、invalid effort の stderr は 2026-10-15 に再確認した。Antigravity のモデルカタログおよび `--effort` / `--model` の invalid 判定エラーは 2026-11-14 に `agy models` および `agy` 1.5.8 実機で再確認した。
