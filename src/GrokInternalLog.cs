@@ -688,14 +688,7 @@ internal sealed class GrokPromptCorrelation
                     return;
                 }
 
-                if (!ok)
-                {
-                    _promptFailed = true;
-                    _success = null;
-                    _latestDoneEvidence = null;
-                }
-
-                // 直前に確定した同一 prompt_id への重複 done（ok=false 後の ok=true 等）では状態を反転させない。
+                // 直前に確定した同一 prompt_id への重複 done（ok=false 後の ok=true、ok=true 後の ok=false 双方）は最初の確定結果を維持し反転させない。
                 return;
             }
 
@@ -773,7 +766,7 @@ internal sealed class GrokPromptCorrelation
     {
         if (string.IsNullOrWhiteSpace(taskId))
         {
-            return true;
+            return false;
         }
 
         return _wokenTaskIds.Add(taskId);
