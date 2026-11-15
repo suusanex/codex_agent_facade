@@ -1346,7 +1346,38 @@ public sealed class AntigravityJulesTests
             AgentJson.Options);
         using var document = JsonDocument.Parse(json);
         Assert.False(document.RootElement.TryGetProperty("sessionId", out _));
+        Assert.False(document.RootElement.TryGetProperty("recovery", out _));
         Assert.Equal("sess-local", document.RootElement.GetProperty("result").GetProperty("sessionId").GetString());
+    }
+
+    [Fact]
+    public void JulesFailureDoesNotExposeLocalRecovery()
+    {
+        var jules = new JulesJobState(
+            JulesRemotePhase.CommunicationError,
+            "hash",
+            [],
+            false,
+            false,
+            "sessions/remote-1",
+            "https://jules.example/sessions/remote-1");
+        var snapshot = new AgentJobSnapshot(
+            "job-jules",
+            "req-jules",
+            AgentJobStatus.Failed,
+            null,
+            "failed",
+            new AgentJobFailure("remote_failed", "remote boom"),
+            jules.SessionId,
+            jules.SessionUrl,
+            null,
+            jules.RemotePhase,
+            jules.Artifacts,
+            jules,
+            Recovery: new AgentSessionRecovery(AgentSessionRecoveryStatus.Bound, "should-not-leak", SessionBinding.EarlyStream));
+        var projected = AgentJobPublicProjection.From(snapshot);
+        Assert.Null(projected.Recovery);
+        Assert.Equal("sessions/remote-1", projected.SessionId);
     }
 
     [Fact]

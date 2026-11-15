@@ -120,7 +120,7 @@ CLIは `%USERPROFILE%\.codex-agent-facade\jobs\` を読み書きしない。し�
 - 同じrequestの二重起動防止
 - Facade再起動後のfail-closed
 
-同じ結果を取り損ねた場合、終了済みCLIを再実行するとagentはもう一度動く。会話の続きが必要なら、前回の外部 session ID を次の `session_id` に渡す。結果 JSON の `result.sessionId` が残っていればそれを使う。Facade が結果を書く前に落ちた場合は、対応する `<runId>.events.jsonl` の `session_bound` にある `data.sessionId` を使う。このイベントは終了行ではない。`completed`、`failed`、`cancelled` より前に残り、失敗や取消のあとも同じ ID を上書きしない。別 ID が後から届いた場合は `session_mismatch` で失敗し、先に書いた ID を置き換えない。
+同じ結果を取り損ねた場合、終了済みCLIを再実行するとagentはもう一度動く。会話の続きが必要なら、前回の外部 session ID を次の `session_id` に渡す。正常完了時は結果 JSON の `result.sessionId` を使う。失敗・取消・タイムアウト時でも外部 session ID が確定済みなら結果 JSON に `recovery: {"status": "bound", "sessionId": "...", "bindingSource": "..."}` が含まれる。Facade が結果 JSON を書く前に強制終了した場合などは、対応する `<runId>.events.jsonl` の `session_bound` にある `data.sessionId` も参照できる。このイベントは終了行ではない。`completed`、`failed`、`cancelled` より前に残り、失敗や取消のあとも同じ ID を上書きしない。別 ID が後から届いた場合は `session_mismatch` で失敗し、先に書いた ID を置き換えない。
 
 新規の GitHub Copilot と、`run_mode` を付けない Grok Build は、Facade が UUID を作り、起動前に `--session-id` として渡してから `session_bound` を書く。継続は `--resume` であり、新しい UUID は作らない。Grok の plan は `--session-id` を使わない。新規は ACP の `session/new` が返した ID を、継続は起動前の要求 ID を書く。Cursor、Codex、Antigravity の新規 ID は、それぞれの早期 stream から書く。ID が一度も確定する前の強制終了では、継続できる外部 session は残らない。
 
