@@ -32,6 +32,9 @@ public static class McpPublicContract
         + "Successful results expose outputKind as final_response, assistant_transcript, or plan; raw streams are available only in run logs. "
         + "Optional run_mode plan asks Grok Build or Antigravity for a native plan and stops before implementation. Other agents reject it before launch. Omitting run_mode keeps the existing run. "
         + "Reuse session_id from a completed result to continue the same external agent session. "
+        + "If a local CLI job (github-copilot, grok-build, cursor, codex, or antigravity) failed or was cancelled after binding an external session id, the snapshot preserves recovery={\"status\":\"bound\",\"sessionId\":\"...\",\"bindingSource\":\"...\"}. "
+        + "An omitted recovery means no session id was confirmed, while recovery={\"status\":\"unavailable\",\"reason\":\"...\"} means run-log inspection failed without fabricating a session id. "
+        + "The failed or cancelled status and failure cause still hold; only continue with a new request_id and session_id=recovery.sessionId when the user explicitly asks to continue. "
         + "antigravity runs the local agy CLI from both this host and the one-shot CLI. "
         + "jules is available from this MCP job host only and is rejected by the one-shot CLI before launch. "
         + "antigravity run_mode plan maps to agy --mode plan and returns outputKind plan without planPath. "
@@ -70,6 +73,7 @@ public static class McpPublicContract
         + "Does not start, restart, or cancel work. "
         + "Use this for explicit status checks, recovery, or diagnosis. "
         + "A failed snapshot includes a stable failure object when available; it is distinct from a wait timeout or a lost response. "
+        + "For failed or cancelled local CLI jobs, an omitted recovery means no session id was confirmed, recovery.status='bound' exposes a confirmed recovery.sessionId for user-requested continuation with a new request_id, and recovery.status='unavailable' reports run-log inspection failures via recovery.reason without inventing an id. "
         + "Do not poll this tool at a short interval to wait for a long-running worker; use wait_agent_job instead.";
 
     public const string WaitAgentJobDescription =

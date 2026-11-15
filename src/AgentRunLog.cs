@@ -20,10 +20,16 @@ public interface IAgentRunLog : IAsyncDisposable, IDisposable
     void AttachProcess(IProcessLifetime process);
     void BindSession(string sessionId, string bindingSource);
     string? BoundSessionId { get; }
+    SessionBindingInfo? BoundSession { get; }
     void WriteCompleted(AgentRunResult result);
     void WriteFailed(Exception exception);
     void WriteCancelled();
 }
+
+/// <summary>
+/// 実行中に確定した external session identity と確定方法。
+/// </summary>
+public sealed record SessionBindingInfo(string SessionId, string BindingSource);
 
 /// <summary>
 /// external session identity の確定方法。値は run log の <c>bindingSource</c> にそのまま書く。
@@ -55,6 +61,7 @@ public interface IAgentRunLogFactory
 {
     IAgentRunLog Start(AgentRunRequest request);
     IAgentRunLog Start(AgentRunRequest request, string runId);
+    string? TryGetEventsPath(string runId) => null;
 }
 
 public sealed record AgentRunStartedInfo(
@@ -97,6 +104,18 @@ public sealed class AgentRunLogFactory : IAgentRunLogFactory
     }
 
     public string LogDirectory { get; }
+
+    public string? TryGetEventsPath(string runId)
+    {
+        if (string.IsNullOrWhiteSpace(runId)
+            || runId.IndexOfAny(['/', '\\']) >= 0
+            || runId.Contains("..", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return Path.Combine(_logDirectory, runId + ".events.jsonl");
+    }
 
     public static string GetDefaultLogDirectory()
     {
@@ -199,6 +218,7 @@ internal sealed class AgentRunLog : IAgentRunLog
     private bool _disposed;
     private bool _terminalEventPublished;
     private string? _boundSessionId;
+    private volatile SessionBindingInfo? _boundSession;
     private string? _fragmentKind;
     private DateTimeOffset _fragmentStartedAt;
     private readonly StringBuilder _fragmentBuffer = new();
@@ -353,6 +373,8 @@ internal sealed class AgentRunLog : IAgentRunLog
         }
     }
 
+    public SessionBindingInfo? BoundSession => _boundSession;
+
     /// <summary>
     /// session ID が確定した時点で events へ書く。同じ ID は再書き込みしない。別 ID は上書きせず失敗する。
     /// </summary>
@@ -386,6 +408,8 @@ internal sealed class AgentRunLog : IAgentRunLog
                 data,
                 "session_bound sessionId=" + sessionId + " source=" + bindingSource);
             _boundSessionId = sessionId;
+            // AgentJob._gate と AgentRunLog._gate の交差を避けるため lock-free 参照用スナップショットも更新する。
+            _boundSession = new SessionBindingInfo(sessionId, bindingSource);
         }
     }
 

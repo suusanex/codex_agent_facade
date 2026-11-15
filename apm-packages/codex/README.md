@@ -25,7 +25,7 @@ fast: false
 ```
 このリポジトリを読み取り専用で調べ、結果を簡潔に返して。
 
-`agent` は `codex` を指定する。各新規jobに新しい `request_id` を使う。exact retryは全引数と同じIDを再利用し、完了後の継続は新しいIDと前回 `result.sessionId` を `session_id` に使う。required fields を毎回指定する。`auto_approve: false` は `read-only` sandboxと `approval_policy=never` を選び、承認質問を表示しない。
+`agent` は `codex` を指定する。各新規jobに新しい `request_id` を使う。exact retryは全引数と同じIDを再利用し、完了後の継続は新しいIDと前回 `result.sessionId`、`failed` / `cancelled`（`recovery.status == "bound"`）後にユーザーが継続を明示依頼した場合は新しいIDと `recovery.sessionId` を `session_id` に使う。required fields を毎回指定する。`auto_approve: false` は `read-only` sandboxと `approval_policy=never` を選び、承認質問を表示しない。
 
 ## Validation
 

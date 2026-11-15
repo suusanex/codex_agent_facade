@@ -89,24 +89,26 @@ required field が欠けている場合は `start_agent` を呼ばず、そのfi
 
 ## Follow-up continuation
 
-前回jobがcompleted後に新しいpayloadを送る場合、新しい `request_id` と新しいpromptを使い、前回の `result.sessionId` を `session_id` に指定する。前回 session の値は継承しない。実行optionは今回必要な値だけ再指定する。requestを別IDで再送して同一jobを得ようとしてはならない。
+前回jobがcompleted後、またはfailed / cancelledで `recovery.status == "bound"`（`recovery.sessionId` あり）が返された後に、ユーザーの明示的な継続依頼を受けて新しいpayloadを送る場合、新しい `request_id` と新しいpromptを使い、前回の `result.sessionId`（completed時）または `recovery.sessionId`（failed / cancelled時）を `session_id` に指定する。前回 session の値は継承しない。実行optionは今回必要な値だけ再指定する。requestを別IDで再送して同一jobを得ようとしてはならない。また、ユーザーの明示的な継続依頼なしに failed / cancelled job を自動でやり直してはならない。
 
 動作:
 
 - 新しい `request_id`
 - 新しい `prompt`
 - `agent` と `working_directory` を省略しない
-- 前回completedの `result.sessionId`（`sessionId`）を `session_id` に指定する
+- 前回completedの `result.sessionId`（`sessionId`）または failed / cancelled（`recovery.status == "bound"`）の `recovery.sessionId` を `session_id` に指定する
 - 新規 job と継続では `skills` を渡さない。委譲ヘッダと前回の `skills` は継承しない
 
 ## Codex が行ってはならない処理
 
-このSkillが委譲する対象について、Codexはrepository / source code の調査、Issue / PR 等の内容取得・分析、memory の検索、web 検索、shell command の実行、独自のプラン作成、実装・ファイル編集、テスト・検証、レビュー、外部 agent と並行した独自調査、外部 agent の結果を材料にした独自の再計画・補完を行わない。
+このSkillが委譲する対象について、Codexはrepository / source code の調査、Issue / PR 等の内容取得・分析、memory の検索、web 検索、shell command の実行、独自のプラン作成、実装・ファイル編集、テスト・検証、レビュー、外部 agent と並行した独自調査、外部 agent の結果を材料にした独自の再計画・補完を行わない。failed / cancelled job をユーザー依頼なしに自動再実行したり、`recovery` 無しや `recovery.status == "unavailable"` 時に `session_id` を推測・捏造したりもしない。
 
 外部 agent を走らせながら Codex 側でも同じ Issue とコードを調査する動きは不正である。外部 agent の結果を受け取った後も、独自回答を追加しない。
 
 ## 外部 agent 結果の中継
 
 `result.outputText` を受け取ったあと、Codexは独自回答を追加しない。外部 agent の結果そのものがユーザーへの主たる応答である。この Skill の役割は relay である。
+
+`status` が `failed` / `cancelled` の場合は失敗・取消の状態と原因をそのまま報告し、`completed` へ読み替えない。`recovery.status == "bound"` のときは `recovery.sessionId` を継続可能 ID として併せて報告できるが、ID の存在は正常完了や再開成功を保証しない。`recovery` が無い場合や `recovery.status == "unavailable"`（`recovery.reason`）の場合は推測せず継続不可と報告する。
 
 CLI初期化ログに指定値が現れることは、backendがそのtierを実際に提供した証拠ではない。

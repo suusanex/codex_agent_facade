@@ -1,3 +1,7 @@
+using System.Security;
+using System.Text;
+using System.Text.Json;
+
 /// <summary>
 /// job の公開状態。MCP Tasks の working/completed/failed/cancelled に寄せるが、wire は独自 JSON。
 /// </summary>
@@ -58,6 +62,31 @@ public static class JulesRemotePhase
 /// start/get/cancel/wait が内部で扱う job snapshot。実行中は result を持たない。
 /// MCP 公開 JSON は <see cref="AgentJobPublicSnapshot"/> を使う。
 /// </summary>
+public static class AgentSessionRecoveryStatus
+{
+    public const string Bound = "bound";
+    public const string Unavailable = "unavailable";
+}
+
+public static class AgentSessionRecoveryReason
+{
+    public const string RunLogMissing = "run_log_missing";
+    public const string RunLogUnreadable = "run_log_unreadable";
+    public const string RunLogCorrupt = "run_log_corrupt";
+    public const string RunLogUnavailable = "run_log_unavailable";
+    public const string SessionMismatch = "session_mismatch";
+}
+
+/// <summary>
+/// 失敗・取消となった local CLI job の継続用 session 復元状態。
+/// ID 未確定時は null として公開 JSON から省略し、欠落・読取不能・破損と区別する。
+/// </summary>
+public sealed record AgentSessionRecovery(
+    string Status,
+    string? SessionId = null,
+    string? BindingSource = null,
+    string? Reason = null);
+
 public sealed record AgentJobSnapshot(
     string JobId,
     string RequestId,
@@ -70,7 +99,8 @@ public sealed record AgentJobSnapshot(
     string? InputPrompt = null,
     string? RemotePhase = null,
     IReadOnlyList<AgentJobArtifact>? Artifacts = null,
-    JulesJobState? Jules = null);
+    JulesJobState? Jules = null,
+    AgentSessionRecovery? Recovery = null);
 
 /// <summary>
 /// MCP 公開用の job snapshot。内部の CLI raw output と Jules の相関 cursor は含めない。
@@ -86,7 +116,8 @@ public sealed record AgentJobPublicSnapshot(
     string? SessionUrl = null,
     string? InputPrompt = null,
     string? RemotePhase = null,
-    IReadOnlyList<AgentJobArtifact>? Artifacts = null);
+    IReadOnlyList<AgentJobArtifact>? Artifacts = null,
+    AgentSessionRecovery? Recovery = null);
 
 /// <summary>
 /// MCP 公開用の terminal result。Driver が抽出した outputText と run log 識別情報だけを返す。
@@ -148,7 +179,23 @@ internal static class AgentJobPublicProjection
             publishRemote ? snapshot.SessionUrl ?? result?.SessionUrl : null,
             publishRemote ? snapshot.InputPrompt ?? result?.InputPrompt : null,
             publishRemote ? snapshot.RemotePhase ?? result?.RemotePhase : null,
-            publishRemote ? snapshot.Artifacts ?? result?.Artifacts : null);
+            publishRemote ? snapshot.Artifacts ?? result?.Artifacts : null,
+            ProjectRecovery(snapshot.Status, publishRemote, snapshot.Recovery));
+    }
+
+    internal static AgentSessionRecovery? ProjectRecovery(
+        string status,
+        bool isRemote,
+        AgentSessionRecovery? recovery)
+    {
+        if (isRemote || recovery is null)
+        {
+            return null;
+        }
+
+        return status is AgentJobStatus.Failed or AgentJobStatus.Cancelled or AgentCli.StatusTimedOut
+            ? recovery
+            : null;
     }
 
     public static AgentRunPublicResult From(AgentRunResult result)
@@ -193,6 +240,11 @@ public sealed class AgentJob
     private string? _remotePhase;
     private IReadOnlyList<AgentJobArtifact>? _artifacts;
     private JulesJobState? _jules;
+    private IAgentRunLog? _activeRunLog;
+    private string? _eventsLogPath;
+    private SessionBindingInfo? _boundSession;
+    private AgentSessionRecovery? _recovery;
+    private bool _recoveryFinalized;
     private int _monitorStarted;
 
     public AgentJob(
@@ -236,6 +288,182 @@ public sealed class AgentJob
     public string? BoundFingerprint { get; }
 
     public CancellationToken CancellationToken => _cancellation.Token;
+
+    internal string? EventsLogPath
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _eventsLogPath;
+            }
+        }
+    }
+
+    internal bool RecoveryFinalized
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _recoveryFinalized;
+            }
+        }
+    }
+
+    internal void AttachRunLog(IAgentRunLog log, Action<AgentJobSnapshot>? persist = null)
+    {
+        ArgumentNullException.ThrowIfNull(log);
+        lock (_gate)
+        {
+            var previousLog = _activeRunLog;
+            var previousPath = _eventsLogPath;
+            _activeRunLog = log;
+            if (!string.IsNullOrWhiteSpace(log.EventsPath))
+            {
+                _eventsLogPath = log.EventsPath;
+            }
+
+            if (persist is not null && !IsTerminalStatus(_status))
+            {
+                try
+                {
+                    persist(CreateCurrentSnapshotUnlocked());
+                }
+                catch
+                {
+                    _activeRunLog = previousLog;
+                    _eventsLogPath = previousPath;
+                    throw;
+                }
+            }
+        }
+    }
+
+    internal void RecordBoundSession(SessionBindingInfo binding, Action<AgentJobSnapshot>? persist = null)
+    {
+        ArgumentNullException.ThrowIfNull(binding);
+        lock (_gate)
+        {
+            if (_jules is not null
+                || string.Equals(Request.Agent.Trim(), AgentFacade.JulesAgent, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            var previousBound = _boundSession;
+            var previousRecovery = _recovery;
+            var effective = previousBound ?? binding;
+            var nextRecovery = new AgentSessionRecovery(
+                AgentSessionRecoveryStatus.Bound,
+                effective.SessionId,
+                string.IsNullOrWhiteSpace(effective.BindingSource) ? null : effective.BindingSource);
+
+            if (!IsTerminalStatus(_status))
+            {
+                if (_boundSession is not null && _recovery == nextRecovery)
+                {
+                    return;
+                }
+
+                try
+                {
+                    _boundSession ??= binding;
+                    _recovery = nextRecovery;
+                    persist?.Invoke(CreateCurrentSnapshotUnlocked());
+                }
+                catch
+                {
+                    _boundSession = previousBound;
+                    _recovery = previousRecovery;
+                    throw;
+                }
+
+                return;
+            }
+
+            if (_status is AgentJobStatus.Failed or AgentJobStatus.Cancelled
+                && _recovery?.Status != AgentSessionRecoveryStatus.Bound)
+            {
+                try
+                {
+                    _boundSession ??= binding;
+                    _recovery = nextRecovery;
+                    persist?.Invoke(CreateCurrentSnapshotUnlocked());
+                    _terminalPersisted = true;
+                }
+                catch
+                {
+                    _boundSession = previousBound;
+                    _recovery = previousRecovery;
+                    throw;
+                }
+            }
+        }
+    }
+
+    internal void FinalizeLocalRun(Action<AgentJobSnapshot>? persist = null)
+    {
+        lock (_gate)
+        {
+            if (_jules is not null
+                || string.Equals(Request.Agent.Trim(), AgentFacade.JulesAgent, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            if (!IsTerminalStatus(_status))
+            {
+                return;
+            }
+
+            var boundSession = _boundSession ?? _activeRunLog?.BoundSession;
+            AgentSessionRecovery? nextRecovery;
+            if (_status == AgentJobStatus.Completed)
+            {
+                nextRecovery = null;
+            }
+            else if (boundSession is not null)
+            {
+                nextRecovery = new AgentSessionRecovery(
+                    AgentSessionRecoveryStatus.Bound,
+                    boundSession.SessionId,
+                    string.IsNullOrWhiteSpace(boundSession.BindingSource) ? null : boundSession.BindingSource);
+            }
+            else if (_recovery?.Status == AgentSessionRecoveryStatus.Bound)
+            {
+                nextRecovery = _recovery;
+            }
+            else
+            {
+                nextRecovery = _recovery;
+            }
+
+            if (_recoveryFinalized && _recovery == nextRecovery && _terminalPersisted)
+            {
+                return;
+            }
+
+            var previousBound = _boundSession;
+            var previousRecovery = _recovery;
+            var previousFinalized = _recoveryFinalized;
+            try
+            {
+                _boundSession ??= boundSession;
+                _recovery = nextRecovery;
+                _recoveryFinalized = true;
+                persist?.Invoke(CreateCurrentSnapshotUnlocked());
+                _terminalPersisted = true;
+            }
+            catch
+            {
+                _boundSession = previousBound;
+                _recovery = previousRecovery;
+                _recoveryFinalized = previousFinalized;
+                throw;
+            }
+        }
+    }
 
     public JulesJobState? Jules
     {
@@ -330,7 +558,8 @@ public sealed class AgentJob
                 state.InputPrompt ?? _inputPrompt,
                 state.RemotePhase,
                 state.Artifacts ?? _artifacts,
-                state);
+                state,
+                _recovery);
         }
 
         persist(projected);
@@ -378,18 +607,24 @@ public sealed class AgentJob
     {
         lock (_gate)
         {
-            return CreateSnapshotUnlocked(
-                _status,
-                _result,
-                _error,
-                _failure,
-                _sessionId,
-                _sessionUrl,
-                _inputPrompt,
-                _remotePhase,
-                _artifacts,
-                _jules);
+            return CreateCurrentSnapshotUnlocked();
         }
+    }
+
+    private AgentJobSnapshot CreateCurrentSnapshotUnlocked()
+    {
+        return CreateSnapshotUnlocked(
+            _status,
+            _result,
+            _error,
+            _failure,
+            _sessionId,
+            _sessionUrl,
+            _inputPrompt,
+            _remotePhase,
+            _artifacts,
+            _jules,
+            _recovery);
     }
 
     public void Discard()
@@ -426,6 +661,7 @@ public sealed class AgentJob
 
             // 既存 agent の公開 JSON に sessionId を重複させない。Jules の進行と成果だけを足す。
             var publishRemote = _jules is not null
+                || string.Equals(Request.Agent.Trim(), AgentFacade.JulesAgent, StringComparison.Ordinal)
                 || string.Equals(result?.Agent, AgentFacade.JulesAgent, StringComparison.Ordinal)
                 || result?.SessionUrl is not null
                 || result?.InputPrompt is not null
@@ -446,20 +682,71 @@ public sealed class AgentJob
                     RemotePhase = remotePhase ?? _jules.RemotePhase,
                     Artifacts = artifacts ?? _jules.Artifacts,
                 };
+
+            SessionBindingInfo? boundSession = null;
+            AgentSessionRecovery? recovery = null;
+            var recoveryFinalized = _recoveryFinalized;
+            if (publishRemote || status == AgentJobStatus.Completed)
+            {
+                recovery = null;
+                recoveryFinalized = status == AgentJobStatus.Completed;
+            }
+            else if (status is AgentJobStatus.Failed or AgentJobStatus.Cancelled)
+            {
+                boundSession = _boundSession ?? _activeRunLog?.BoundSession;
+                if (boundSession is null
+                    && status == AgentJobStatus.Cancelled
+                    && _activeRunLog is not null
+                    && !string.IsNullOrWhiteSpace(_eventsLogPath))
+                {
+                    // Cancel が BindSession によるメモリ更新より一瞬先行した場合も flush 済み events.jsonl を参照する。
+                    boundSession = AgentSessionLogRecovery.TryReadBoundFromLiveEventsLog(_eventsLogPath);
+                }
+
+                if (boundSession is not null)
+                {
+                    recovery = new AgentSessionRecovery(
+                        AgentSessionRecoveryStatus.Bound,
+                        boundSession.SessionId,
+                        string.IsNullOrWhiteSpace(boundSession.BindingSource) ? null : boundSession.BindingSource);
+                }
+                else if (_recovery?.Status == AgentSessionRecoveryStatus.Bound)
+                {
+                    recovery = _recovery;
+                }
+            }
+
             if (beforePublish is not null)
             {
-                beforePublish.Invoke(CreateSnapshotUnlocked(
-                    status,
-                    result,
-                    error,
-                    failure,
-                    sessionId,
-                    sessionUrl,
-                    inputPrompt,
-                    remotePhase,
-                    artifacts,
-                    jules));
-                _terminalPersisted = true;
+                var previousBound = _boundSession;
+                var previousRecovery = _recovery;
+                var previousFinalized = _recoveryFinalized;
+                try
+                {
+                    _boundSession ??= boundSession;
+                    _recovery = recovery;
+                    _recoveryFinalized = recoveryFinalized;
+                    beforePublish.Invoke(CreateSnapshotUnlocked(
+                        status,
+                        result,
+                        error,
+                        failure,
+                        sessionId,
+                        sessionUrl,
+                        inputPrompt,
+                        remotePhase,
+                        artifacts,
+                        jules,
+                        recovery));
+                    _terminalPersisted = true;
+                }
+                catch
+                {
+                    _boundSession = previousBound;
+                    _recovery = previousRecovery;
+                    _recoveryFinalized = previousFinalized;
+                    throw;
+                }
             }
 
             _status = status;
@@ -472,6 +759,9 @@ public sealed class AgentJob
             _remotePhase = remotePhase;
             _artifacts = artifacts;
             _jules = jules;
+            _boundSession ??= boundSession;
+            _recovery = recovery;
+            _recoveryFinalized = recoveryFinalized;
         }
 
         _terminal.TrySetResult();
@@ -488,7 +778,8 @@ public sealed class AgentJob
         string? inputPrompt,
         string? remotePhase,
         IReadOnlyList<AgentJobArtifact>? artifacts,
-        JulesJobState? jules)
+        JulesJobState? jules,
+        AgentSessionRecovery? recovery)
     {
         return new AgentJobSnapshot(
             JobId,
@@ -502,7 +793,8 @@ public sealed class AgentJob
             inputPrompt,
             remotePhase,
             artifacts,
-            jules);
+            jules,
+            recovery);
     }
 
     private static bool IsTerminalStatus(string status)
@@ -511,5 +803,163 @@ public sealed class AgentJob
             or AgentJobStatus.Failed
             or AgentJobStatus.Cancelled
             or AgentJobStatus.WaitingForInput;
+    }
+}
+
+/// <summary>
+/// events.jsonl から <c>session_bound</c> を復元する補助。
+/// ID 未確定（破損なし・イベントなし）と、欠落・読取不能・破損・不整合を区別する。
+/// </summary>
+internal static class AgentSessionLogRecovery
+{
+    public static SessionBindingInfo? TryReadBoundFromLiveEventsLog(string eventsPath)
+    {
+        if (string.IsNullOrWhiteSpace(eventsPath) || !File.Exists(eventsPath))
+        {
+            return null;
+        }
+
+        var recovery = ReadFromEventsLog(eventsPath);
+        if (recovery is { Status: AgentSessionRecoveryStatus.Bound }
+            && !string.IsNullOrWhiteSpace(recovery.SessionId))
+        {
+            return new SessionBindingInfo(recovery.SessionId, recovery.BindingSource ?? string.Empty);
+        }
+
+        return null;
+    }
+
+    public static AgentSessionRecovery? ReadFromEventsLog(string eventsPath)
+    {
+        if (string.IsNullOrWhiteSpace(eventsPath))
+        {
+            return new AgentSessionRecovery(
+                AgentSessionRecoveryStatus.Unavailable,
+                Reason: AgentSessionRecoveryReason.RunLogUnavailable);
+        }
+
+        try
+        {
+            if (!File.Exists(eventsPath))
+            {
+                return new AgentSessionRecovery(
+                    AgentSessionRecoveryStatus.Unavailable,
+                    Reason: AgentSessionRecoveryReason.RunLogMissing);
+            }
+
+            using var stream = new FileStream(
+                eventsPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+
+            SessionBindingInfo? firstBound = null;
+            var sawCorruptLine = false;
+            string? line;
+            while ((line = reader.ReadLine()) is not null)
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    using var document = JsonDocument.Parse(line);
+                    var root = document.RootElement;
+                    if (root.ValueKind != JsonValueKind.Object)
+                    {
+                        sawCorruptLine = true;
+                        continue;
+                    }
+
+                    var source = CliJson.TryGetPropertyIgnoreCase(root, "source", out var sourceElement)
+                        ? CliJson.ReadStringValue(sourceElement)
+                        : null;
+                    var type = CliJson.TryGetPropertyIgnoreCase(root, "type", out var typeElement)
+                        ? CliJson.ReadStringValue(typeElement)
+                        : null;
+                    if (!string.Equals(source, "facade", StringComparison.Ordinal)
+                        || !string.Equals(type, "session_bound", StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    if (!CliJson.TryGetPropertyIgnoreCase(root, "data", out var dataElement)
+                        || dataElement.ValueKind != JsonValueKind.Object)
+                    {
+                        sawCorruptLine = true;
+                        continue;
+                    }
+
+                    var sessionId = CliJson.FindExplicitSessionId(dataElement);
+                    if (string.IsNullOrWhiteSpace(sessionId))
+                    {
+                        sawCorruptLine = true;
+                        continue;
+                    }
+
+                    var bindingSource = CliJson.TryGetPropertyIgnoreCase(dataElement, "bindingSource", out var bindingElement)
+                        ? CliJson.ReadStringValue(bindingElement)
+                        : null;
+                    if (firstBound is null)
+                    {
+                        firstBound = new SessionBindingInfo(
+                            sessionId,
+                            string.IsNullOrWhiteSpace(bindingSource) ? string.Empty : bindingSource);
+                    }
+                    else if (!string.Equals(firstBound.SessionId, sessionId, StringComparison.Ordinal))
+                    {
+                        return new AgentSessionRecovery(
+                            AgentSessionRecoveryStatus.Unavailable,
+                            Reason: AgentSessionRecoveryReason.SessionMismatch);
+                    }
+                }
+                catch (JsonException ex)
+                {
+                    CliJson.TraceException(ex);
+                    sawCorruptLine = true;
+                }
+            }
+
+            if (firstBound is not null)
+            {
+                return new AgentSessionRecovery(
+                    AgentSessionRecoveryStatus.Bound,
+                    firstBound.SessionId,
+                    string.IsNullOrWhiteSpace(firstBound.BindingSource) ? null : firstBound.BindingSource);
+            }
+
+            if (sawCorruptLine)
+            {
+                return new AgentSessionRecovery(
+                    AgentSessionRecoveryStatus.Unavailable,
+                    Reason: AgentSessionRecoveryReason.RunLogCorrupt);
+            }
+
+            return null;
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            CliJson.TraceException(ex);
+            return new AgentSessionRecovery(
+                AgentSessionRecoveryStatus.Unavailable,
+                Reason: AgentSessionRecoveryReason.RunLogMissing);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or SecurityException)
+        {
+            CliJson.TraceException(ex);
+            return new AgentSessionRecovery(
+                AgentSessionRecoveryStatus.Unavailable,
+                Reason: AgentSessionRecoveryReason.RunLogUnreadable);
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+            return new AgentSessionRecovery(
+                AgentSessionRecoveryStatus.Unavailable,
+                Reason: AgentSessionRecoveryReason.RunLogUnavailable);
+        }
     }
 }

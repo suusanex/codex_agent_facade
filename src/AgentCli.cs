@@ -151,13 +151,17 @@ public static class AgentCli
             CliJson.TraceException(ex);
             WriteResponse(standardOutput, CancelledResponse(
                 "timeout",
-                "The CLI run exceeded timeout_seconds and the agent process was stopped."));
+                "The CLI run exceeded timeout_seconds and the agent process was stopped.",
+                CliJson.ReadRecovery(ex)));
             return ExitTimedOut;
         }
         catch (OperationCanceledException ex)
         {
             CliJson.TraceException(ex);
-            WriteResponse(standardOutput, CancelledResponse("cancelled", "The CLI run was cancelled."));
+            WriteResponse(standardOutput, CancelledResponse(
+                "cancelled",
+                "The CLI run was cancelled.",
+                CliJson.ReadRecovery(ex)));
             return ExitCancelled;
         }
         catch (ArgumentException ex)
@@ -173,7 +177,8 @@ public static class AgentCli
                 AgentJobStatus.Failed,
                 result: null,
                 error: RunFailureError(diagnosticLogPath),
-                failure: CliJson.CreateFailure(ex)));
+                failure: CliJson.CreateFailure(ex),
+                recovery: CliJson.ReadRecovery(ex)));
             return ExitFailed;
         }
     }
@@ -254,26 +259,36 @@ public static class AgentCli
                 exception.Data[CliJson.FailureRunIdKey] as string,
                 exception.Data[CliJson.FailureEventsLogPathKey] as string,
                 exception.Data[CliJson.FailureTextLogPathKey] as string);
-        return Response(AgentJobStatus.Failed, result: null, error: failure.Summary, failure: failure);
+        return Response(
+            AgentJobStatus.Failed,
+            result: null,
+            error: failure.Summary,
+            failure: failure,
+            recovery: CliJson.ReadRecovery(exception));
     }
 
-    private static AgentCliResponse CancelledResponse(string kind, string summary)
+    private static AgentCliResponse CancelledResponse(
+        string kind,
+        string summary,
+        AgentSessionRecovery? recovery = null)
     {
         var status = kind == "timeout" ? StatusTimedOut : AgentJobStatus.Cancelled;
         return Response(
             status,
             result: null,
             error: summary,
-            failure: new AgentJobFailure(kind, summary));
+            failure: new AgentJobFailure(kind, summary),
+            recovery: recovery);
     }
 
     private static AgentCliResponse Response(
         string status,
         AgentRunPublicResult? result,
         string? error,
-        AgentJobFailure? failure)
+        AgentJobFailure? failure,
+        AgentSessionRecovery? recovery = null)
     {
-        return new AgentCliResponse(status, result, error, failure);
+        return new AgentCliResponse(status, result, error, failure, recovery);
     }
 
     private static void WriteResponse(TextWriter standardOutput, AgentCliResponse response)
@@ -327,4 +342,5 @@ public sealed record AgentCliResponse(
     string Status,
     AgentRunPublicResult? Result,
     string? Error,
-    AgentJobFailure? Failure);
+    AgentJobFailure? Failure,
+    AgentSessionRecovery? Recovery = null);

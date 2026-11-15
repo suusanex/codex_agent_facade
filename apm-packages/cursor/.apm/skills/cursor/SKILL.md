@@ -121,7 +121,8 @@ required field が欠けている場合は `start_agent` を呼ばず、その f
 
 対象:
 
-- 前回 job が completed
+- 前回 job が `completed`（`result.sessionId` あり）、または `failed` / `cancelled` で `recovery.status == "bound"`（`recovery.sessionId` あり）
+- ユーザーが同じ Cursor session の継続を明示的に求めている（`failed` / `cancelled` 時はユーザー依頼なしに自動でやり直さない）
 - 新しいユーザー依頼 / 新しい payload を同じ Cursor session に続けて渡す
 
 動作:
@@ -130,12 +131,12 @@ required field が欠けている場合は `start_agent` を呼ばず、その f
 - 新しい `prompt`
 - `agent` を再指定する
 - `working_directory` を現在の絶対パスとして再指定する。前回と同じ workspace でも省略しない
-- 前回 completed result の `sessionId` を `session_id` に指定する
+- 前回 completed result の `sessionId`（`result.sessionId`）、または `failed` / `cancelled`（`recovery.status == "bound"`）の `recovery.sessionId` を `session_id` に指定する
 - この turn の実行オプションにある `model`, `reasoning_effort`, `fast`, `auto_approve` だけを指定する。前回 session の値は継承しない
 - その他、その turn に必要な引数を完全に再構成する
 - 新規 job と継続では `skills` を渡さない。委譲ヘッダと前回の `skills` は継承しない
 
-同じ Codex thread でも、同じ Cursor session でも、新しい `request_id` を使う。前回 completed job の `request_id` は使わない。
+同じ Codex thread でも、同じ Cursor session でも、新しい `request_id` を使う。前回 job の `request_id` は使わない。
 
 ## Codex が行ってはならない処理
 
@@ -152,9 +153,12 @@ required field が欠けている場合は `start_agent` を呼ばず、その f
 - レビュー
 - 外部 agent と並行した独自調査
 - 外部 agent の結果を材料にした独自の再計画・補完
+- `failed` / `cancelled` job をユーザー依頼なしに自動再実行すること、および `recovery` 無しや `recovery.status == "unavailable"` 時に `session_id` を推測・捏造すること
 
 特に、外部 agent を走らせながら Codex 側でも同じ Issue とコードを調査する動きは不正である。
 
 ## 外部 agent 結果の中継
 
 `result.outputText` を受け取ったあと、Codex は独自回答を追加しない。不足していると思った箇所を補完しない。別の調査結果を混ぜない。外部 agent の結論を再設計しない。自分で続きを実装しない。この Skill の役割は relay である。外部 agent の結果そのものがユーザーへの主たる応答である。
+
+`failed` / `cancelled` のときは失敗・取消の状態と原因を維持して報告し、`completed` へ読み替えない。`recovery.status == "bound"` があれば `recovery.sessionId` を継続可能 ID として併せて報告できるが、ID の存在は正常完了や再開成功を保証しない。`recovery` 無しや `recovery.status == "unavailable"`（`recovery.reason`）時は推測せず継続不可と報告する。

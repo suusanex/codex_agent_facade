@@ -3587,6 +3587,45 @@ public class FacadeDelegationSkillContractTests
         Assert.False(IsRelayOnlyFacadeDelegationSkill(text));
     }
 
+    [Fact]
+    public void LocalRelaySkillsExposeRecoverySessionContinuationAndExcludeJules()
+    {
+        var skills = LoadFacadeDelegationSkills().ToDictionary(skill => skill.Name, StringComparer.Ordinal);
+        string[] localAgents = ["antigravity", "codex", "cursor", "github-copilot", "grok-build"];
+
+        foreach (var agent in localAgents)
+        {
+            Assert.True(skills.ContainsKey(agent), "Missing Skill for local agent: " + agent);
+            var text = skills[agent].Text;
+            var followUp = ReadHeadingSection(text, "## Follow-up continuation");
+            AssertContains(agent, followUp, "recovery.status == \"bound\"");
+            AssertContains(agent, followUp, "recovery.sessionId");
+            AssertContains(agent, followUp, "新しい `request_id`");
+
+            var doNot = ReadHeadingSection(text, "## Codex が行ってはならない処理");
+            AssertContains(agent, doNot, "recovery.status == \"unavailable\"");
+
+            var relay = ReadHeadingSection(text, "## 外部 agent 結果の中継");
+            AssertContains(agent, relay, "recovery.status == \"bound\"");
+            AssertContains(agent, relay, "recovery.sessionId");
+            AssertContains(agent, relay, "recovery.status == \"unavailable\"");
+
+            var readme = File.ReadAllText(Path.Combine(LocateRepoRoot(), "apm-packages", agent, "README.md"));
+            Assert.Contains("recovery.status == \"bound\"", readme, StringComparison.Ordinal);
+            Assert.Contains("recovery.sessionId", readme, StringComparison.Ordinal);
+        }
+
+        // Jules は local CLI session recovery 共通化の対象外のため、local 用 recovery 案内を含めない。
+        var julesText = skills["jules"].Text;
+        Assert.DoesNotContain("recovery.sessionId", julesText, StringComparison.Ordinal);
+
+        var orchestrationPath = EnumerateSkillFiles(LocateRepoRoot())
+            .Single(path => path.Contains("external-agent-orchestration", StringComparison.Ordinal));
+        var orchestration = File.ReadAllText(orchestrationPath);
+        Assert.Contains("recovery.status == \"bound\"", orchestration, StringComparison.Ordinal);
+        Assert.Contains("recovery.sessionId", orchestration, StringComparison.Ordinal);
+    }
+
     private static void AssertContains(string skillName, string text, string phrase)
     {
         Assert.True(
@@ -5673,6 +5712,11 @@ public class McpPublicContractTests
             + "\n" + McpPublicContract.RequestIdDescription
             + "\n" + McpPublicContract.WorkingDirectoryDescription
             + "\n" + McpPublicContract.SkillsDescription);
+        Assert.Contains("recovery=", McpPublicContract.ServerInstructions, StringComparison.Ordinal);
+        Assert.Contains("recovery.sessionId", McpPublicContract.ServerInstructions, StringComparison.Ordinal);
+        Assert.Contains("recovery.status='bound'", McpPublicContract.GetAgentJobDescription, StringComparison.Ordinal);
+        Assert.Contains("recovery.status='unavailable'", McpPublicContract.GetAgentJobDescription, StringComparison.Ordinal);
+        Assert.Contains("recovery.reason", McpPublicContract.GetAgentJobDescription, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -6725,6 +6769,64 @@ public class McpHttpHostTests
         var cancellable = await CallStartAgentAsync(client, "req-compact-cancel", AgentFacade.GrokBuildAgent, "cancel-me");
         var cancelled = await CallCancelAgentJobAsync(client, cancellable.JobId);
         Assert.Equal(AgentJobStatus.Cancelled, cancelled.Status);
+    }
+
+    [Fact]
+    public async Task FailedAndCancelledLocalJobsExposeRecoveryAcrossMcpTools()
+    {
+        await using var session = await McpHttpTestHost.StartAsync();
+        await using var client = await session.CreateClientAsync();
+
+        // 1) Codex が thread.started 後に non-zero で失敗した場合、recovery.status=bound と sessionId を返す。
+        session.Runner.Result = new ProcessRunResult(
+            3,
+            "{\"type\":\"thread.started\",\"thread_id\":\"thread-mcp-fail\"}\n",
+            "failed");
+        var failedStarted = await CallStartAgentAsync(client, "req-mcp-rec-fail", AgentFacade.CodexAgent, "fail-after-bind");
+        var failedWaited = await CallWaitAgentJobAsync(client, failedStarted.JobId, 30);
+        Assert.Equal(AgentJobStatus.Failed, failedWaited.Status);
+        Assert.NotNull(failedWaited.Recovery);
+        Assert.Equal(AgentSessionRecoveryStatus.Bound, failedWaited.Recovery!.Status);
+        Assert.Equal("thread-mcp-fail", failedWaited.Recovery.SessionId);
+        Assert.Equal(SessionBinding.EarlyStream, failedWaited.Recovery.BindingSource);
+
+        var failedGotten = await CallGetAgentJobAsync(client, failedStarted.JobId);
+        Assert.Equal(failedWaited.Recovery, failedGotten.Recovery);
+
+        // 2) Grok が起動前 preallocated 後（running 中）に Cancel された場合も bound recovery を返す。
+        session.Runner.Result = new ProcessRunResult(0, "", "");
+        session.Runner.Gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancelStarted = await CallStartAgentAsync(client, "req-mcp-rec-cancel", AgentFacade.GrokBuildAgent, "cancel-after-bind");
+        await session.Runner.StartedTask.WaitAsync(TimeSpan.FromSeconds(10));
+        var cancelled = await CallCancelAgentJobAsync(client, cancelStarted.JobId);
+        session.Runner.Gate.TrySetResult(true);
+        Assert.Equal(AgentJobStatus.Cancelled, cancelled.Status);
+        Assert.NotNull(cancelled.Recovery);
+        Assert.Equal(AgentSessionRecoveryStatus.Bound, cancelled.Recovery!.Status);
+        Assert.False(string.IsNullOrWhiteSpace(cancelled.Recovery.SessionId));
+        Assert.Equal(SessionBinding.Preallocated, cancelled.Recovery.BindingSource);
+
+        // 3) session_bound 前の失敗では recovery プロパティ自体を省略する。
+        session.Runner.Gate = null;
+        session.Runner.Result = new ProcessRunResult(9, "not-json\n", "boom");
+        var unboundCall = await client.CallToolAsync(
+            "start_agent",
+            new Dictionary<string, object?>
+            {
+                ["request_id"] = "req-mcp-rec-unbound",
+                ["agent"] = AgentFacade.CodexAgent,
+                ["prompt"] = "fail-before-bind",
+                ["working_directory"] = Path.GetTempPath(),
+            });
+        var unboundStarted = ReadSnapshot(unboundCall);
+        await CallWaitAgentJobAsync(client, unboundStarted.JobId, 30);
+        var getUnboundRaw = await client.CallToolAsync(
+            "get_agent_job",
+            new Dictionary<string, object?> { ["job_id"] = unboundStarted.JobId });
+        var getUnboundJson = ((ModelContextProtocol.Protocol.TextContentBlock)getUnboundRaw.Content.Single()).Text;
+        using var unboundDoc = JsonDocument.Parse(getUnboundJson);
+        Assert.Equal(AgentJobStatus.Failed, unboundDoc.RootElement.GetProperty("status").GetString());
+        Assert.False(unboundDoc.RootElement.TryGetProperty("recovery", out _));
     }
 
     private static ProcessRunResult GrokResult(string text, string sessionId)
@@ -8206,6 +8308,37 @@ public class AgentCliTests
         Assert.Equal(AgentCli.ExitTimedOut, timedOut.ExitCode);
         Assert.Equal(AgentCli.StatusTimedOut, timedOut.Status);
         Assert.Equal("timeout", timedOut.FailureKind);
+        Assert.False(string.IsNullOrWhiteSpace(timedOut.Root.GetProperty("recovery").GetProperty("sessionId").GetString()));
+    }
+
+    [Fact]
+    public async Task FailedAndCancelledCliRunsExposeRecoveryOnlyWhenSessionBound()
+    {
+        var facade = CreateFacade(out var runner);
+        runner.Result = new ProcessRunResult(
+            4,
+            "{\"type\":\"thread.started\",\"thread_id\":\"cli-thread-bound\"}\n",
+            "boom");
+        var failed = await RunAsync(facade, Request(new
+        {
+            Agent = AgentFacade.CodexAgent,
+            Prompt = "fail after bind",
+            WorkingDirectory = Path.GetTempPath(),
+        }));
+        Assert.Equal(AgentCli.ExitFailed, failed.ExitCode);
+        Assert.Equal("bound", failed.Root.GetProperty("recovery").GetProperty("status").GetString());
+        Assert.Equal("cli-thread-bound", failed.Root.GetProperty("recovery").GetProperty("sessionId").GetString());
+        Assert.Equal(SessionBinding.EarlyStream, failed.Root.GetProperty("recovery").GetProperty("bindingSource").GetString());
+
+        runner.Result = new ProcessRunResult(4, "not-json\n", "boom");
+        var unbound = await RunAsync(facade, Request(new
+        {
+            Agent = AgentFacade.CodexAgent,
+            Prompt = "fail before bind",
+            WorkingDirectory = Path.GetTempPath(),
+        }));
+        Assert.Equal(AgentCli.ExitFailed, unbound.ExitCode);
+        Assert.False(unbound.Root.TryGetProperty("recovery", out _));
     }
 
     private static ProcessRunResult CopilotSuccess(string sessionId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")

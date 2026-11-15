@@ -125,8 +125,8 @@ required field が欠けている場合は `start_agent` を呼ばず、その f
 
 対象:
 
-- 前回 job が completed
-- ユーザーが同じ Antigravity conversation の継続を求めている
+- 前回 job が `completed`（`result.sessionId` あり）、または `failed` / `cancelled` で `recovery.status == "bound"`（`recovery.sessionId` あり）
+- ユーザーが同じ Antigravity conversation の継続を明示的に求めている（`failed` / `cancelled` 時はユーザーの継続依頼なしに自動でやり直さない）
 - 新しいユーザー依頼 / 新しい payload をその conversation に続けて渡す
 
 同じ Codex thread だけではこの節を適用しない。
@@ -137,13 +137,13 @@ required field が欠けている場合は `start_agent` を呼ばず、その f
 - 新しい `prompt`
 - `agent` を再指定する
 - `working_directory` を現在の絶対パスとして再指定する。前回と同じ workspace でも省略しない
-- 直前の対応する result の `sessionId` を `session_id` に指定する
+- 直前の対応する `completed` result の `sessionId`（`result.sessionId`）、または `failed` / `cancelled`（`recovery.status == "bound"`）の `recovery.sessionId` を `session_id` に指定する
 - この turn の実行オプションにある `model`, `reasoning_effort`, `auto_approve` だけを指定する。前回 session の値は継承しない
 - その他、その turn に必要な引数を完全に再構成する
 - 新規 job と継続では `skills` を渡さない。委譲ヘッダと前回の `skills` は継承しない
 - `fast` は渡さない。`plan` フラグがあるときだけ `run_mode` に `plan` を渡す。無いときは渡さない。前回 turn から継承しない
 
-同じ Codex thread でも、同じ Antigravity conversation でも、新しい `request_id` を使う。前回 completed job の `request_id` は使わない。
+同じ Codex thread でも、同じ Antigravity conversation でも、新しい `request_id` を使う。前回 job の `request_id` は使わない。
 
 ## Codex が行ってはならない処理
 
@@ -164,6 +164,7 @@ required field が欠けている場合は `start_agent` を呼ばず、その f
 - `plan` が無い turn の `run_mode` を前回から継承すること
 - plan 本文を Codex が作ること、補完すること、実装へ進むこと
 - `completionReason` を省いて完全成功と報告すること
+- `failed` / `cancelled` job をユーザー依頼なしに自動再実行すること、および `recovery` 無しや `recovery.status == "unavailable"` のときに `session_id` を推測・捏造すること
 
 特に、外部 agent を走らせながら Codex 側でも同じ Issue とコードを調査する動きは不正である。
 
@@ -172,6 +173,8 @@ required field が欠けている場合は `start_agent` を呼ばず、その f
 `result.outputText` を受け取ったあと、Codex は独自回答を追加しない。不足していると思った箇所を補完しない。別の調査結果を混ぜない。外部 agent の結論を再設計しない。自分で続きを実装しない。この Skill の役割は relay である。外部 agent の結果そのものがユーザーへの主たる応答である。
 
 `status` は Facade の判定に従う。`completed` 以外を成功へ読み替えない。Antigravity CLI の `WAITING` / `RUNNING` は Facade が未完了として失敗にする。`failure.kind` が `incomplete_run` のときも成功にしない。
+
+`failed` / `cancelled` でも `recovery.status == "bound"` が返っているときは、失敗・取消の事実と原因を保ったまま `recovery.sessionId` を継続候補 ID として報告できる（ただし確定済み ID の存在は正常完了や再開成功を保証しない）。`recovery` が無い場合や `recovery.status == "unavailable"`（`recovery.reason`）の場合は ID を推測せず継続不可と報告する。
 
 `status=completed` でも `completionReason` が `permission_soft_denied` のときは完全成功と言い換えない。exit code 0 や result status が成功に見えても、`completionReason` と `outputText` をそのまま中継する。soft-deny が無ければ `completionReason` を作らない。`outputKind` が `plan` のときも同じである。
 

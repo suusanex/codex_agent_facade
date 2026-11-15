@@ -22,6 +22,7 @@ public sealed class AgentJobService
     private readonly ConcurrentDictionary<string, byte> _terminalLogs = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, AgentJob> _byRequestId = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, AgentJob> _byJobId = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, AgentJob> _activeLocalWorkers = new(StringComparer.Ordinal);
 
     public AgentJobService(AgentFacade facade)
         : this(facade, GetDefaultJobStoreDirectory(), TimeProvider.System)
@@ -96,7 +97,7 @@ public sealed class AgentJobService
 
         try
         {
-            Persist(ToRecord(created.CreateSnapshot(), fingerprint));
+            Persist(ToRecord(created, created.CreateSnapshot(), fingerprint));
         }
         catch (Exception ex)
         {
@@ -155,7 +156,7 @@ public sealed class AgentJobService
             }
 
             var fingerprint = live.BoundFingerprint ?? ComputeRequestFingerprint(live.Request);
-            if (live.RequestCancel(next => Persist(ToRecord(next, fingerprint))))
+            if (live.RequestCancel(next => Persist(ToRecord(live, next, fingerprint))))
             {
                 LogTerminal(live.CreateSnapshot(), AgentJobStatus.Cancelled, exitCode: null, errorType: null);
             }
@@ -256,15 +257,18 @@ public sealed class AgentJobService
 
     private async Task RunLocalAsync(AgentJob job, string fingerprint)
     {
+        _activeLocalWorkers[job.JobId] = job;
         try
         {
             var result = await _facade.RunAsync(
                     job.Request,
                     onStdoutLine: null,
                     job.CancellationToken,
-                    job.JobId)
+                    job.JobId,
+                    onLogStarted: log => job.AttachRunLog(log, next => Persist(ToRecord(job, next, fingerprint))),
+                    onSessionBound: binding => job.RecordBoundSession(binding, next => Persist(ToRecord(job, next, fingerprint))))
                 .ConfigureAwait(false);
-            if (job.Complete(result, next => Persist(ToRecord(next, fingerprint))))
+            if (job.Complete(result, next => Persist(ToRecord(job, next, fingerprint))))
             {
                 LogTerminal(job.CreateSnapshot(), AgentJobStatus.Completed, result.ExitCode, errorType: null);
             }
@@ -272,7 +276,7 @@ public sealed class AgentJobService
         catch (OperationCanceledException ex)
         {
             CliJson.TraceException(ex);
-            if (job.MarkCancelled(next => Persist(ToRecord(next, fingerprint))))
+            if (job.MarkCancelled(next => Persist(ToRecord(job, next, fingerprint))))
             {
                 LogTerminal(job.CreateSnapshot(), AgentJobStatus.Cancelled, exitCode: null, errorType: ex.GetType().Name);
             }
@@ -281,9 +285,24 @@ public sealed class AgentJobService
         {
             CliJson.TraceException(ex);
             var failure = CreateFailure(ex);
-            if (job.Fail("agent job failed. See the server log for details.", failure, next => Persist(ToRecord(next, fingerprint))))
+            if (job.Fail("agent job failed. See the server log for details.", failure, next => Persist(ToRecord(job, next, fingerprint))))
             {
                 LogTerminal(job.CreateSnapshot(), AgentJobStatus.Failed, exitCode: failure.ExitCode, errorType: ex.GetType().Name);
+            }
+        }
+        finally
+        {
+            try
+            {
+                job.FinalizeLocalRun(next => Persist(ToRecord(job, next, fingerprint)));
+            }
+            catch (Exception ex)
+            {
+                CliJson.TraceException(ex);
+            }
+            finally
+            {
+                _activeLocalWorkers.TryRemove(job.JobId, out _);
             }
         }
     }
@@ -624,54 +643,132 @@ public sealed class AgentJobService
 
     private AgentJobRecord RecoverStored(AgentJobRecord stored)
     {
-        if (stored.Status != AgentJobStatus.Running)
+        if (_activeLocalWorkers.TryGetValue(stored.JobId, out var activeWorker)
+            && activeWorker.IsTerminal)
         {
-            return stored;
+            return ToRecord(activeWorker, activeWorker.CreateSnapshot(), stored.RequestFingerprint);
         }
 
-        if (CanResumeJules(stored))
+        if (IsJulesRecord(stored))
         {
-            return stored;
-        }
+            if (stored.Status != AgentJobStatus.Running)
+            {
+                return stored;
+            }
 
-        var phase = stored.Jules?.RemotePhase ?? stored.RemotePhase;
-        if (string.IsNullOrWhiteSpace(stored.Jules?.SessionId)
-            && phase is JulesRemotePhase.SubmittingCreate or JulesRemotePhase.SubmissionUnknown)
-        {
-            var failed = stored with
+            if (CanResumeJules(stored))
+            {
+                return stored;
+            }
+
+            var phase = stored.Jules?.RemotePhase ?? stored.RemotePhase;
+            if (string.IsNullOrWhiteSpace(stored.Jules?.SessionId)
+                && phase is JulesRemotePhase.SubmittingCreate or JulesRemotePhase.SubmissionUnknown)
+            {
+                var failed = stored with
+                {
+                    Status = AgentJobStatus.Failed,
+                    Error = "agent job failed. See the server log for details.",
+                    Result = null,
+                    Failure = new AgentJobFailure(
+                        "submission_unknown",
+                        "Jules session create result is unknown. The request was not sent again."),
+                    Jules = stored.Jules is null
+                        ? null
+                        : stored.Jules with
+                        {
+                            RemotePhase = JulesRemotePhase.SubmissionUnknown,
+                            SessionLockHeld = false,
+                        },
+                    RemotePhase = JulesRemotePhase.SubmissionUnknown,
+                };
+                LogTerminal(ToSnapshot(failed), AgentJobStatus.Failed, exitCode: null, errorType: "submission_unknown");
+                Persist(failed);
+                return failed;
+            }
+
+            var interruptedJules = stored with
             {
                 Status = AgentJobStatus.Failed,
-                Error = "agent job failed. See the server log for details.",
+                Error = InterruptedError,
                 Result = null,
                 Failure = new AgentJobFailure(
-                    "submission_unknown",
-                    "Jules session create result is unknown. The request was not sent again."),
-                Jules = stored.Jules is null
-                    ? null
-                    : stored.Jules with
-                    {
-                        RemotePhase = JulesRemotePhase.SubmissionUnknown,
-                        SessionLockHeld = false,
-                    },
-                RemotePhase = JulesRemotePhase.SubmissionUnknown,
+                    "facade_interrupted",
+                    InterruptedError),
             };
-            LogTerminal(ToSnapshot(failed), AgentJobStatus.Failed, exitCode: null, errorType: "submission_unknown");
-            Persist(failed);
-            return failed;
+            LogTerminal(ToSnapshot(interruptedJules), AgentJobStatus.Failed, exitCode: null, errorType: "InterruptedError");
+            Persist(interruptedJules);
+            return interruptedJules;
         }
 
-        var interrupted = stored with
+        if (stored.Status == AgentJobStatus.Running)
         {
-            Status = AgentJobStatus.Failed,
-            Error = InterruptedError,
-            Result = null,
-            Failure = new AgentJobFailure(
-                "facade_interrupted",
-                InterruptedError),
-        };
-        LogTerminal(ToSnapshot(interrupted), AgentJobStatus.Failed, exitCode: null, errorType: "InterruptedError");
-        Persist(interrupted);
-        return interrupted;
+            var recovery = ResolveStoredRecovery(stored, wasRunning: true);
+            var interrupted = stored with
+            {
+                Status = AgentJobStatus.Failed,
+                Error = InterruptedError,
+                Result = null,
+                Failure = new AgentJobFailure(
+                    "facade_interrupted",
+                    InterruptedError),
+                Recovery = recovery,
+                RecoveryFinalized = true,
+            };
+            LogTerminal(ToSnapshot(interrupted), AgentJobStatus.Failed, exitCode: null, errorType: "InterruptedError");
+            Persist(interrupted);
+            return interrupted;
+        }
+
+        if (stored.Status is AgentJobStatus.Failed or AgentJobStatus.Cancelled
+            && !stored.RecoveryFinalized
+            && stored.Recovery?.Status != AgentSessionRecoveryStatus.Bound)
+        {
+            var recovery = ResolveStoredRecovery(stored, wasRunning: false);
+            var updated = stored with
+            {
+                Recovery = recovery,
+                RecoveryFinalized = true,
+            };
+            Persist(updated);
+            return updated;
+        }
+
+        return stored;
+    }
+
+    private AgentSessionRecovery? ResolveStoredRecovery(AgentJobRecord stored, bool wasRunning)
+    {
+        if (stored.Recovery is { Status: AgentSessionRecoveryStatus.Bound }
+            && !string.IsNullOrWhiteSpace(stored.Recovery.SessionId))
+        {
+            return stored.Recovery;
+        }
+
+        var explicitEventsPath = !string.IsNullOrWhiteSpace(stored.EventsLogPath)
+            ? stored.EventsLogPath
+            : stored.Failure?.EventsLogPath;
+        var eventsPath = !string.IsNullOrWhiteSpace(explicitEventsPath)
+            ? explicitEventsPath
+            : _facade.TryGetEventsPath(stored.JobId);
+
+        if (!wasRunning && string.IsNullOrWhiteSpace(explicitEventsPath))
+        {
+            // log 開始前に Cancel 等で終了し events.jsonl が存在しない場合は未確定（null）として扱う。
+            if (string.IsNullOrWhiteSpace(eventsPath) || !File.Exists(eventsPath))
+            {
+                return null;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(eventsPath))
+        {
+            return new AgentSessionRecovery(
+                AgentSessionRecoveryStatus.Unavailable,
+                Reason: AgentSessionRecoveryReason.RunLogUnavailable);
+        }
+
+        return AgentSessionLogRecovery.ReadFromEventsLog(eventsPath);
     }
 
     private AgentJobRecord? TryReadByRequestId(string requestId)
@@ -929,10 +1026,20 @@ public sealed class AgentJobService
             record.InputPrompt ?? record.Jules?.InputPrompt,
             record.RemotePhase ?? record.Jules?.RemotePhase,
             record.Artifacts ?? record.Jules?.Artifacts,
-            record.Jules);
+            record.Jules,
+            record.Recovery);
     }
 
-    private static AgentJobRecord ToRecord(AgentJobSnapshot snapshot, string fingerprint)
+    private static AgentJobRecord ToRecord(AgentJob job, AgentJobSnapshot snapshot, string fingerprint)
+    {
+        return ToRecord(snapshot, fingerprint, job.EventsLogPath, job.RecoveryFinalized);
+    }
+
+    private static AgentJobRecord ToRecord(
+        AgentJobSnapshot snapshot,
+        string fingerprint,
+        string? eventsLogPath = null,
+        bool recoveryFinalized = false)
     {
         return new AgentJobRecord(
             snapshot.JobId,
@@ -947,7 +1054,10 @@ public sealed class AgentJobService
             snapshot.SessionUrl,
             snapshot.InputPrompt,
             snapshot.RemotePhase,
-            snapshot.Artifacts);
+            snapshot.Artifacts,
+            eventsLogPath,
+            snapshot.Recovery,
+            recoveryFinalized);
     }
 
     private static AgentJobFailure CreateFailure(Exception exception)
@@ -969,6 +1079,9 @@ internal sealed record AgentJobRecord(
     string? SessionUrl = null,
     string? InputPrompt = null,
     string? RemotePhase = null,
-    IReadOnlyList<AgentJobArtifact>? Artifacts = null);
+    IReadOnlyList<AgentJobArtifact>? Artifacts = null,
+    string? EventsLogPath = null,
+    AgentSessionRecovery? Recovery = null,
+    bool RecoveryFinalized = false);
 
 

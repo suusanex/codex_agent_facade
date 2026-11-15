@@ -848,3 +848,618 @@ public class SessionBindingTests
         }
     }
 }
+
+public class LocalSessionRecoveryTests
+{
+    private const string BoundId = "12121212-1212-1212-1212-121212121212";
+    private const string ResumeSuccessId = "12121212-1212-1212-1212-121212121212";
+
+    [Theory]
+    [InlineData(AgentFacade.GitHubCopilotAgent, SessionBinding.Preallocated)]
+    [InlineData(AgentFacade.GrokBuildAgent, SessionBinding.Preallocated)]
+    [InlineData(AgentFacade.CursorAgent, SessionBinding.EarlyStream)]
+    [InlineData(AgentFacade.CodexAgent, SessionBinding.EarlyStream)]
+    [InlineData(AgentFacade.AntigravityAgent, SessionBinding.EarlyStream)]
+    public async Task LocalAgentFailureAfterSessionBoundExposesRecoveryAndAllowsExplicitContinuation(
+        string agent,
+        string expectedBindingSource)
+    {
+        var store = Directory.CreateTempSubdirectory("caf-rec-fail-").FullName;
+        var logs = Directory.CreateTempSubdirectory("caf-rec-fail-logs-").FullName;
+        var workspace = Directory.CreateTempSubdirectory("caf-rec-fail-ws-").FullName;
+        try
+        {
+            var runner = new RecordingProcessRunner();
+            var facade = CreateFacade(runner, logs, () => BoundId);
+            var service = new AgentJobService(facade, store);
+
+            runner.Result = FailedAfterBindResult(agent, BoundId);
+            var initialRequest = new AgentRunRequest(agent, "first attempt", workspace, null, null);
+            var started = service.Start("req-fail-initial", initialRequest);
+            var waited = await service.WaitAsync(started.JobId, timeoutSeconds: 10);
+
+            Assert.Equal(AgentJobStatus.Failed, waited.Status);
+            Assert.NotNull(waited.Failure);
+            Assert.NotNull(waited.Recovery);
+            Assert.Equal(AgentSessionRecoveryStatus.Bound, waited.Recovery!.Status);
+            Assert.Equal(BoundId, waited.Recovery.SessionId);
+            Assert.Equal(expectedBindingSource, waited.Recovery.BindingSource);
+            Assert.Null(waited.Recovery.Reason);
+
+            var gotten = service.Get(started.JobId);
+            Assert.Equal(waited.Recovery, gotten.Recovery);
+
+            // exact retry は同じ failure と bound recovery を返し、CLI を再起動しない。
+            var retried = service.Start("req-fail-initial", initialRequest);
+            Assert.Equal(started.JobId, retried.JobId);
+            Assert.Equal(AgentJobStatus.Failed, retried.Status);
+            Assert.Equal(waited.Recovery, retried.Recovery);
+            Assert.Equal(1, runner.CallCount);
+
+            // 公開 JSON は recovery を含めつつ、local job 直下の sessionId は複製しない。
+            var publicJson = JsonSerializer.Serialize(AgentJobPublicProjection.From(waited), AgentJson.Options);
+            using var doc = JsonDocument.Parse(publicJson);
+            Assert.False(doc.RootElement.TryGetProperty("sessionId", out _));
+            Assert.Equal("bound", doc.RootElement.GetProperty("recovery").GetProperty("status").GetString());
+            Assert.Equal(BoundId, doc.RootElement.GetProperty("recovery").GetProperty("sessionId").GetString());
+
+            // ユーザー依頼による明示継続は新しい request_id と recovery.sessionId を使う。
+            runner.Result = SucceededResult(agent, BoundId, "continued ok");
+            var continuationRequest = new AgentRunRequest(
+                agent,
+                "continue after failure",
+                workspace,
+                waited.Recovery.SessionId,
+                null);
+            var continuedStarted = service.Start("req-fail-continue", continuationRequest);
+            var continued = await service.WaitAsync(continuedStarted.JobId, timeoutSeconds: 10);
+            Assert.Equal(AgentJobStatus.Completed, continued.Status);
+            Assert.Null(continued.Recovery);
+            Assert.Equal(BoundId, continued.Result!.SessionId);
+            Assert.Equal("continued ok", continued.Result.OutputText);
+            Assert.Equal(2, runner.CallCount);
+            Assert.Contains(BoundId, runner.LastRequest!.Arguments);
+        }
+        finally
+        {
+            DeleteQuietly(store);
+            DeleteQuietly(logs);
+            DeleteQuietly(workspace);
+        }
+    }
+
+    [Fact]
+    public async Task GrokPlanFailureAfterSessionNewExposesRecoveryAndAllowsResume()
+    {
+        var store = Directory.CreateTempSubdirectory("caf-rec-plan-").FullName;
+        var logs = Directory.CreateTempSubdirectory("caf-rec-plan-logs-").FullName;
+        var workspace = Directory.CreateTempSubdirectory("caf-rec-plan-ws-").FullName;
+        try
+        {
+            var factory = new ScriptedGrokAcpFactory
+            {
+                Script = new ScriptedGrokPlanScript
+                {
+                    SessionId = BoundId,
+                    ErrorOn = "session/prompt",
+                },
+            };
+            var facade = new AgentFacade(
+                new GitHubCopilotDriver(new RecordingProcessRunner()),
+                new GrokBuildDriver(new RecordingProcessRunner(), TimeProvider.System, new ThrowingGrokLogReader(), factory),
+                new CursorCliDriver(new RecordingProcessRunner()),
+                new CodexCliDriver(new RecordingProcessRunner()),
+                new AgentRunLogFactory(logs, TimeProvider.System),
+                antigravityCli: new AntigravityCliDriver(new RecordingProcessRunner()));
+            var service = new AgentJobService(facade, store);
+
+            var initialRequest = new AgentRunRequest(
+                AgentFacade.GrokBuildAgent,
+                "draft plan",
+                workspace,
+                null,
+                null,
+                RunMode: "plan");
+            var started = service.Start("req-plan-fail", initialRequest);
+            var waited = await service.WaitAsync(started.JobId, timeoutSeconds: 10);
+
+            Assert.Equal(AgentJobStatus.Failed, waited.Status);
+            Assert.Equal(AgentSessionRecoveryStatus.Bound, waited.Recovery!.Status);
+            Assert.Equal(BoundId, waited.Recovery.SessionId);
+            Assert.Equal(SessionBinding.EarlyStream, waited.Recovery.BindingSource);
+
+            factory.Script = new ScriptedGrokPlanScript
+            {
+                LoadSessionId = BoundId,
+                PlanContent = "# Resumed Plan\nDone",
+            };
+            var continuedRequest = initialRequest with
+            {
+                Prompt = "finish plan",
+                SessionId = waited.Recovery.SessionId,
+            };
+            var continuedStarted = service.Start("req-plan-continue", continuedRequest);
+            var continued = await service.WaitAsync(continuedStarted.JobId, timeoutSeconds: 10);
+            Assert.Equal(AgentJobStatus.Completed, continued.Status);
+            Assert.Null(continued.Recovery);
+            Assert.Equal(BoundId, continued.Result!.SessionId);
+            Assert.Equal("plan", continued.Result.OutputKind);
+        }
+        finally
+        {
+            DeleteQuietly(store);
+            DeleteQuietly(logs);
+            DeleteQuietly(workspace);
+        }
+    }
+
+    [Theory]
+    [InlineData(AgentFacade.GitHubCopilotAgent, SessionBinding.Preallocated)]
+    [InlineData(AgentFacade.CodexAgent, SessionBinding.EarlyStream)]
+    [InlineData(AgentFacade.AntigravityAgent, SessionBinding.EarlyStream)]
+    public async Task CancelAfterSessionBoundExposesRecoveryAcrossCancelGetRetryAndRestart(
+        string agent,
+        string expectedBindingSource)
+    {
+        var store = Directory.CreateTempSubdirectory("caf-rec-cancel-").FullName;
+        var logs = Directory.CreateTempSubdirectory("caf-rec-cancel-logs-").FullName;
+        var workspace = Directory.CreateTempSubdirectory("caf-rec-cancel-ws-").FullName;
+        try
+        {
+            var runner = new RecordingProcessRunner
+            {
+                Gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously),
+            };
+            var facade = CreateFacade(runner, logs, () => BoundId);
+            var service = new AgentJobService(facade, store);
+
+            var request = new AgentRunRequest(agent, "long task", workspace, null, null);
+            var started = service.Start("req-cancel-bound", request);
+            await runner.StartedTask.WaitAsync(TimeSpan.FromSeconds(10));
+            if (agent == AgentFacade.CodexAgent)
+            {
+                runner.EmitStdout("{\"type\":\"thread.started\",\"thread_id\":\"" + BoundId + "\"}");
+            }
+            else if (agent == AgentFacade.AntigravityAgent)
+            {
+                runner.EmitStdout("{\"event\":\"init\",\"conversation_id\":\"" + BoundId + "\",\"init\":{}}");
+            }
+
+            // 早期ストリーム経由も session_bound の書き込み完了まで待ってから Cancel する。
+            await WaitForSessionBoundEventAsync(logs, started.JobId);
+
+            var cancelled = service.Cancel(started.JobId);
+            Assert.Equal(AgentJobStatus.Cancelled, cancelled.Status);
+            Assert.NotNull(cancelled.Recovery);
+            Assert.Equal(AgentSessionRecoveryStatus.Bound, cancelled.Recovery!.Status);
+            Assert.Equal(BoundId, cancelled.Recovery.SessionId);
+            Assert.Equal(expectedBindingSource, cancelled.Recovery.BindingSource);
+
+            runner.Gate.TrySetResult(true);
+            var gotten = service.Get(started.JobId);
+            Assert.Equal(AgentJobStatus.Cancelled, gotten.Status);
+            Assert.Equal(cancelled.Recovery, gotten.Recovery);
+
+            var retried = service.Start("req-cancel-bound", request);
+            Assert.Equal(AgentJobStatus.Cancelled, retried.Status);
+            Assert.Equal(cancelled.Recovery, retried.Recovery);
+
+            // 再起動後の別 AgentJobService インスタンスからも同じ bound recovery を取得できる。
+            var restarted = new AgentJobService(CreateFacade(new RecordingProcessRunner(), logs), store);
+            var afterRestart = restarted.Get(started.JobId);
+            Assert.Equal(AgentJobStatus.Cancelled, afterRestart.Status);
+            Assert.Equal(cancelled.Recovery, afterRestart.Recovery);
+        }
+        finally
+        {
+            DeleteQuietly(store);
+            DeleteQuietly(logs);
+            DeleteQuietly(workspace);
+        }
+    }
+
+    [Fact]
+    public async Task CancelBeforeLateBindStillPersistsRecoveryOnDiskWithoutChangingCancelledStatus()
+    {
+        var store = Directory.CreateTempSubdirectory("caf-rec-race-").FullName;
+        var logs = Directory.CreateTempSubdirectory("caf-rec-race-logs-").FullName;
+        var workspace = Directory.CreateTempSubdirectory("caf-rec-race-ws-").FullName;
+        try
+        {
+            var runner = new LateBindOnCancelRunner(BoundId);
+            var facade = CreateFacade(runner, logs);
+            var service = new AgentJobService(facade, store);
+
+            var request = new AgentRunRequest(AgentFacade.CodexAgent, "race task", workspace, null, null);
+            var started = service.Start("req-cancel-race", request);
+            await runner.Started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+            // まだ session_bound 前に Cancel して live 登録が外れた状態を作る。
+            var cancelled = service.Cancel(started.JobId);
+            Assert.Equal(AgentJobStatus.Cancelled, cancelled.Status);
+            Assert.Null(cancelled.Recovery);
+
+            // worker 終了前に遅れて BindSession が発火しても disk 上へ recovery を補完する。
+            runner.AllowLateBind.TrySetResult();
+            await WaitForSessionBoundEventAsync(logs, started.JobId);
+
+            AgentJobSnapshot? observed = null;
+            for (var i = 0; i < 40; i++)
+            {
+                observed = service.Get(started.JobId);
+                if (observed.Recovery?.Status == AgentSessionRecoveryStatus.Bound)
+                {
+                    break;
+                }
+
+                await Task.Delay(25);
+            }
+
+            Assert.NotNull(observed);
+            Assert.Equal(AgentJobStatus.Cancelled, observed!.Status);
+            Assert.Equal(AgentSessionRecoveryStatus.Bound, observed.Recovery?.Status);
+            Assert.Equal(BoundId, observed.Recovery?.SessionId);
+
+            var restarted = new AgentJobService(CreateFacade(new RecordingProcessRunner(), logs), store);
+            var afterRestart = restarted.Get(started.JobId);
+            Assert.Equal(AgentJobStatus.Cancelled, afterRestart.Status);
+            Assert.Equal(BoundId, afterRestart.Recovery?.SessionId);
+        }
+        finally
+        {
+            DeleteQuietly(store);
+            DeleteQuietly(logs);
+            DeleteQuietly(workspace);
+        }
+    }
+
+    [Fact]
+    public async Task RestartRecoversBoundSessionFromRunningAndUnfinalizedRecordsEvenWithTruncatedTail()
+    {
+        var store = Directory.CreateTempSubdirectory("caf-rec-restart-").FullName;
+        var logs = Directory.CreateTempSubdirectory("caf-rec-restart-logs-").FullName;
+        var workspace = Directory.CreateTempSubdirectory("caf-rec-restart-ws-").FullName;
+        try
+        {
+            var runningRunner = new RecordingProcessRunner
+            {
+                Gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously),
+            };
+            var facade1 = CreateFacade(runningRunner, logs);
+            var service1 = new AgentJobService(facade1, store);
+            var req = new AgentRunRequest(AgentFacade.CodexAgent, "crash test", workspace, null, null);
+            var started = service1.Start("req-crash-bound", req);
+            await runningRunner.StartedTask.WaitAsync(TimeSpan.FromSeconds(10));
+            runningRunner.EmitStdout("{\"type\":\"thread.started\",\"thread_id\":\"" + BoundId + "\"}");
+            var eventsPath = await WaitForSessionBoundEventAsync(logs, started.JobId);
+
+            // 1) running レコードの recovery フィールドが未保存かつ末尾行が途中で切れた状態をシミュレート。
+            var recordPath = Directory.EnumerateFiles(store, "req-*.json").Single();
+            var stored = JsonSerializer.Deserialize<AgentJobRecord>(File.ReadAllText(recordPath), AgentJson.Options)!;
+            var legacyRunning = stored with { Status = AgentJobStatus.Running, Recovery = null, RecoveryFinalized = false };
+            File.WriteAllText(recordPath, JsonSerializer.Serialize(legacyRunning, AgentJson.Options));
+            using (var stream = new FileStream(eventsPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
+            using (var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(false)))
+            {
+                await writer.WriteAsync("{\"ts\":\"2026-11-15T00:00:00Z\",\"truncated\":");
+            }
+
+            var service2 = new AgentJobService(CreateFacade(new RecordingProcessRunner(), logs), store);
+            var recoveredRunning = service2.Get(started.JobId);
+            Assert.Equal(AgentJobStatus.Failed, recoveredRunning.Status);
+            Assert.Equal("facade_interrupted", recoveredRunning.Failure!.Kind);
+            Assert.Null(recoveredRunning.Failure.RunId);
+            Assert.Equal(AgentSessionRecoveryStatus.Bound, recoveredRunning.Recovery!.Status);
+            Assert.Equal(BoundId, recoveredRunning.Recovery.SessionId);
+            Assert.Equal(SessionBinding.EarlyStream, recoveredRunning.Recovery.BindingSource);
+
+            // 2) 未完了確定（recoveryFinalized=false）の cancelled レコードでも cancelled のまま events.jsonl から復元する。
+            var unfinalizedCancelled = stored with
+            {
+                Status = AgentJobStatus.Cancelled,
+                Error = "cancelled",
+                Failure = null,
+                Recovery = null,
+                RecoveryFinalized = false,
+            };
+            File.WriteAllText(recordPath, JsonSerializer.Serialize(unfinalizedCancelled, AgentJson.Options));
+
+            var service3 = new AgentJobService(CreateFacade(new RecordingProcessRunner(), logs), store);
+            var recoveredCancelled = service3.Get(started.JobId);
+            Assert.Equal(AgentJobStatus.Cancelled, recoveredCancelled.Status);
+            Assert.Null(recoveredCancelled.Failure);
+            Assert.Equal(AgentSessionRecoveryStatus.Bound, recoveredCancelled.Recovery!.Status);
+            Assert.Equal(BoundId, recoveredCancelled.Recovery.SessionId);
+
+            runningRunner.Gate.TrySetResult(true);
+        }
+        finally
+        {
+            DeleteQuietly(store);
+            DeleteQuietly(logs);
+            DeleteQuietly(workspace);
+        }
+    }
+
+    [Fact]
+    public void RestartDistinguishesUnboundFromMissingCorruptUnreadableAndConflictingLogs()
+    {
+        var store = Directory.CreateTempSubdirectory("caf-rec-diag-").FullName;
+        var logs = Directory.CreateTempSubdirectory("caf-rec-diag-logs-").FullName;
+        try
+        {
+            var service = new AgentJobService(CreateFacade(new RecordingProcessRunner(), logs), store);
+
+            // 1) 全行が有効 JSON で session_bound が無い running crash -> recovery は null（未確定）
+            var unboundJobId = "job-unbound-clean";
+            var unboundEvents = Path.Combine(logs, unboundJobId + ".events.jsonl");
+            File.WriteAllText(unboundEvents, "{\"ts\":\"2026-11-15T00:00:00Z\",\"runId\":\"" + unboundJobId + "\",\"source\":\"facade\",\"type\":\"started\",\"data\":{}}\n");
+            WriteStoredRecord(store, unboundJobId, "req-unbound-clean", unboundEvents);
+            var unboundRecovered = service.Get(unboundJobId);
+            Assert.Equal(AgentJobStatus.Failed, unboundRecovered.Status);
+            Assert.Equal("facade_interrupted", unboundRecovered.Failure!.Kind);
+            Assert.Null(unboundRecovered.Recovery);
+            Assert.False(JsonDocument.Parse(JsonSerializer.Serialize(AgentJobPublicProjection.From(unboundRecovered), AgentJson.Options))
+                .RootElement.TryGetProperty("recovery", out _));
+
+            // 2) run log 欠落 -> unavailable / run_log_missing
+            var missingJobId = "job-missing-log";
+            var missingEvents = Path.Combine(logs, missingJobId + ".events.jsonl");
+            WriteStoredRecord(store, missingJobId, "req-missing-log", missingEvents);
+            var missingRecovered = service.Get(missingJobId);
+            Assert.Equal(AgentSessionRecoveryStatus.Unavailable, missingRecovered.Recovery!.Status);
+            Assert.Equal(AgentSessionRecoveryReason.RunLogMissing, missingRecovered.Recovery.Reason);
+            Assert.Null(missingRecovered.Recovery.SessionId);
+
+            // 3) session_bound 無しの破損ログ -> unavailable / run_log_corrupt
+            var corruptJobId = "job-corrupt-log";
+            var corruptEvents = Path.Combine(logs, corruptJobId + ".events.jsonl");
+            File.WriteAllText(corruptEvents, "{not-valid-json\n");
+            WriteStoredRecord(store, corruptJobId, "req-corrupt-log", corruptEvents);
+            var corruptRecovered = service.Get(corruptJobId);
+            Assert.Equal(AgentSessionRecoveryStatus.Unavailable, corruptRecovered.Recovery!.Status);
+            Assert.Equal(AgentSessionRecoveryReason.RunLogCorrupt, corruptRecovered.Recovery.Reason);
+            Assert.Null(corruptRecovered.Recovery.SessionId);
+
+            // 4) 複数異なる session_bound が残った不整合ログ -> unavailable / session_mismatch
+            var conflictJobId = "job-conflict-log";
+            var conflictEvents = Path.Combine(logs, conflictJobId + ".events.jsonl");
+            File.WriteAllText(
+                conflictEvents,
+                "{\"ts\":\"2026-11-15T00:00:00Z\",\"runId\":\"" + conflictJobId + "\",\"source\":\"facade\",\"type\":\"session_bound\",\"data\":{\"sessionId\":\"sess-a\",\"bindingSource\":\"preallocated\"}}\n"
+                + "{\"ts\":\"2026-11-15T00:00:01Z\",\"runId\":\"" + conflictJobId + "\",\"source\":\"facade\",\"type\":\"session_bound\",\"data\":{\"sessionId\":\"sess-b\",\"bindingSource\":\"early_stream\"}}\n");
+            WriteStoredRecord(store, conflictJobId, "req-conflict-log", conflictEvents);
+            var conflictRecovered = service.Get(conflictJobId);
+            Assert.Equal(AgentSessionRecoveryStatus.Unavailable, conflictRecovered.Recovery!.Status);
+            Assert.Equal(AgentSessionRecoveryReason.SessionMismatch, conflictRecovered.Recovery.Reason);
+            Assert.Null(conflictRecovered.Recovery.SessionId);
+
+            // 5) 読取不能なログ（共有なしロック中のファイル）-> unavailable / run_log_unreadable
+            var unreadableJobId = "job-unreadable-log";
+            var unreadableEvents = Path.Combine(logs, unreadableJobId + ".events.jsonl");
+            File.WriteAllText(unreadableEvents, "{\"source\":\"facade\",\"type\":\"started\",\"data\":{}}\n");
+            WriteStoredRecord(store, unreadableJobId, "req-unreadable-log", unreadableEvents);
+            using (var exclusiveLock = new FileStream(unreadableEvents, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                var unreadableRecovered = service.Get(unreadableJobId);
+                Assert.Equal(AgentSessionRecoveryStatus.Unavailable, unreadableRecovered.Recovery!.Status);
+                Assert.Equal(AgentSessionRecoveryReason.RunLogUnreadable, unreadableRecovered.Recovery.Reason);
+                Assert.Null(unreadableRecovered.Recovery.SessionId);
+            }
+        }
+        finally
+        {
+            DeleteQuietly(store);
+            DeleteQuietly(logs);
+        }
+    }
+
+    [Fact]
+    public async Task FailureOrCancelBeforeSessionBoundDoesNotFabricateRecoveryId()
+    {
+        var store = Directory.CreateTempSubdirectory("caf-rec-unbound-").FullName;
+        var logs = Directory.CreateTempSubdirectory("caf-rec-unbound-logs-").FullName;
+        var workspace = Directory.CreateTempSubdirectory("caf-rec-unbound-ws-").FullName;
+        try
+        {
+            var runner = new RecordingProcessRunner
+            {
+                Result = new ProcessRunResult(5, "{\"type\":\"assistant.message\",\"data\":{\"content\":\"partial\"}}\n", "boom"),
+            };
+            var facade = CreateFacade(runner, logs);
+            var service = new AgentJobService(facade, store);
+
+            var failedStarted = service.Start("req-unbound-fail", new AgentRunRequest(AgentFacade.CodexAgent, "hello", workspace, null, null));
+            var failed = await service.WaitAsync(failedStarted.JobId, timeoutSeconds: 10);
+            Assert.Equal(AgentJobStatus.Failed, failed.Status);
+            Assert.Null(failed.Recovery);
+
+            runner.Gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var cancelStarted = service.Start("req-unbound-cancel", new AgentRunRequest(AgentFacade.CursorAgent, "wait", workspace, null, null));
+            await runner.StartedTask.WaitAsync(TimeSpan.FromSeconds(10));
+            var cancelled = service.Cancel(cancelStarted.JobId);
+            runner.Gate.TrySetResult(true);
+            Assert.Equal(AgentJobStatus.Cancelled, cancelled.Status);
+            Assert.Null(cancelled.Recovery);
+        }
+        finally
+        {
+            DeleteQuietly(store);
+            DeleteQuietly(logs);
+            DeleteQuietly(workspace);
+        }
+    }
+
+    [Fact]
+    public async Task SessionMismatchKeepsFirstBoundRecoveryAndFailureKind()
+    {
+        var store = Directory.CreateTempSubdirectory("caf-rec-mismatch-").FullName;
+        var logs = Directory.CreateTempSubdirectory("caf-rec-mismatch-logs-").FullName;
+        var workspace = Directory.CreateTempSubdirectory("caf-rec-mismatch-ws-").FullName;
+        try
+        {
+            var runner = new RecordingProcessRunner
+            {
+                Result = new ProcessRunResult(
+                    0,
+                    "{\"type\":\"thread.started\",\"thread_id\":\"other-thread\"}\n"
+                    + "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"ok\"}}\n",
+                    ""),
+            };
+            var facade = CreateFacade(runner, logs);
+            var service = new AgentJobService(facade, store);
+
+            var started = service.Start(
+                "req-mismatch-recovery",
+                new AgentRunRequest(AgentFacade.CodexAgent, "resume check", workspace, BoundId, null));
+            var failed = await service.WaitAsync(started.JobId, timeoutSeconds: 10);
+
+            Assert.Equal(AgentJobStatus.Failed, failed.Status);
+            Assert.Equal("session_mismatch", failed.Failure!.Kind);
+            Assert.Equal(AgentSessionRecoveryStatus.Bound, failed.Recovery!.Status);
+            Assert.Equal(BoundId, failed.Recovery.SessionId);
+            Assert.Equal(SessionBinding.Resume, failed.Recovery.BindingSource);
+        }
+        finally
+        {
+            DeleteQuietly(store);
+            DeleteQuietly(logs);
+            DeleteQuietly(workspace);
+        }
+    }
+
+    private static AgentFacade CreateFacade(
+        IProcessRunner runner,
+        string logDirectory,
+        Func<string>? allocateSessionId = null)
+    {
+        return new AgentFacade(
+            new GitHubCopilotDriver(runner, allocateSessionId),
+            new GrokBuildDriver(runner, TimeProvider.System, new ThrowingGrokLogReader(), allocateSessionId: allocateSessionId),
+            new CursorCliDriver(runner),
+            new CodexCliDriver(runner),
+            new AgentRunLogFactory(logDirectory, TimeProvider.System),
+            antigravityCli: new AntigravityCliDriver(runner));
+    }
+
+    private sealed class LateBindOnCancelRunner(string threadId) : IProcessRunner
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource AllowLateBind { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<ProcessRunResult> RunAsync(ProcessRunRequest request, CancellationToken cancellationToken)
+        {
+            Started.TrySetResult();
+            var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var registration = cancellationToken.Register(() => cancelled.TrySetResult());
+            await cancelled.Task.ConfigureAwait(false);
+            await AllowLateBind.Task.ConfigureAwait(false);
+            request.StdoutLineCallback?.Invoke("{\"type\":\"thread.started\",\"thread_id\":\"" + threadId + "\"}");
+            throw new OperationCanceledException(cancellationToken);
+        }
+    }
+
+    private static ProcessRunResult FailedAfterBindResult(string agent, string sessionId)
+    {
+        return agent switch
+        {
+            AgentFacade.GitHubCopilotAgent => new ProcessRunResult(1, "not-json\n", "copilot failed"),
+            AgentFacade.GrokBuildAgent => new ProcessRunResult(1, "not-json\n", "grok failed"),
+            AgentFacade.CursorAgent => new ProcessRunResult(
+                1,
+                "{\"type\":\"system\",\"session_id\":\"" + sessionId + "\"}\n",
+                "cursor failed"),
+            AgentFacade.CodexAgent => new ProcessRunResult(
+                1,
+                "{\"type\":\"thread.started\",\"thread_id\":\"" + sessionId + "\"}\n",
+                "codex failed"),
+            AgentFacade.AntigravityAgent => new ProcessRunResult(
+                1,
+                "{\"event\":\"init\",\"conversation_id\":\"" + sessionId + "\",\"init\":{}}\n",
+                "antigravity failed"),
+            _ => throw new ArgumentOutOfRangeException(nameof(agent), agent, null),
+        };
+    }
+
+    private static ProcessRunResult SucceededResult(string agent, string sessionId, string text)
+    {
+        return agent switch
+        {
+            AgentFacade.GitHubCopilotAgent => new ProcessRunResult(
+                0,
+                "{\"type\":\"assistant.turn_start\"}\n{\"type\":\"assistant.message\",\"data\":{\"content\":\"" + text + "\"}}\n{\"type\":\"assistant.turn_end\"}\n{\"type\":\"result\",\"sessionId\":\"" + sessionId + "\"}\n",
+                ""),
+            AgentFacade.GrokBuildAgent => new ProcessRunResult(
+                0,
+                "{\"type\":\"text\",\"data\":\"" + text + "\"}\n{\"type\":\"end\",\"sessionId\":\"" + sessionId + "\"}\n",
+                ""),
+            AgentFacade.CursorAgent => new ProcessRunResult(
+                0,
+                "{\"type\":\"system\",\"session_id\":\"" + sessionId + "\"}\n{\"type\":\"result\",\"is_error\":false,\"session_id\":\"" + sessionId + "\",\"result\":\"" + text + "\"}\n",
+                ""),
+            AgentFacade.CodexAgent => new ProcessRunResult(
+                0,
+                "{\"type\":\"thread.started\",\"thread_id\":\"" + sessionId + "\"}\n{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"" + text + "\"}}\n{\"type\":\"turn.completed\"}\n",
+                ""),
+            AgentFacade.AntigravityAgent => new ProcessRunResult(
+                0,
+                "{\"event\":\"init\",\"conversation_id\":\"" + sessionId + "\",\"init\":{}}\n{\"event\":\"result\",\"result\":{\"conversation_id\":\"" + sessionId + "\",\"status\":\"SUCCESS\",\"response\":\"" + text + "\"}}\n",
+                ""),
+            _ => throw new ArgumentOutOfRangeException(nameof(agent), agent, null),
+        };
+    }
+
+    private static async Task<string> WaitForSessionBoundEventAsync(string logDirectory, string jobId)
+    {
+        var eventsPath = Path.Combine(logDirectory, jobId + ".events.jsonl");
+        for (var i = 0; i < 100; i++)
+        {
+            if (File.Exists(eventsPath))
+            {
+                using var stream = new FileStream(eventsPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var reader = new StreamReader(stream);
+                var text = await reader.ReadToEndAsync();
+                if (text.Contains("\"session_bound\"", StringComparison.Ordinal))
+                {
+                    return eventsPath;
+                }
+            }
+
+            await Task.Delay(20);
+        }
+
+        throw new TimeoutException("Timed out waiting for session_bound in " + eventsPath);
+    }
+
+    private static void WriteStoredRecord(string storeDirectory, string jobId, string requestId, string? eventsLogPath)
+    {
+        var record = new AgentJobRecord(
+            jobId,
+            requestId,
+            AgentJobStatus.Running,
+            "fp-" + jobId,
+            null,
+            null,
+            null,
+            EventsLogPath: eventsLogPath);
+        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(requestId))).ToLowerInvariant();
+        File.WriteAllText(
+            Path.Combine(storeDirectory, "req-" + hash + ".json"),
+            JsonSerializer.Serialize(record, AgentJson.Options));
+    }
+
+    private static void DeleteQuietly(string directory)
+    {
+        try
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            CliJson.TraceException(ex);
+        }
+    }
+}

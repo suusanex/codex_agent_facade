@@ -145,11 +145,28 @@ public sealed class AgentFacade
         _runLogViewerLauncher = runLogViewerLauncher ?? NullRunLogViewerLauncher.Instance;
     }
 
-    public async Task<AgentRunResult> RunAsync(
+    public Task<AgentRunResult> RunAsync(
         AgentRunRequest request,
         Action<string>? onStdoutLine,
         CancellationToken cancellationToken,
         string? runId = null)
+    {
+        return RunAsync(
+            request,
+            onStdoutLine,
+            cancellationToken,
+            runId,
+            onLogStarted: null,
+            onSessionBound: null);
+    }
+
+    internal async Task<AgentRunResult> RunAsync(
+        AgentRunRequest request,
+        Action<string>? onStdoutLine,
+        CancellationToken cancellationToken,
+        string? runId,
+        Action<IAgentRunLog>? onLogStarted,
+        Action<SessionBindingInfo>? onSessionBound)
     {
         try
         {
@@ -161,9 +178,13 @@ public sealed class AgentFacade
             throw;
         }
 
-        await using var log = string.IsNullOrWhiteSpace(runId)
+        await using var rawLog = string.IsNullOrWhiteSpace(runId)
             ? _runLogFactory.Start(request)
             : _runLogFactory.Start(request, runId);
+        IAgentRunLog log = onSessionBound is null
+            ? rawLog
+            : new ObservedAgentRunLog(rawLog, onSessionBound);
+        onLogStarted?.Invoke(log);
         TryLaunchRunLogViewer(log);
         try
         {
@@ -194,6 +215,8 @@ public sealed class AgentFacade
         }
         catch (OperationCanceledException ex)
         {
+            CliJson.AttachFailureLog(ex, log);
+            CliJson.AttachBoundSession(ex, log.BoundSession);
             CliJson.TraceException(ex);
             log.WriteCancelled();
             throw;
@@ -201,10 +224,16 @@ public sealed class AgentFacade
         catch (Exception ex)
         {
             CliJson.AttachFailureLog(ex, log);
+            CliJson.AttachBoundSession(ex, log.BoundSession);
             CliJson.TraceException(ex);
             log.WriteFailed(ex);
             throw;
         }
+    }
+
+    internal string? TryGetEventsPath(string runId)
+    {
+        return _runLogFactory.TryGetEventsPath(runId);
     }
 
     internal async Task<JulesRunOutcome> RunJulesAsync(
@@ -265,6 +294,49 @@ public sealed class AgentFacade
     private AntigravityCliDriver RequireAntigravity()
     {
         return _antigravityCli ?? throw new InvalidOperationException("Antigravity driver is not configured.");
+    }
+
+    private sealed class ObservedAgentRunLog : IAgentRunLog
+    {
+        private readonly IAgentRunLog _inner;
+        private readonly Action<SessionBindingInfo> _onSessionBound;
+
+        public ObservedAgentRunLog(IAgentRunLog inner, Action<SessionBindingInfo> onSessionBound)
+        {
+            _inner = inner;
+            _onSessionBound = onSessionBound;
+        }
+
+        public string RunId => _inner.RunId;
+        public string EventsPath => _inner.EventsPath;
+        public string TextLogPath => _inner.TextLogPath;
+        public string? BoundSessionId => _inner.BoundSessionId;
+        public SessionBindingInfo? BoundSession => _inner.BoundSession;
+
+        public void WriteStarted(AgentRunStartedInfo info) => _inner.WriteStarted(info);
+        public void WriteLaunch(ProcessLaunchInfo info) => _inner.WriteLaunch(info);
+        public void WriteAgentEvent(string type, JsonElement payload, string? humanSummary) => _inner.WriteAgentEvent(type, payload, humanSummary);
+        public void AppendHumanFragment(string kind, string text) => _inner.AppendHumanFragment(kind, text);
+        public void WriteProcessLine(string stream, string line) => _inner.WriteProcessLine(stream, line);
+        public void NoteExternalOutput() => _inner.NoteExternalOutput();
+        public void AttachProcess(IProcessLifetime process) => _inner.AttachProcess(process);
+
+        public void BindSession(string sessionId, string bindingSource)
+        {
+            var previous = _inner.BoundSession;
+            _inner.BindSession(sessionId, bindingSource);
+            var current = _inner.BoundSession;
+            if (current is not null && previous is null)
+            {
+                _onSessionBound(current);
+            }
+        }
+
+        public void WriteCompleted(AgentRunResult result) => _inner.WriteCompleted(result);
+        public void WriteFailed(Exception exception) => _inner.WriteFailed(exception);
+        public void WriteCancelled() => _inner.WriteCancelled();
+        public void Dispose() => _inner.Dispose();
+        public ValueTask DisposeAsync() => _inner.DisposeAsync();
     }
 
     private JulesDriver RequireJules()
@@ -402,6 +474,8 @@ internal static class CliJson
     internal const string FailureRunIdKey = "CodexAgentFacade.FailureRunId";
     internal const string FailureEventsLogPathKey = "CodexAgentFacade.FailureEventsLogPath";
     internal const string FailureTextLogPathKey = "CodexAgentFacade.FailureTextLogPath";
+    internal const string BoundSessionIdKey = "CodexAgentFacade.BoundSessionId";
+    internal const string BoundSessionSourceKey = "CodexAgentFacade.BoundSessionSource";
 
     public static void MarkFailure(
         Exception exception,
@@ -443,6 +517,33 @@ internal static class CliJson
         exception.Data[FailureRunIdKey] = log.RunId;
         exception.Data[FailureEventsLogPathKey] = log.EventsPath;
         exception.Data[FailureTextLogPathKey] = log.TextLogPath;
+    }
+
+    public static void AttachBoundSession(Exception exception, SessionBindingInfo? binding)
+    {
+        if (binding is null)
+        {
+            return;
+        }
+
+        exception.Data[BoundSessionIdKey] = binding.SessionId;
+        exception.Data[BoundSessionSourceKey] = binding.BindingSource;
+    }
+
+    internal static AgentSessionRecovery? ReadRecovery(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        if (exception.Data[BoundSessionIdKey] is string sessionId
+            && !string.IsNullOrWhiteSpace(sessionId))
+        {
+            var bindingSource = exception.Data[BoundSessionSourceKey] as string;
+            return new AgentSessionRecovery(
+                AgentSessionRecoveryStatus.Bound,
+                sessionId,
+                string.IsNullOrWhiteSpace(bindingSource) ? null : bindingSource);
+        }
+
+        return null;
     }
 
     public static bool TryGetPropertyIgnoreCase(JsonElement element, string name, out JsonElement value)

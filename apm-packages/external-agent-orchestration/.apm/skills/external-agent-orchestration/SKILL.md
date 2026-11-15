@@ -57,6 +57,7 @@ jobの完了はタスクの達成を意味しない。短い報告から確認�
 - `running` かつ `remotePhase=submission_unknown`、または `communication_error` では、新しい request で同じ作業を再送しない。同じ `jobId` を `wait_agent_job` / `get_agent_job` で再照会する。受理不明中の session lock を別 request で回避しない。
 - Jules の `cancel_agent_job` は unsupported である。cancelled になったと報告しない。
 - Antigravity の `completionReason=permission_soft_denied` は完全成功ではない。`completed` でもこの reason を省かない。
+- local CLI agent（`github-copilot`, `grok-build`, `cursor`, `codex`, `antigravity`）の `failed` / `cancelled` で `recovery.status == "bound"` が返った場合は、失敗・取消事実を保ったまま `recovery.sessionId` を継続候補として確認できる。ユーザーが明示したときだけ新しい `request_id` と `session_id = recovery.sessionId` で継続し、自動再実行や `completed` への読み替えは行わない。`recovery` 無しや `recovery.status == "unavailable"` 時に ID を推測・捏造しない。
 - 同じ Codex thread だけでは Antigravity conversation や Jules session を継続しない。
 
 ## 継続と最終報告
