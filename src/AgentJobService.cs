@@ -23,6 +23,7 @@ public sealed class AgentJobService
     private readonly ConcurrentDictionary<string, AgentJob> _byRequestId = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, AgentJob> _byJobId = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, AgentJob> _activeLocalWorkers = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, object> _recordGates = new(StringComparer.Ordinal);
 
     public AgentJobService(AgentFacade facade)
         : this(facade, GetDefaultJobStoreDirectory(), TimeProvider.System)
@@ -649,92 +650,118 @@ public sealed class AgentJobService
             return ToRecord(activeWorker, activeWorker.CreateSnapshot(), stored.RequestFingerprint);
         }
 
-        if (IsJulesRecord(stored))
+        AgentJobRecord? liveResult = null;
+        AgentJobRecord result;
+        lock (GetRecordGate(stored.RequestId))
         {
-            if (stored.Status != AgentJobStatus.Running)
+            if (_activeLocalWorkers.TryGetValue(stored.JobId, out var currentWorker)
+                && currentWorker.IsTerminal)
             {
-                return stored;
-            }
-
-            if (CanResumeJules(stored))
-            {
-                return stored;
-            }
-
-            var phase = stored.Jules?.RemotePhase ?? stored.RemotePhase;
-            if (string.IsNullOrWhiteSpace(stored.Jules?.SessionId)
-                && phase is JulesRemotePhase.SubmittingCreate or JulesRemotePhase.SubmissionUnknown)
-            {
-                var failed = stored with
+                liveResult = currentWorker.CreateSnapshot() switch
                 {
-                    Status = AgentJobStatus.Failed,
-                    Error = "agent job failed. See the server log for details.",
-                    Result = null,
-                    Failure = new AgentJobFailure(
-                        "submission_unknown",
-                        "Jules session create result is unknown. The request was not sent again."),
-                    Jules = stored.Jules is null
-                        ? null
-                        : stored.Jules with
-                        {
-                            RemotePhase = JulesRemotePhase.SubmissionUnknown,
-                            SessionLockHeld = false,
-                        },
-                    RemotePhase = JulesRemotePhase.SubmissionUnknown,
+                    var snapshot => ToRecord(currentWorker, snapshot, stored.RequestFingerprint),
                 };
-                LogTerminal(ToSnapshot(failed), AgentJobStatus.Failed, exitCode: null, errorType: "submission_unknown");
-                Persist(failed);
-                return failed;
+                result = liveResult;
             }
+            else
+            {
+                // Persist との競合で古いスナップショットを書き戻さないよう、同一ゲート内で最新レコードを再読込する。
+                var current = TryReadByRequestId(stored.RequestId) ?? stored;
+                if (IsJulesRecord(current))
+                {
+                    result = RecoverJulesStoredLocked(current);
+                }
+                else if (current.Status == AgentJobStatus.Running)
+                {
+                    var recovery = ResolveStoredRecovery(current, wasRunning: true);
+                    var interrupted = current with
+                    {
+                        Status = AgentJobStatus.Failed,
+                        Error = InterruptedError,
+                        Result = null,
+                        Failure = new AgentJobFailure(
+                            "facade_interrupted",
+                            InterruptedError),
+                        Recovery = recovery,
+                        RecoveryFinalized = true,
+                    };
+                    LogTerminal(ToSnapshot(interrupted), AgentJobStatus.Failed, exitCode: null, errorType: "InterruptedError");
+                    PersistLocked(interrupted);
+                    result = interrupted;
+                }
+                else if (current.Status is AgentJobStatus.Failed or AgentJobStatus.Cancelled
+                    && !current.RecoveryFinalized
+                    && current.Recovery?.Status != AgentSessionRecoveryStatus.Bound)
+                {
+                    var recovery = ResolveStoredRecovery(current, wasRunning: false);
+                    var updated = current with
+                    {
+                        Recovery = recovery,
+                        RecoveryFinalized = true,
+                    };
+                    PersistLocked(updated);
+                    result = updated;
+                }
+                else
+                {
+                    result = current;
+                }
+            }
+        }
 
-            var interruptedJules = stored with
+        return liveResult ?? result;
+    }
+
+    private AgentJobRecord RecoverJulesStoredLocked(AgentJobRecord stored)
+    {
+        if (stored.Status != AgentJobStatus.Running)
+        {
+            return stored;
+        }
+
+        if (CanResumeJules(stored))
+        {
+            return stored;
+        }
+
+        var phase = stored.Jules?.RemotePhase ?? stored.RemotePhase;
+        if (string.IsNullOrWhiteSpace(stored.Jules?.SessionId)
+            && phase is JulesRemotePhase.SubmittingCreate or JulesRemotePhase.SubmissionUnknown)
+        {
+            var failed = stored with
             {
                 Status = AgentJobStatus.Failed,
-                Error = InterruptedError,
+                Error = "agent job failed. See the server log for details.",
                 Result = null,
                 Failure = new AgentJobFailure(
-                    "facade_interrupted",
-                    InterruptedError),
+                    "submission_unknown",
+                    "Jules session create result is unknown. The request was not sent again."),
+                Jules = stored.Jules is null
+                    ? null
+                    : stored.Jules with
+                    {
+                        RemotePhase = JulesRemotePhase.SubmissionUnknown,
+                        SessionLockHeld = false,
+                    },
+                RemotePhase = JulesRemotePhase.SubmissionUnknown,
             };
-            LogTerminal(ToSnapshot(interruptedJules), AgentJobStatus.Failed, exitCode: null, errorType: "InterruptedError");
-            Persist(interruptedJules);
-            return interruptedJules;
+            LogTerminal(ToSnapshot(failed), AgentJobStatus.Failed, exitCode: null, errorType: "submission_unknown");
+            PersistLocked(failed);
+            return failed;
         }
 
-        if (stored.Status == AgentJobStatus.Running)
+        var interruptedJules = stored with
         {
-            var recovery = ResolveStoredRecovery(stored, wasRunning: true);
-            var interrupted = stored with
-            {
-                Status = AgentJobStatus.Failed,
-                Error = InterruptedError,
-                Result = null,
-                Failure = new AgentJobFailure(
-                    "facade_interrupted",
-                    InterruptedError),
-                Recovery = recovery,
-                RecoveryFinalized = true,
-            };
-            LogTerminal(ToSnapshot(interrupted), AgentJobStatus.Failed, exitCode: null, errorType: "InterruptedError");
-            Persist(interrupted);
-            return interrupted;
-        }
-
-        if (stored.Status is AgentJobStatus.Failed or AgentJobStatus.Cancelled
-            && !stored.RecoveryFinalized
-            && stored.Recovery?.Status != AgentSessionRecoveryStatus.Bound)
-        {
-            var recovery = ResolveStoredRecovery(stored, wasRunning: false);
-            var updated = stored with
-            {
-                Recovery = recovery,
-                RecoveryFinalized = true,
-            };
-            Persist(updated);
-            return updated;
-        }
-
-        return stored;
+            Status = AgentJobStatus.Failed,
+            Error = InterruptedError,
+            Result = null,
+            Failure = new AgentJobFailure(
+                "facade_interrupted",
+                InterruptedError),
+        };
+        LogTerminal(ToSnapshot(interruptedJules), AgentJobStatus.Failed, exitCode: null, errorType: "InterruptedError");
+        PersistLocked(interruptedJules);
+        return interruptedJules;
     }
 
     private AgentSessionRecovery? ResolveStoredRecovery(AgentJobRecord stored, bool wasRunning)
@@ -834,7 +861,20 @@ public sealed class AgentJobService
         }
     }
 
+    private object GetRecordGate(string requestId)
+    {
+        return _recordGates.GetOrAdd(requestId, static _ => new object());
+    }
+
     private void Persist(AgentJobRecord record)
+    {
+        lock (GetRecordGate(record.RequestId))
+        {
+            PersistLocked(record);
+        }
+    }
+
+    private void PersistLocked(AgentJobRecord record)
     {
         try
         {
