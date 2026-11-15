@@ -1328,6 +1328,207 @@ public class LocalSessionRecoveryTests
         }
     }
 
+    [Fact]
+    public async Task LateBindRaceWithGetNeverOverwritesBoundRecordWithNull()
+    {
+        var store = Directory.CreateTempSubdirectory("caf-rec-latebind-").FullName;
+        var logs = Directory.CreateTempSubdirectory("caf-rec-latebind-logs-").FullName;
+        var workspace = Directory.CreateTempSubdirectory("caf-rec-latebind-ws-").FullName;
+        try
+        {
+            var runner = new LateBindOnCancelRunner(BoundId);
+            var facade = CreateFacade(runner, logs);
+            var service = new AgentJobService(facade, store);
+
+            var started = service.Start(
+                "req-late-bind-race",
+                new AgentRunRequest(AgentFacade.CodexAgent, "late bind", workspace, null, null));
+            await runner.Started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+            // キャンセルで _live から即時退避させた直後に、worker 側の遅延 BindSession と Get/再読込を同時並行で走らせる。
+            var cancelled = service.Cancel(started.JobId);
+            Assert.Equal(AgentJobStatus.Cancelled, cancelled.Status);
+
+            runner.AllowLateBind.TrySetResult();
+            var readers = Enumerable.Range(0, 8)
+                .Select(_ => Task.Run(() =>
+                {
+                    for (var i = 0; i < 20; i++)
+                    {
+                        var snapshot = service.Get(started.JobId);
+                        Assert.Equal(AgentJobStatus.Cancelled, snapshot.Status);
+                    }
+                }))
+                .ToArray();
+            await Task.WhenAll(readers);
+
+            // worker 完了（session_bound 記録と RecoveryFinalized 永続化）まで待機し、後続の Get と再起動後 Get でも Bound が上書きされないことを確認する。
+            await WaitForSessionBoundEventAsync(logs, started.JobId);
+            AgentJobSnapshot? boundSnapshot = null;
+            for (var i = 0; i < 100; i++)
+            {
+                var candidate = service.Get(started.JobId);
+                if (candidate.Recovery?.Status == AgentSessionRecoveryStatus.Bound)
+                {
+                    boundSnapshot = candidate;
+                    break;
+                }
+
+                await Task.Delay(20);
+            }
+
+            Assert.NotNull(boundSnapshot);
+            Assert.Equal(AgentSessionRecoveryStatus.Bound, boundSnapshot.Recovery!.Status);
+            Assert.Equal(BoundId, boundSnapshot.Recovery.SessionId);
+            Assert.Equal(SessionBinding.EarlyStream, boundSnapshot.Recovery.BindingSource);
+
+            var recordPath = Directory.EnumerateFiles(store, "req-*.json").Single();
+            var stored = JsonSerializer.Deserialize<AgentJobRecord>(File.ReadAllText(recordPath), AgentJson.Options)!;
+            Assert.True(stored.RecoveryFinalized);
+            Assert.Equal(AgentSessionRecoveryStatus.Bound, stored.Recovery!.Status);
+            Assert.Equal(BoundId, stored.Recovery.SessionId);
+
+            var restarted = new AgentJobService(CreateFacade(new RecordingProcessRunner(), logs), store);
+            var afterRestart = restarted.Get(started.JobId);
+            Assert.Equal(AgentSessionRecoveryStatus.Bound, afterRestart.Recovery!.Status);
+            Assert.Equal(BoundId, afterRestart.Recovery.SessionId);
+        }
+        finally
+        {
+            DeleteQuietly(store);
+            DeleteQuietly(logs);
+            DeleteQuietly(workspace);
+        }
+    }
+
+    [Fact]
+    public async Task LiveCancelAndFailureExposeUnavailableDiagnosticsWhenEventsLogMissingOrCorrupt()
+    {
+        var store = Directory.CreateTempSubdirectory("caf-rec-live-unavail-").FullName;
+        var logs = Directory.CreateTempSubdirectory("caf-rec-live-unavail-logs-").FullName;
+        var workspace = Directory.CreateTempSubdirectory("caf-rec-live-unavail-ws-").FullName;
+        try
+        {
+            // 1) 実行中ランの events.jsonl が破損している場合、Cancel / 終了後 WaitAsync とも null に潰さず run_log_corrupt を返す。
+            var runner = new RecordingProcessRunner
+            {
+                Gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously),
+            };
+            var service = new AgentJobService(CreateFacade(runner, logs), store);
+            var corruptJob = service.Start(
+                "req-live-corrupt",
+                new AgentRunRequest(AgentFacade.CodexAgent, "corrupt live", workspace, null, null));
+            await runner.StartedTask.WaitAsync(TimeSpan.FromSeconds(10));
+
+            var corruptEventsPath = Path.Combine(logs, corruptJob.JobId + ".events.jsonl");
+            using (var stream = new FileStream(corruptEventsPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
+            using (var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(false)))
+            {
+                // AgentRunLog 側のハンドルは CreateNew の現在位置を保持しているため、WriteCancelled が先頭を上書きしても破損行が残るサイズを書く。
+                await writer.WriteAsync("{corrupt-live-json-" + new string('x', 1024) + "\n{corrupt-live-tail\n");
+            }
+
+            var cancelled = service.Cancel(corruptJob.JobId);
+            Assert.Equal(AgentJobStatus.Cancelled, cancelled.Status);
+            Assert.NotNull(cancelled.Recovery);
+            Assert.Equal(AgentSessionRecoveryStatus.Unavailable, cancelled.Recovery.Status);
+            Assert.Equal(AgentSessionRecoveryReason.RunLogCorrupt, cancelled.Recovery.Reason);
+
+            runner.Gate.TrySetResult(true);
+            var settled = await service.WaitAsync(corruptJob.JobId, timeoutSeconds: 10);
+            Assert.Equal(AgentJobStatus.Cancelled, settled.Status);
+            Assert.Equal(AgentSessionRecoveryStatus.Unavailable, settled.Recovery!.Status);
+            Assert.Equal(AgentSessionRecoveryReason.RunLogCorrupt, settled.Recovery.Reason);
+
+            // 2) 失敗したローカル実行で events.jsonl が欠落している場合、FinalizeLocalRun が run_log_missing を記録する。
+            var missingFacade = new AgentFacade(
+                new GitHubCopilotDriver(new RecordingProcessRunner { Result = new ProcessRunResult(1, "", "boom") }),
+                new GrokBuildDriver(new RecordingProcessRunner(), TimeProvider.System, new ThrowingGrokLogReader()),
+                new CursorCliDriver(new RecordingProcessRunner()),
+                new CodexCliDriver(new RecordingProcessRunner { Result = new ProcessRunResult(1, "", "boom") }),
+                new MissingEventsRunLogFactory(logs),
+                antigravityCli: new AntigravityCliDriver(new RecordingProcessRunner()));
+            var missingService = new AgentJobService(missingFacade, store);
+            var missingStarted = missingService.Start(
+                "req-live-missing",
+                new AgentRunRequest(AgentFacade.CodexAgent, "missing live", workspace, null, null));
+            var missingFailed = await missingService.WaitAsync(missingStarted.JobId, timeoutSeconds: 10);
+            Assert.Equal(AgentJobStatus.Failed, missingFailed.Status);
+            Assert.NotNull(missingFailed.Recovery);
+            Assert.Equal(AgentSessionRecoveryStatus.Unavailable, missingFailed.Recovery.Status);
+            Assert.Equal(AgentSessionRecoveryReason.RunLogMissing, missingFailed.Recovery.Reason);
+        }
+        finally
+        {
+            DeleteQuietly(store);
+            DeleteQuietly(logs);
+            DeleteQuietly(workspace);
+        }
+    }
+
+    [Fact]
+    public void MalformedSessionBoundMissingOrInvalidBindingSourceIsTreatedAsCorrupt()
+    {
+        var logs = Directory.CreateTempSubdirectory("caf-rec-bad-src-").FullName;
+        try
+        {
+            var cases = new[]
+            {
+                ("missing-source.events.jsonl", "{\"ts\":\"2026-11-15T00:00:00Z\",\"runId\":\"r1\",\"source\":\"facade\",\"type\":\"session_bound\",\"data\":{\"sessionId\":\"" + BoundId + "\"}}\n"),
+                ("blank-source.events.jsonl", "{\"ts\":\"2026-11-15T00:00:00Z\",\"runId\":\"r2\",\"source\":\"facade\",\"type\":\"session_bound\",\"data\":{\"sessionId\":\"" + BoundId + "\",\"bindingSource\":\"   \"}}\n"),
+                ("nonstring-source.events.jsonl", "{\"ts\":\"2026-11-15T00:00:00Z\",\"runId\":\"r3\",\"source\":\"facade\",\"type\":\"session_bound\",\"data\":{\"sessionId\":\"" + BoundId + "\",\"bindingSource\":123}}\n"),
+            };
+
+            foreach (var (fileName, jsonLine) in cases)
+            {
+                var path = Path.Combine(logs, fileName);
+                File.WriteAllText(path, jsonLine);
+                var recovery = AgentSessionLogRecovery.ReadFromEventsLog(path);
+                Assert.NotNull(recovery);
+                Assert.Equal(AgentSessionRecoveryStatus.Unavailable, recovery.Status);
+                Assert.Equal(AgentSessionRecoveryReason.RunLogCorrupt, recovery.Reason);
+                Assert.Null(recovery.SessionId);
+                Assert.Null(recovery.BindingSource);
+            }
+        }
+        finally
+        {
+            DeleteQuietly(logs);
+        }
+    }
+
+    private sealed class MissingEventsRunLogFactory(string logDirectory) : IAgentRunLogFactory
+    {
+        public IAgentRunLog Start(AgentRunRequest request) => Start(request, Guid.NewGuid().ToString("N"));
+
+        public IAgentRunLog Start(AgentRunRequest request, string runId) => new MissingEventsRunLog(logDirectory, runId);
+
+        public string? TryGetEventsPath(string runId) => Path.Combine(logDirectory, runId + ".events.jsonl");
+
+        private sealed class MissingEventsRunLog(string logDirectory, string runId) : IAgentRunLog
+        {
+            private static IAgentRunLog Inner => NullAgentRunLog.Instance;
+            public string RunId => runId;
+            public string EventsPath => Path.Combine(logDirectory, runId + ".events.jsonl");
+            public string TextLogPath => Path.Combine(logDirectory, runId + ".log");
+            public string? BoundSessionId => Inner.BoundSessionId;
+            public SessionBindingInfo? BoundSession => Inner.BoundSession;
+            public void WriteStarted(AgentRunStartedInfo info) => Inner.WriteStarted(info);
+            public void WriteLaunch(ProcessLaunchInfo info) => Inner.WriteLaunch(info);
+            public void WriteAgentEvent(string type, JsonElement payload, string? humanSummary) => Inner.WriteAgentEvent(type, payload, humanSummary);
+            public void AppendHumanFragment(string kind, string text) => Inner.AppendHumanFragment(kind, text);
+            public void WriteProcessLine(string stream, string line) => Inner.WriteProcessLine(stream, line);
+            public void NoteExternalOutput() => Inner.NoteExternalOutput();
+            public void AttachProcess(IProcessLifetime process) => Inner.AttachProcess(process);
+            public void BindSession(string sessionId, string bindingSource) => Inner.BindSession(sessionId, bindingSource);
+            public void WriteCompleted(AgentRunResult result) => Inner.WriteCompleted(result);
+            public void WriteFailed(Exception exception) => Inner.WriteFailed(exception);
+            public void WriteCancelled() => Inner.WriteCancelled();
+            public ValueTask DisposeAsync() => Inner.DisposeAsync();
+            public void Dispose() => Inner.Dispose();
+        }
+    }
+
     private static AgentFacade CreateFacade(
         IProcessRunner runner,
         string logDirectory,

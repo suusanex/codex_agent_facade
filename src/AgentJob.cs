@@ -434,6 +434,17 @@ public sealed class AgentJob
             {
                 nextRecovery = _recovery;
             }
+            else if (!string.IsNullOrWhiteSpace(_eventsLogPath))
+            {
+                // log 終了時点で session_bound が無ければ、欠落・読取不能・破損等の診断結果ごと確定させる。
+                nextRecovery = AgentSessionLogRecovery.ReadFromEventsLog(_eventsLogPath);
+                if (nextRecovery is { Status: AgentSessionRecoveryStatus.Bound }
+                    && !string.IsNullOrWhiteSpace(nextRecovery.SessionId)
+                    && !string.IsNullOrWhiteSpace(nextRecovery.BindingSource))
+                {
+                    boundSession = new SessionBindingInfo(nextRecovery.SessionId, nextRecovery.BindingSource);
+                }
+            }
             else
             {
                 nextRecovery = _recovery;
@@ -694,15 +705,6 @@ public sealed class AgentJob
             else if (status is AgentJobStatus.Failed or AgentJobStatus.Cancelled)
             {
                 boundSession = _boundSession ?? _activeRunLog?.BoundSession;
-                if (boundSession is null
-                    && status == AgentJobStatus.Cancelled
-                    && _activeRunLog is not null
-                    && !string.IsNullOrWhiteSpace(_eventsLogPath))
-                {
-                    // Cancel が BindSession によるメモリ更新より一瞬先行した場合も flush 済み events.jsonl を参照する。
-                    boundSession = AgentSessionLogRecovery.TryReadBoundFromLiveEventsLog(_eventsLogPath);
-                }
-
                 if (boundSession is not null)
                 {
                     recovery = new AgentSessionRecovery(
@@ -713,6 +715,19 @@ public sealed class AgentJob
                 else if (_recovery?.Status == AgentSessionRecoveryStatus.Bound)
                 {
                     recovery = _recovery;
+                }
+                else if (status == AgentJobStatus.Cancelled
+                    && _activeRunLog is not null
+                    && !string.IsNullOrWhiteSpace(_eventsLogPath))
+                {
+                    // Cancel が BindSession より先行した場合も、flush 済み session_bound やログ障害診断をそのまま保持する。
+                    recovery = AgentSessionLogRecovery.ReadFromEventsLog(_eventsLogPath);
+                    if (recovery is { Status: AgentSessionRecoveryStatus.Bound }
+                        && !string.IsNullOrWhiteSpace(recovery.SessionId)
+                        && !string.IsNullOrWhiteSpace(recovery.BindingSource))
+                    {
+                        boundSession = new SessionBindingInfo(recovery.SessionId, recovery.BindingSource);
+                    }
                 }
             }
 
@@ -812,23 +827,6 @@ public sealed class AgentJob
 /// </summary>
 internal static class AgentSessionLogRecovery
 {
-    public static SessionBindingInfo? TryReadBoundFromLiveEventsLog(string eventsPath)
-    {
-        if (string.IsNullOrWhiteSpace(eventsPath) || !File.Exists(eventsPath))
-        {
-            return null;
-        }
-
-        var recovery = ReadFromEventsLog(eventsPath);
-        if (recovery is { Status: AgentSessionRecoveryStatus.Bound }
-            && !string.IsNullOrWhiteSpace(recovery.SessionId))
-        {
-            return new SessionBindingInfo(recovery.SessionId, recovery.BindingSource ?? string.Empty);
-        }
-
-        return null;
-    }
-
     public static AgentSessionRecovery? ReadFromEventsLog(string eventsPath)
     {
         if (string.IsNullOrWhiteSpace(eventsPath))
@@ -900,14 +898,23 @@ internal static class AgentSessionLogRecovery
                         continue;
                     }
 
-                    var bindingSource = CliJson.TryGetPropertyIgnoreCase(dataElement, "bindingSource", out var bindingElement)
-                        ? CliJson.ReadStringValue(bindingElement)
-                        : null;
+                    if (!CliJson.TryGetPropertyIgnoreCase(dataElement, "bindingSource", out var bindingElement)
+                        || bindingElement.ValueKind != JsonValueKind.String)
+                    {
+                        sawCorruptLine = true;
+                        continue;
+                    }
+
+                    var bindingSource = bindingElement.GetString();
+                    if (string.IsNullOrWhiteSpace(bindingSource))
+                    {
+                        sawCorruptLine = true;
+                        continue;
+                    }
+
                     if (firstBound is null)
                     {
-                        firstBound = new SessionBindingInfo(
-                            sessionId,
-                            string.IsNullOrWhiteSpace(bindingSource) ? string.Empty : bindingSource);
+                        firstBound = new SessionBindingInfo(sessionId, bindingSource);
                     }
                     else if (!string.Equals(firstBound.SessionId, sessionId, StringComparison.Ordinal))
                     {
@@ -928,7 +935,7 @@ internal static class AgentSessionLogRecovery
                 return new AgentSessionRecovery(
                     AgentSessionRecoveryStatus.Bound,
                     firstBound.SessionId,
-                    string.IsNullOrWhiteSpace(firstBound.BindingSource) ? null : firstBound.BindingSource);
+                    firstBound.BindingSource);
             }
 
             if (sawCorruptLine)
