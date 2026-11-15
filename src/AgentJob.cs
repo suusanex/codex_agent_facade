@@ -11,6 +11,7 @@ public static class AgentJobStatus
     public const string Completed = "completed";
     public const string Failed = "failed";
     public const string Cancelled = "cancelled";
+    public const string TimedOut = "timed_out";
 
     /// <summary>
     /// Jules が追加入力を待っている settled 状態。provider session の終了ではない。
@@ -193,7 +194,7 @@ internal static class AgentJobPublicProjection
             return null;
         }
 
-        return status is AgentJobStatus.Failed or AgentJobStatus.Cancelled or AgentCli.StatusTimedOut
+        return status is AgentJobStatus.Failed or AgentJobStatus.Cancelled or AgentJobStatus.TimedOut
             ? recovery
             : null;
     }

@@ -17,7 +17,7 @@ public static class AgentCli
     public const int ExitCancelled = 3;
     public const int ExitTimedOut = 4;
 
-    public const string StatusTimedOut = "timed_out";
+    public const string StatusTimedOut = AgentJobStatus.TimedOut;
 
     public const int MinTimeoutSeconds = 1;
     public const int MaxTimeoutSeconds = 86400;
