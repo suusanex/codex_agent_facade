@@ -235,15 +235,22 @@ internal sealed class FileGrokUnifiedLogReader : IGrokUnifiedLogReader
 
 /// <summary>
 /// 今回の起動以降の shell ログから、プロンプト実行・バックグラウンド monitor 待機・再起床の状態を確定する。
-/// Grok は起動 PID・session・prompt を結び付ける公開 API を出していない。
+/// Grok は起動 PID・session・prompt・task 結果を結び付ける公開 API を出していない。
 /// 実測形式（src、pid、ts、sid、msg、ctx）の一致だけを見る。
 /// 作業ディレクトリはジャンクションで表記が分かれるため照合しない。
+/// <c>task-completed-&lt;task_id&gt;</c> の wake が queue に残っても、同じ task の結果を
+/// stdout の terminal 結果、または <c>block_waited</c> / explicit kill で取得済みなら未処理にしない。
+/// 結果未取得の wake は task id を診断へ残す。この対応を返す BCL・公開 API は無いため、観測済みの2系統をここで照合する。
 /// </summary>
 internal sealed class GrokPromptCorrelation
 {
+    private const string WakePromptPrefix = "task-completed-";
+
     private readonly HashSet<string> _pendingMonitorCallIds = new(StringComparer.Ordinal);
     private readonly Queue<string> _pendingMonitorCallOrder = new();
     private readonly HashSet<string> _wokenTaskIds = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _pendingWakeTaskIds = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _resultConsumedTaskIds = new(StringComparer.Ordinal);
     private bool _abandoned;
     private string? _abandonReason;
     private string? _indeterminateReason;
@@ -254,7 +261,7 @@ internal sealed class GrokPromptCorrelation
     private string? _lastFinishedPromptId;
     private DateTimeOffset _activePromptStartedAt;
     private bool _promptFailed;
-    private bool _isWakePending;
+    private bool _hasUnscopedWake;
     private bool _sawMonitorOrWakeAdmission;
     private int _observedEventCount;
     private int _anonymousPendingMonitorCount;
@@ -273,7 +280,19 @@ internal sealed class GrokPromptCorrelation
 
     public bool IsPromptInFlight => _activePromptId is not null;
 
-    public bool IsWakePending => _isWakePending;
+    /// <summary>
+    /// まだ開始されていない wake、または task に結び付かない queue が残っている。
+    /// 結果取得済みかは含まない。完了判定は <see cref="HasUnresolvedWake"/> を使う。
+    /// </summary>
+    public bool IsWakePending => _pendingWakeTaskIds.Count > 0 || _hasUnscopedWake;
+
+    public IReadOnlySet<string> PendingWakeTaskIds => _pendingWakeTaskIds;
+
+    /// <summary>
+    /// 内部ログが blocking wait または explicit kill により結果消費済みと示した task。
+    /// stdout の terminal 結果とは別の取得済み証拠である。
+    /// </summary>
+    public IReadOnlySet<string> ResultConsumedTaskIds => _resultConsumedTaskIds;
 
     public bool PromptFailed => _promptFailed;
 
@@ -284,22 +303,76 @@ internal sealed class GrokPromptCorrelation
     public GrokCompletionEvidence? Success => TryGetConfirmedCompletion();
 
     /// <summary>
-    /// 進行中ターン・wake待ち・未解消 monitor・異常状態がすべて無い場合のみ、直近完了ターンの完了証拠を返す。
+    /// 進行中ターン・未取得の wake・未解消 monitor・異常状態がすべて無い場合のみ、直近完了ターンの完了証拠を返す。
     /// stdout 側で終了・Kill を確認できた monitor toolCallId は除外して整合させる。
+    /// <paramref name="retrievedBackgroundTaskIds"/> は streaming-json で terminal 結果を確認できた task。
+    /// ここに含まれる wake、または内部ログで結果消費済みの wake は未処理にしない。
     /// </summary>
-    public GrokCompletionEvidence? TryGetConfirmedCompletion(IReadOnlySet<string>? resolvedMonitorToolCallIds = null)
+    public GrokCompletionEvidence? TryGetConfirmedCompletion(
+        IReadOnlySet<string>? resolvedMonitorToolCallIds = null,
+        IReadOnlySet<string>? retrievedBackgroundTaskIds = null)
     {
         if (_abandoned
             || _indeterminateReason is not null
             || _promptFailed
             || _activePromptId is not null
-            || _isWakePending
+            || HasUnresolvedWake(retrievedBackgroundTaskIds)
             || HasUnresolvedMonitorWait(resolvedMonitorToolCallIds))
         {
             return null;
         }
 
         return _success ?? _latestDoneEvidence;
+    }
+
+    /// <summary>
+    /// 結果未取得の wake、または task に結び付かない queue が残っているかを返す。
+    /// </summary>
+    public bool HasUnresolvedWake(IReadOnlySet<string>? retrievedBackgroundTaskIds = null)
+    {
+        if (_hasUnscopedWake)
+        {
+            return true;
+        }
+
+        foreach (var taskId in _pendingWakeTaskIds)
+        {
+            if (!IsWakeTaskResolved(taskId, retrievedBackgroundTaskIds))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 未取得の wake を task id 付きで説明する。未取得の id が無い queue は task を特定できない旨の文面にする。
+    /// </summary>
+    public string DescribeUnresolvedWake(IReadOnlySet<string>? retrievedBackgroundTaskIds = null)
+    {
+        var unresolved = new List<string>();
+        foreach (var taskId in _pendingWakeTaskIds)
+        {
+            if (!IsWakeTaskResolved(taskId, retrievedBackgroundTaskIds))
+            {
+                unresolved.Add(taskId);
+            }
+        }
+
+        unresolved.Sort(StringComparer.Ordinal);
+        if (unresolved.Count == 0)
+        {
+            return "queued or background wake prompt remained pending";
+        }
+
+        var message = "queued wake prompt remained pending for unretrieved tasks: " + string.Join(", ", unresolved);
+        if (_hasUnscopedWake)
+        {
+            message += "; an unrelated queued prompt remained pending";
+        }
+
+        return message;
     }
 
     /// <summary>
@@ -528,10 +601,7 @@ internal sealed class GrokPromptCorrelation
 
         if (admitted || enqueued)
         {
-            _sawMonitorOrWakeAdmission = true;
-            _isWakePending = true;
-            _success = null;
-            _latestDoneEvidence = null;
+            MarkWake(taskId, sawAdmission: true);
         }
     }
 
@@ -549,10 +619,7 @@ internal sealed class GrokPromptCorrelation
 
         if (TryReadBoolean(context, "admitted", out var admitted) && admitted)
         {
-            _sawMonitorOrWakeAdmission = true;
-            _isWakePending = true;
-            _success = null;
-            _latestDoneEvidence = null;
+            MarkWake(ReadOptionalString(context, "task_id"), sawAdmission: true);
         }
     }
 
@@ -568,13 +635,19 @@ internal sealed class GrokPromptCorrelation
             return;
         }
 
-        if (TryReadBoolean(context, "explicitly_killed", out var killed) && killed)
+        var taskId = ReadOptionalString(context, "task_id");
+        var killed = TryReadBoolean(context, "explicitly_killed", out var killedFlag) && killedFlag;
+        var blockWaited = TryReadBoolean(context, "block_waited", out var waitedFlag) && waitedFlag;
+        if (killed && TryMarkWokenTask(taskId))
         {
-            var taskId = ReadOptionalString(context, "task_id");
-            if (TryMarkWokenTask(taskId))
-            {
-                ResolveOnePendingMonitor();
-            }
+            ResolveOnePendingMonitor();
+        }
+
+        // block_waited / explicit kill は、wake を積まず結果を消費したという内部ログの明示である。
+        if ((killed || blockWaited) && !string.IsNullOrWhiteSpace(taskId))
+        {
+            _pendingWakeTaskIds.Remove(taskId);
+            _resultConsumedTaskIds.Add(taskId);
         }
     }
 
@@ -596,12 +669,18 @@ internal sealed class GrokPromptCorrelation
             return;
         }
 
-        if (!string.Equals(queuedPromptId, _activePromptId, StringComparison.Ordinal))
+        if (string.Equals(queuedPromptId, _activePromptId, StringComparison.Ordinal))
         {
-            _isWakePending = true;
-            _success = null;
-            _latestDoneEvidence = null;
+            return;
         }
+
+        if (TryReadWakeTaskId(queuedPromptId, out var taskId))
+        {
+            MarkWake(taskId, sawAdmission: false);
+            return;
+        }
+
+        MarkWake(taskId: null, sawAdmission: false);
     }
 
     private void ObserveStart(JsonElement root, DateTimeOffset timestamp)
@@ -644,17 +723,16 @@ internal sealed class GrokPromptCorrelation
         // 前ターンが閉じ終わった後の再起床・継続ターン。直前ターンの完了証拠は一旦無効化して最新ターンを追う。
         _success = null;
         _latestDoneEvidence = null;
-        _isWakePending = false;
+        _pendingWakeTaskIds.Clear();
+        _hasUnscopedWake = false;
         _lastFinishedPromptId = null;
         _activePromptId = promptId;
         _activePromptStartedAt = timestamp;
         _version ??= version;
 
-        const string wakePrefix = "task-completed-";
-        if (promptId.StartsWith(wakePrefix, StringComparison.Ordinal))
+        if (TryReadWakeTaskId(promptId, out var taskId))
         {
             _sawMonitorOrWakeAdmission = true;
-            var taskId = promptId[wakePrefix.Length..];
             if (TryMarkWokenTask(taskId))
             {
                 ResolveOnePendingMonitor();
@@ -735,8 +813,9 @@ internal sealed class GrokPromptCorrelation
         var evidence = new GrokCompletionEvidence(processId, sessionId, promptId, timestamp, version);
         _latestDoneEvidence = evidence;
 
-        // monitor 待機または再起床待ちが残っている段階の prompt.done はターン区切りであり、全体完了にはしない。
-        if (_anonymousPendingMonitorCount > 0 || _pendingMonitorCallIds.Count > 0 || _isWakePending)
+        // monitor 待機または未消化の wake が残る prompt.done はターン区切りであり、この時点では全体完了にしない。
+        // 結果取得済みの wake は TryGetConfirmedCompletion 側で未処理から外す。ここではログ上の queue の有無だけを見る。
+        if (_anonymousPendingMonitorCount > 0 || _pendingMonitorCallIds.Count > 0 || IsWakePending)
         {
             _success = null;
             return;
@@ -770,6 +849,52 @@ internal sealed class GrokPromptCorrelation
         }
 
         return _wokenTaskIds.Add(taskId);
+    }
+
+    private void MarkWake(string? taskId, bool sawAdmission)
+    {
+        if (sawAdmission)
+        {
+            _sawMonitorOrWakeAdmission = true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(taskId))
+        {
+            _pendingWakeTaskIds.Add(taskId);
+        }
+        else
+        {
+            _hasUnscopedWake = true;
+        }
+
+        // 取得済みかどうかは stdout と合わせて完了判定時に決める。直前ターンの done 証拠は消さない。
+        _success = null;
+    }
+
+    private bool IsWakeTaskResolved(string taskId, IReadOnlySet<string>? retrievedBackgroundTaskIds)
+    {
+        if (_resultConsumedTaskIds.Contains(taskId))
+        {
+            return true;
+        }
+
+        return retrievedBackgroundTaskIds is not null && retrievedBackgroundTaskIds.Contains(taskId);
+    }
+
+    private static bool TryReadWakeTaskId(string promptId, out string taskId)
+    {
+        if (promptId.StartsWith(WakePromptPrefix, StringComparison.Ordinal)
+            && promptId.Length > WakePromptPrefix.Length)
+        {
+            taskId = promptId[WakePromptPrefix.Length..];
+            if (!string.IsNullOrWhiteSpace(taskId))
+            {
+                return true;
+            }
+        }
+
+        taskId = string.Empty;
+        return false;
     }
 
     private void ResolveOnePendingMonitor()

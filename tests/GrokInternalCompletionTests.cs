@@ -908,6 +908,70 @@ public class GrokInternalCompletionTests
     }
 
     [Fact]
+    public async Task RetrievedTaskWakeAllowsNaturalEndTurn()
+    {
+        using var harness = new GrokRescueHarness();
+        var run = harness.Start(Request());
+        await harness.StartedAsync();
+        const string taskId = "37943b18-5bf8-4cd0-94d2-87352f0d15cf";
+        harness.Runner.EmitStdout("""{"type":"text","data":"final answer"}""");
+        EmitBackgroundTask(harness.Runner, "call_bg", taskId);
+        harness.Append(MeasuredLog(includeDone: false) + TaskWakeLog(taskId));
+        EmitTerminalTaskOutput(harness.Runner, "call_out", taskId, "failed");
+        harness.Append(DoneLine() + "\n");
+        harness.Runner.EmitStdout("""{"type":"end","stopReason":"end_turn","sessionId":"01a15136-771a-7363-924b-9e5bb063b27b"}""");
+        harness.Runner.CompleteNaturally(new ProcessRunResult(0, string.Empty, string.Empty));
+
+        var result = await harness.AwaitRunAsync(run);
+        Assert.Equal(0, result.ExitCode);
+        Assert.Null(result.CompletionReason);
+        Assert.Equal("final answer", result.OutputText);
+        Assert.Equal(SessionId, result.SessionId);
+    }
+
+    [Fact]
+    public async Task UnretrievedTaskWakeFailsNaturalExitAndNamesTheTask()
+    {
+        using var harness = new GrokRescueHarness();
+        var run = harness.Start(Request());
+        await harness.StartedAsync();
+        const string taskId = "37943b18-5bf8-4cd0-94d2-87352f0d15cf";
+        harness.Runner.EmitStdout("""{"type":"text","data":"partial"}""");
+        EmitBackgroundTask(harness.Runner, "call_bg", taskId);
+        harness.Append(MeasuredLog(includeDone: false) + TaskWakeLog(taskId) + DoneLine() + "\n");
+
+        await harness.AdvanceUntilReadAsync(run, minimumReads: 1);
+        Assert.False(run.IsCompleted);
+
+        harness.Runner.EmitStdout("""{"type":"end","stopReason":"end_turn","sessionId":"01a15136-771a-7363-924b-9e5bb063b27b"}""");
+        harness.Runner.CompleteNaturally(new ProcessRunResult(0, string.Empty, string.Empty));
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(async () => await harness.AwaitRunAsync(run));
+        Assert.Equal("grok_internal_state_indeterminate", failure.Data[CliJson.FailureKindKey]);
+        Assert.Contains(taskId, failure.Message, StringComparison.Ordinal);
+        var summary = Assert.IsType<string>(failure.Data[CliJson.FailureSummaryKey]);
+        Assert.Contains(taskId, summary, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RetrievedTaskWakeRescuesCompletedPromptWhenProcessStaysUp()
+    {
+        using var harness = new GrokRescueHarness();
+        var run = harness.Start(Request());
+        await harness.StartedAsync();
+        const string taskId = "37943b18-5bf8-4cd0-94d2-87352f0d15cf";
+        harness.Runner.EmitStdout("""{"type":"text","data":"final answer"}""");
+        EmitBackgroundTask(harness.Runner, "call_bg", taskId);
+        EmitTerminalTaskOutput(harness.Runner, "call_out", taskId, "failed");
+        harness.Append(MeasuredLog(includeDone: false) + TaskWakeLog(taskId) + DoneLine() + "\n");
+
+        await harness.AdvanceUntilReadAsync(run, minimumReads: 1);
+        var result = await harness.AwaitRunAsync(run);
+        Assert.Equal(GrokBuildDriver.InternalPromptDoneReason, result.CompletionReason);
+        Assert.Equal(PromptId, result.CompletionEvidence?.PromptId);
+        Assert.Equal("final answer", result.OutputText);
+    }
+
+    [Fact]
     public async Task UnrelatedPidAndSessionMonitorEventsDoNotSuppressTargetRescue()
     {
         using var harness = new GrokRescueHarness();
@@ -1048,6 +1112,52 @@ public class GrokInternalCompletionTests
         }
 
         return builder.ToString();
+    }
+
+    internal static string TaskWakeLog(string taskId)
+    {
+        return Shell("2026-10-18T23:00:00.000Z", "shell.task_wake.actor_admission", Pid, SessionId, Version, new { task_id = taskId, admitted = true })
+            + "\n"
+            + Shell("2026-10-18T23:00:00.001Z", "shell.prompt.queued", Pid, SessionId, Version, new { prompt_id = "task-completed-" + taskId, queue_depth = 1 })
+            + "\n"
+            + Shell("2026-10-18T23:00:00.002Z", "shell.task_wake.bridge_admission", Pid, SessionId, Version, new { task_id = taskId, monitor = false, enqueued = true, admitted = true })
+            + "\n";
+    }
+
+    private static void EmitBackgroundTask(RecordingProcessRunner runner, string toolCallId, string taskId)
+    {
+        runner.EmitStdout(JsonSerializer.Serialize(new
+        {
+            type = "tool_call_update",
+            toolCallId,
+            status = "completed",
+            rawOutput = new
+            {
+                type = "BackgroundTaskStarted",
+                task_id = taskId,
+                task_type = "bash",
+            },
+        }));
+    }
+
+    private static void EmitTerminalTaskOutput(RecordingProcessRunner runner, string toolCallId, string taskId, string status)
+    {
+        runner.EmitStdout(JsonSerializer.Serialize(new
+        {
+            type = "tool_call_update",
+            toolCallId,
+            status = "completed",
+            rawOutput = new
+            {
+                type = "TaskOutput",
+                Result = new
+                {
+                    task_id = taskId,
+                    status,
+                    exit_code = string.Equals(status, "failed", StringComparison.Ordinal) ? 1 : 0,
+                },
+            },
+        }));
     }
 
     private static string DoneLine(
@@ -1225,6 +1335,71 @@ public class GrokPromptCorrelationTests
     }
 
     [Fact]
+    public void RetrievedWakeIsNotPendingAndUnretrievedWakeNamesOnlyThatTask()
+    {
+        const string retrieved = "37943b18-5bf8-4cd0-94d2-87352f0d15cf";
+        const string unretrieved = "cb563616-2b24-468d-b0a7-3d3ce45db81c";
+        var lines = new List<string>(Lines(GrokInternalCompletionTests.MeasuredLog(includeDone: false)));
+        lines.AddRange(Lines(GrokInternalCompletionTests.TaskWakeLog(retrieved)));
+        lines.AddRange(Lines(GrokInternalCompletionTests.TaskWakeLog(unretrieved)));
+        lines.Add(DoneLineForCorrelation());
+
+        var correlation = Observe(lines.Where(line => !string.IsNullOrWhiteSpace(line)));
+        Assert.False(correlation.IsAbandoned, correlation.AbandonReason);
+        Assert.True(correlation.IsWakePending);
+        Assert.Null(correlation.Success);
+
+        var retrievedIds = new HashSet<string>(StringComparer.Ordinal) { retrieved };
+        Assert.True(correlation.HasUnresolvedWake(retrievedIds));
+        var description = correlation.DescribeUnresolvedWake(retrievedIds);
+        Assert.Contains(unretrieved, description, StringComparison.Ordinal);
+        Assert.DoesNotContain(retrieved, description, StringComparison.Ordinal);
+        Assert.Null(correlation.TryGetConfirmedCompletion(retrievedBackgroundTaskIds: retrievedIds));
+
+        retrievedIds.Add(unretrieved);
+        Assert.False(correlation.HasUnresolvedWake(retrievedIds));
+        Assert.Equal(GrokInternalCompletionTests.PromptId, correlation.TryGetConfirmedCompletion(retrievedBackgroundTaskIds: retrievedIds)?.PromptId);
+    }
+
+    [Fact]
+    public void BlockWaitedConsumesOnlyThatQueuedWake()
+    {
+        const string consumed = "37943b18-5bf8-4cd0-94d2-87352f0d15cf";
+        const string pending = "cb563616-2b24-468d-b0a7-3d3ce45db81c";
+        var lines = new List<string>(Lines(GrokInternalCompletionTests.MeasuredLog(includeDone: false)));
+        lines.AddRange(Lines(GrokInternalCompletionTests.TaskWakeLog(consumed)));
+        lines.AddRange(Lines(GrokInternalCompletionTests.TaskWakeLog(pending)));
+        lines.Add(
+            """{"ts":"2026-10-18T23:00:01.000Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.task_wake.suppressed","ctx":{"task_id":"37943b18-5bf8-4cd0-94d2-87352f0d15cf","block_waited":true,"explicitly_killed":false}}""");
+        lines.Add(DoneLineForCorrelation());
+
+        var correlation = Observe(lines.Where(line => !string.IsNullOrWhiteSpace(line)));
+        Assert.False(correlation.IsAbandoned, correlation.AbandonReason);
+        Assert.True(correlation.HasUnresolvedWake());
+        var description = correlation.DescribeUnresolvedWake();
+        Assert.Contains(pending, description, StringComparison.Ordinal);
+        Assert.DoesNotContain(consumed, description, StringComparison.Ordinal);
+        Assert.Contains(consumed, correlation.ResultConsumedTaskIds);
+    }
+
+    [Fact]
+    public void UnscopedQueuedPromptStaysPendingAfterTheTaskWakeIsRetrieved()
+    {
+        const string taskId = "37943b18-5bf8-4cd0-94d2-87352f0d15cf";
+        var lines = new List<string>(Lines(GrokInternalCompletionTests.MeasuredLog(includeDone: false)));
+        lines.AddRange(Lines(GrokInternalCompletionTests.TaskWakeLog(taskId)));
+        lines.Add(
+            """{"ts":"2026-10-18T23:00:00.500Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.prompt.queued","ctx":{"prompt_id":"followup-prompt-1"}}""");
+        lines.Add(DoneLineForCorrelation());
+
+        var correlation = Observe(lines.Where(line => !string.IsNullOrWhiteSpace(line)));
+        var retrieved = new HashSet<string>(StringComparer.Ordinal) { taskId };
+        Assert.True(correlation.HasUnresolvedWake(retrieved));
+        Assert.DoesNotContain(taskId, correlation.DescribeUnresolvedWake(retrieved), StringComparison.Ordinal);
+        Assert.Null(correlation.TryGetConfirmedCompletion(retrievedBackgroundTaskIds: retrieved));
+    }
+
+    [Fact]
     public void DuplicateFailedDoneDoesNotFlipConfirmedCompletion()
     {
         var lines = Lines(GrokInternalCompletionTests.MeasuredLog(ok: true)).ToList();
@@ -1232,6 +1407,11 @@ public class GrokPromptCorrelationTests
         var correlation = Observe(lines);
         Assert.False(correlation.IsAbandoned, correlation.AbandonReason);
         Assert.Equal(GrokInternalCompletionTests.PromptId, correlation.Success?.PromptId);
+    }
+
+    private static string DoneLineForCorrelation()
+    {
+        return """{"ts":"2026-10-19T00:59:04.377Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.handle_prompt.done","ctx":{"prompt_id":"ca33ed71-5085-487c-98d4-360d23921419","ok":true}}""";
     }
 
     private static GrokCompletionEvidence Accept(IEnumerable<string> lines)
