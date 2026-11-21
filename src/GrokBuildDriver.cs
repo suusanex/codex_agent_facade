@@ -508,7 +508,8 @@ internal readonly record struct GrokStreamSnapshot(
     bool HasSeenEndEvent,
     string? EndStopReason,
     string? PendingDescription,
-    IReadOnlySet<string> ResolvedMonitorToolCalls);
+    IReadOnlySet<string> ResolvedMonitorToolCalls,
+    IReadOnlySet<string> RetrievedBackgroundTaskIds);
 
 /// <summary>
 /// streaming-json の NDJSON を 1 パスで蓄積する。終了後に stdout 全体は再 parse しない。
@@ -542,6 +543,7 @@ internal sealed class GrokStreamAccumulator
     private readonly object _gate = new();
     private readonly Dictionary<string, ToolInvocationState> _inFlightToolCalls = new(StringComparer.Ordinal);
     private readonly HashSet<string> _activeBackgroundTasks = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _retrievedBackgroundTaskIds = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _monitorToolCallToTaskId = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _backgroundTaskToMonitorToolCall = new(StringComparer.Ordinal);
     private readonly HashSet<string> _resolvedMonitorToolCalls = new(StringComparer.Ordinal);
@@ -560,17 +562,33 @@ internal sealed class GrokStreamAccumulator
         _runLog = runLog;
     }
 
-    public GrokStreamSnapshot GetWatchSnapshot(IReadOnlySet<string>? externalCompletedTaskIds = null)
+    public GrokStreamSnapshot GetWatchSnapshot(
+        IReadOnlySet<string>? externalCompletedTaskIds = null,
+        IReadOnlySet<string>? pendingCompletionWakeTaskIds = null,
+        IReadOnlySet<string>? resultConsumedTaskIds = null)
     {
         lock (_gate)
         {
-            var remainingActiveTasks = 0;
+            var remainingActiveTasks = new List<string>();
             foreach (var taskId in _activeBackgroundTasks)
             {
-                if (externalCompletedTaskIds is null || !externalCompletedTaskIds.Contains(taskId))
+                if (externalCompletedTaskIds is not null && externalCompletedTaskIds.Contains(taskId))
                 {
-                    remainingActiveTasks++;
+                    continue;
                 }
+
+                if (resultConsumedTaskIds is not null && resultConsumedTaskIds.Contains(taskId))
+                {
+                    continue;
+                }
+
+                // 完了 wake が queue にある task は実行中ではない。未取得なら wake 診断側で task id を返す。
+                if (pendingCompletionWakeTaskIds is not null && pendingCompletionWakeTaskIds.Contains(taskId))
+                {
+                    continue;
+                }
+
+                remainingActiveTasks.Add(taskId);
             }
 
             var hasInFlightBackgroundTool = false;
@@ -587,7 +605,7 @@ internal sealed class GrokStreamAccumulator
                 }
             }
 
-            var hasPendingBackground = remainingActiveTasks > 0
+            var hasPendingBackground = remainingActiveTasks.Count > 0
                 || hasInFlightBackgroundTool
                 || _hasAmbiguousBackgroundWait;
             return new GrokStreamSnapshot(
@@ -598,7 +616,10 @@ internal sealed class GrokStreamAccumulator
                 PendingDescription: BuildPendingDescription(remainingActiveTasks),
                 ResolvedMonitorToolCalls: _resolvedMonitorToolCalls.Count == 0
                     ? new HashSet<string>(StringComparer.Ordinal)
-                    : new HashSet<string>(_resolvedMonitorToolCalls, StringComparer.Ordinal));
+                    : new HashSet<string>(_resolvedMonitorToolCalls, StringComparer.Ordinal),
+                RetrievedBackgroundTaskIds: _retrievedBackgroundTaskIds.Count == 0
+                    ? new HashSet<string>(StringComparer.Ordinal)
+                    : new HashSet<string>(_retrievedBackgroundTaskIds, StringComparer.Ordinal));
         }
     }
 
@@ -761,7 +782,7 @@ internal sealed class GrokStreamAccumulator
                 return;
             }
 
-            _activeBackgroundTasks.Add(taskId);
+            TrackActiveTask(taskId);
             if (!string.IsNullOrWhiteSpace(toolCallId))
             {
                 _monitorToolCallToTaskId[toolCallId] = taskId;
@@ -784,7 +805,7 @@ internal sealed class GrokStreamAccumulator
                 }
                 else
                 {
-                    _activeBackgroundTasks.Add(bgTaskId);
+                    TrackActiveTask(bgTaskId);
                 }
             }
 
@@ -835,7 +856,7 @@ internal sealed class GrokStreamAccumulator
             }
             else
             {
-                _activeBackgroundTasks.Add(subagentId);
+                TrackActiveTask(subagentId);
             }
 
             return;
@@ -885,7 +906,7 @@ internal sealed class GrokStreamAccumulator
             return;
         }
 
-        _activeBackgroundTasks.Add(taskId);
+        TrackActiveTask(taskId);
     }
 
     private void HandleKillTaskUpdate(JsonElement rawOutput)
@@ -947,10 +968,18 @@ internal sealed class GrokStreamAccumulator
     private void ResolveTaskId(string taskId)
     {
         _activeBackgroundTasks.Remove(taskId);
+        _retrievedBackgroundTaskIds.Add(taskId);
         if (_backgroundTaskToMonitorToolCall.TryGetValue(taskId, out var monitorToolCallId))
         {
             _resolvedMonitorToolCalls.Add(monitorToolCallId);
         }
+    }
+
+    private void TrackActiveTask(string taskId)
+    {
+        _activeBackgroundTasks.Add(taskId);
+        // 同じ id が再度実行中になった場合、過去の取得済み証拠では完了させない。
+        _retrievedBackgroundTaskIds.Remove(taskId);
     }
 
     private void RemoveInFlight(string? toolCallId)
@@ -967,12 +996,13 @@ internal sealed class GrokStreamAccumulator
         _ambiguousReason ??= reason;
     }
 
-    private string? BuildPendingDescription(int remainingActiveTasks)
+    private string? BuildPendingDescription(List<string> remainingActiveTasks)
     {
         var parts = new List<string>();
-        if (remainingActiveTasks > 0)
+        if (remainingActiveTasks.Count > 0)
         {
-            parts.Add($"activeTasks={remainingActiveTasks}");
+            remainingActiveTasks.Sort(StringComparer.Ordinal);
+            parts.Add("activeTasks=" + string.Join(",", remainingActiveTasks));
         }
 
         if (_inFlightToolCalls.Count > 0)
@@ -1292,6 +1322,11 @@ internal sealed class GrokCompletionWatch
         {
             var detail = snapshot.PendingDescription
                 ?? "unresolved monitor background wait remained active when Grok exited.";
+            if (HasUnresolvedWake(snapshot))
+            {
+                detail += "; " + _correlation.DescribeUnresolvedWake(snapshot.RetrievedBackgroundTaskIds);
+            }
+
             ThrowMarkedFailure(
                 "grok_incomplete_background_wait",
                 $"Grok exited before background work completed: {detail}",
@@ -1316,7 +1351,7 @@ internal sealed class GrokCompletionWatch
             }
 
             if (_correlation.HasObservedEvents
-                && (_correlation.IsWakePending
+                && (HasUnresolvedWake(snapshot)
                     || (_correlation.SawMonitorOrWakeAdmission
                         && (_correlation.IsPromptInFlight
                             || _correlation.PromptFailed
@@ -1325,8 +1360,8 @@ internal sealed class GrokCompletionWatch
             {
                 var detail = _correlation.IndeterminateReason
                     ?? _correlation.AbandonReason
-                    ?? (_correlation.IsWakePending
-                        ? "queued or background wake prompt remained pending"
+                    ?? (HasUnresolvedWake(snapshot)
+                        ? _correlation.DescribeUnresolvedWake(snapshot.RetrievedBackgroundTaskIds)
                         : _correlation.IsPromptInFlight
                             ? "a prompt turn was still in flight"
                             : "internal prompt failed");
@@ -1346,8 +1381,10 @@ internal sealed class GrokCompletionWatch
             || _correlation.IsAbandoned
             || _correlation.PromptFailed
             || _correlation.IsPromptInFlight
-            || _correlation.IsWakePending
-            || _correlation.TryGetConfirmedCompletion(snapshot.ResolvedMonitorToolCalls) is null)
+            || HasUnresolvedWake(snapshot)
+            || _correlation.TryGetConfirmedCompletion(
+                snapshot.ResolvedMonitorToolCalls,
+                snapshot.RetrievedBackgroundTaskIds) is null)
         {
             var reason = _correlation.IndeterminateReason
                 ?? _correlation.AbandonReason
@@ -1357,8 +1394,8 @@ internal sealed class GrokCompletionWatch
                         ? snapshot.PendingDescription ?? "Grok exited while a tool call was still in flight."
                         : _correlation.PromptFailed
                         ? "Grok internal prompt failed."
-                        : _correlation.IsWakePending
-                            ? "Grok background wake admission remained pending."
+                        : HasUnresolvedWake(snapshot)
+                            ? _correlation.DescribeUnresolvedWake(snapshot.RetrievedBackgroundTaskIds)
                             : _correlation.IsPromptInFlight
                                 ? "Grok internal prompt was still in flight."
                                 : "Grok exited without terminal end event and without confirmed completion.");
@@ -1463,7 +1500,7 @@ internal sealed class GrokCompletionWatch
             return true;
         }
 
-        var snapshot = _accumulator.GetWatchSnapshot(_correlation.WokenTaskIds);
+        var snapshot = CaptureWatchSnapshot();
         if (_correlation.HasIndeterminateState)
         {
             Stop(
@@ -1476,7 +1513,7 @@ internal sealed class GrokCompletionWatch
             || snapshot.HasInFlightForegroundTool
             || _correlation.HasUnresolvedMonitorWait(snapshot.ResolvedMonitorToolCalls)
             || _correlation.IsPromptInFlight
-            || _correlation.IsWakePending)
+            || HasUnresolvedWake(snapshot))
         {
             if (!_loggedBackgroundWaitSuppression)
             {
@@ -1485,8 +1522,8 @@ internal sealed class GrokCompletionWatch
                     ? snapshot.PendingDescription ?? "active tool or background task"
                     : _correlation.HasUnresolvedMonitorWait(snapshot.ResolvedMonitorToolCalls)
                         ? "unresolved monitor wait"
-                        : _correlation.IsWakePending
-                            ? "pending background wake admission"
+                        : HasUnresolvedWake(snapshot)
+                            ? _correlation.DescribeUnresolvedWake(snapshot.RetrievedBackgroundTaskIds)
                             : "active prompt in flight";
                 FacadeLog.Information(
                     $"Grok internal completion recovery is suppressed while waiting for background work: {waitReason}.");
@@ -1496,7 +1533,9 @@ internal sealed class GrokCompletionWatch
         }
 
         _loggedBackgroundWaitSuppression = false;
-        var success = _correlation.TryGetConfirmedCompletion(snapshot.ResolvedMonitorToolCalls);
+        var success = _correlation.TryGetConfirmedCompletion(
+            snapshot.ResolvedMonitorToolCalls,
+            snapshot.RetrievedBackgroundTaskIds);
         if (success is null || cancellationToken.IsCancellationRequested)
         {
             return success is not null;
@@ -1590,7 +1629,20 @@ internal sealed class GrokCompletionWatch
             }
         }
 
-        return _accumulator.GetWatchSnapshot(_correlation.WokenTaskIds);
+        return CaptureWatchSnapshot();
+    }
+
+    private GrokStreamSnapshot CaptureWatchSnapshot()
+    {
+        return _accumulator.GetWatchSnapshot(
+            _correlation.WokenTaskIds,
+            _correlation.PendingWakeTaskIds,
+            _correlation.ResultConsumedTaskIds);
+    }
+
+    private bool HasUnresolvedWake(GrokStreamSnapshot snapshot)
+    {
+        return _correlation.HasUnresolvedWake(snapshot.RetrievedBackgroundTaskIds);
     }
 
     private static void ThrowMarkedFailure(string kind, string message, int? exitCode)
