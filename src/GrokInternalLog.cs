@@ -240,7 +240,8 @@ internal sealed class FileGrokUnifiedLogReader : IGrokUnifiedLogReader
 /// 作業ディレクトリはジャンクションで表記が分かれるため照合しない。
 /// <c>task-completed-&lt;task_id&gt;</c> の wake が queue に残っても、同じ task の結果を
 /// stdout の terminal 結果、または <c>block_waited</c> / explicit kill で取得済みなら未処理にしない。
-/// 結果未取得の wake は task id を診断へ残す。この対応を返す BCL・公開 API は無いため、観測済みの2系統をここで照合する。
+/// 結果未取得の wake は task id を診断へ残す。prompt 開始は、その prompt が表す wake だけを外し、
+/// 未開始の task wake や別 prompt の queue は残す。この対応を返す BCL・公開 API は無いため、観測済みの2系統をここで照合する。
 /// </summary>
 internal sealed class GrokPromptCorrelation
 {
@@ -250,6 +251,7 @@ internal sealed class GrokPromptCorrelation
     private readonly Queue<string> _pendingMonitorCallOrder = new();
     private readonly HashSet<string> _wokenTaskIds = new(StringComparer.Ordinal);
     private readonly HashSet<string> _pendingWakeTaskIds = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _pendingUnscopedPromptIds = new(StringComparer.Ordinal);
     private readonly HashSet<string> _resultConsumedTaskIds = new(StringComparer.Ordinal);
     private bool _abandoned;
     private string? _abandonReason;
@@ -261,7 +263,7 @@ internal sealed class GrokPromptCorrelation
     private string? _lastFinishedPromptId;
     private DateTimeOffset _activePromptStartedAt;
     private bool _promptFailed;
-    private bool _hasUnscopedWake;
+    private bool _hasAnonymousWake;
     private bool _sawMonitorOrWakeAdmission;
     private int _observedEventCount;
     private int _anonymousPendingMonitorCount;
@@ -281,10 +283,10 @@ internal sealed class GrokPromptCorrelation
     public bool IsPromptInFlight => _activePromptId is not null;
 
     /// <summary>
-    /// まだ開始されていない wake、または task に結び付かない queue が残っている。
+    /// まだ開始されていない wake、task に結び付かない queue、または task id の無い admission が残っている。
     /// 結果取得済みかは含まない。完了判定は <see cref="HasUnresolvedWake"/> を使う。
     /// </summary>
-    public bool IsWakePending => _pendingWakeTaskIds.Count > 0 || _hasUnscopedWake;
+    public bool IsWakePending => _pendingWakeTaskIds.Count > 0 || HasPendingUnscopedWake();
 
     public IReadOnlySet<string> PendingWakeTaskIds => _pendingWakeTaskIds;
 
@@ -330,7 +332,7 @@ internal sealed class GrokPromptCorrelation
     /// </summary>
     public bool HasUnresolvedWake(IReadOnlySet<string>? retrievedBackgroundTaskIds = null)
     {
-        if (_hasUnscopedWake)
+        if (HasPendingUnscopedWake())
         {
             return true;
         }
@@ -367,7 +369,7 @@ internal sealed class GrokPromptCorrelation
         }
 
         var message = "queued wake prompt remained pending for unretrieved tasks: " + string.Join(", ", unresolved);
-        if (_hasUnscopedWake)
+        if (HasPendingUnscopedWake())
         {
             message += "; an unrelated queued prompt remained pending";
         }
@@ -680,7 +682,9 @@ internal sealed class GrokPromptCorrelation
             return;
         }
 
-        MarkWake(taskId: null, sawAdmission: false);
+        // 利用者 prompt も queue される。task に結び付かない id は、その prompt の開始でだけ外す。
+        _pendingUnscopedPromptIds.Add(queuedPromptId);
+        _success = null;
     }
 
     private void ObserveStart(JsonElement root, DateTimeOffset timestamp)
@@ -721,10 +725,9 @@ internal sealed class GrokPromptCorrelation
         }
 
         // 前ターンが閉じ終わった後の再起床・継続ターン。直前ターンの完了証拠は一旦無効化して最新ターンを追う。
+        // 開始した prompt 自身の wake だけを外す。未開始の task wake、別 prompt の queue、task id の無い admission は残す。
         _success = null;
         _latestDoneEvidence = null;
-        _pendingWakeTaskIds.Clear();
-        _hasUnscopedWake = false;
         _lastFinishedPromptId = null;
         _activePromptId = promptId;
         _activePromptStartedAt = timestamp;
@@ -732,11 +735,16 @@ internal sealed class GrokPromptCorrelation
 
         if (TryReadWakeTaskId(promptId, out var taskId))
         {
+            _pendingWakeTaskIds.Remove(taskId);
             _sawMonitorOrWakeAdmission = true;
             if (TryMarkWokenTask(taskId))
             {
                 ResolveOnePendingMonitor();
             }
+        }
+        else
+        {
+            _pendingUnscopedPromptIds.Remove(promptId);
         }
     }
 
@@ -864,11 +872,17 @@ internal sealed class GrokPromptCorrelation
         }
         else
         {
-            _hasUnscopedWake = true;
+            // prompt id も task id も無い admission は、後続 prompt の開始では消せない。
+            _hasAnonymousWake = true;
         }
 
         // 取得済みかどうかは stdout と合わせて完了判定時に決める。直前ターンの done 証拠は消さない。
         _success = null;
+    }
+
+    private bool HasPendingUnscopedWake()
+    {
+        return _hasAnonymousWake || _pendingUnscopedPromptIds.Count > 0;
     }
 
     private bool IsWakeTaskResolved(string taskId, IReadOnlySet<string>? retrievedBackgroundTaskIds)

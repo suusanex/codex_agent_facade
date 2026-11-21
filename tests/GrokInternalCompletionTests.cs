@@ -953,6 +953,38 @@ public class GrokInternalCompletionTests
     }
 
     [Fact]
+    public async Task StartingOneQueuedTaskWakeLeavesTheOtherUnretrievedOnNaturalEndTurn()
+    {
+        using var harness = new GrokRescueHarness();
+        var run = harness.Start(Request());
+        await harness.StartedAsync();
+        const string started = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        const string pending = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        harness.Runner.EmitStdout("""{"type":"text","data":"partial"}""");
+        harness.Append(
+            MeasuredLog()
+            + TaskWakeLog(started)
+            + TaskWakeLog(pending)
+            + Shell("2026-10-19T01:00:00.100Z", "shell.handle_prompt.start", Pid, SessionId, Version, new { prompt_id = "task-completed-" + started, block_count = 1 })
+            + "\n"
+            + DoneLine("2026-10-19T01:00:01.000Z", Pid, SessionId, "task-completed-" + started, Version, ok: true)
+            + "\n");
+
+        await harness.AdvanceUntilReadAsync(run, minimumReads: 1);
+        Assert.False(run.IsCompleted);
+
+        harness.Runner.EmitStdout("""{"type":"end","stopReason":"end_turn","sessionId":"01a15136-771a-7363-924b-9e5bb063b27b"}""");
+        harness.Runner.CompleteNaturally(new ProcessRunResult(0, string.Empty, string.Empty));
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(async () => await harness.AwaitRunAsync(run));
+        Assert.Equal("grok_internal_state_indeterminate", failure.Data[CliJson.FailureKindKey]);
+        Assert.Contains(pending, failure.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(started, failure.Message, StringComparison.Ordinal);
+        var summary = Assert.IsType<string>(failure.Data[CliJson.FailureSummaryKey]);
+        Assert.Contains(pending, summary, StringComparison.Ordinal);
+        Assert.DoesNotContain(started, summary, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RetrievedTaskWakeRescuesCompletedPromptWhenProcessStaysUp()
     {
         using var harness = new GrokRescueHarness();
@@ -1090,7 +1122,7 @@ public class GrokInternalCompletionTests
         string sessionId = SessionId,
         string promptId = PromptId,
         bool ok = true,
-        bool includeQueue = true,
+        bool includeQueue = false,
         bool includeDone = true,
         string sessionMessage = "session created",
         string sessionTs = "2026-10-18T22:51:27.253Z",
@@ -1202,7 +1234,17 @@ public class GrokPromptCorrelationTests
     [Fact]
     public void MeasuredFixtureBindsTheFirstPromptAndIgnoresQueueIds()
     {
-        var evidence = Accept(Lines(GrokInternalCompletionTests.MeasuredLog()));
+        var correlation = Observe(Lines(GrokInternalCompletionTests.MeasuredLog(includeQueue: true)));
+        Assert.False(correlation.IsAbandoned, correlation.AbandonReason);
+        Assert.Null(correlation.Success);
+        Assert.True(correlation.HasUnresolvedWake());
+        var pending = correlation.DescribeUnresolvedWake();
+        Assert.Contains("sample-a", pending, StringComparison.Ordinal);
+        Assert.Contains("sample-b", pending, StringComparison.Ordinal);
+
+        var retrieved = new HashSet<string>(StringComparer.Ordinal) { "sample-a", "sample-b" };
+        var evidence = correlation.TryGetConfirmedCompletion(retrievedBackgroundTaskIds: retrieved);
+        Assert.NotNull(evidence);
         Assert.Equal(GrokInternalCompletionTests.PromptId, evidence.PromptId);
         Assert.Equal(GrokInternalCompletionTests.SessionId, evidence.SessionId);
         Assert.Equal(GrokInternalCompletionTests.Pid, evidence.Pid);
@@ -1380,6 +1422,75 @@ public class GrokPromptCorrelationTests
         Assert.Contains(pending, description, StringComparison.Ordinal);
         Assert.DoesNotContain(consumed, description, StringComparison.Ordinal);
         Assert.Contains(consumed, correlation.ResultConsumedTaskIds);
+    }
+
+    [Fact]
+    public void StartingOneTaskWakeLeavesTheOtherUnretrievedWake()
+    {
+        const string started = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        const string pending = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        var lines = Lines(GrokInternalCompletionTests.MeasuredLog()).ToList();
+        lines.AddRange(Lines(GrokInternalCompletionTests.TaskWakeLog(started)));
+        lines.AddRange(Lines(GrokInternalCompletionTests.TaskWakeLog(pending)));
+        lines.Add("""{"ts":"2026-10-19T01:00:00.100Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.handle_prompt.start","ctx":{"prompt_id":"task-completed-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","block_count":1}}""");
+        lines.Add("""{"ts":"2026-10-19T01:00:01.000Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.handle_prompt.done","ctx":{"prompt_id":"task-completed-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","ok":true}}""");
+
+        var correlation = Observe(lines.Where(line => !string.IsNullOrWhiteSpace(line)));
+        Assert.False(correlation.IsAbandoned, correlation.AbandonReason);
+        Assert.True(correlation.HasUnresolvedWake());
+        var description = correlation.DescribeUnresolvedWake();
+        Assert.Contains(pending, description, StringComparison.Ordinal);
+        Assert.DoesNotContain(started, description, StringComparison.Ordinal);
+        Assert.Null(correlation.TryGetConfirmedCompletion());
+    }
+
+    [Fact]
+    public void QueuedUserPromptIsConsumedWhenThatPromptStarts()
+    {
+        var lines = new List<string>
+        {
+            """{"ts":"2026-10-18T22:51:27.253Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"session created","ctx":{"cwd":"D:\\work\\sample"}}""",
+            """{"ts":"2026-10-18T22:51:27.300Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.prompt.queued","ctx":{"prompt_id":"ca33ed71-5085-487c-98d4-360d23921419","queue_depth":0}}""",
+            """{"ts":"2026-10-18T22:51:27.427Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.handle_prompt.start","ctx":{"prompt_id":"ca33ed71-5085-487c-98d4-360d23921419","block_count":1}}""",
+            """{"ts":"2026-10-19T00:59:04.377Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.handle_prompt.done","ctx":{"prompt_id":"ca33ed71-5085-487c-98d4-360d23921419","ok":true}}""",
+        };
+
+        var correlation = Observe(lines);
+        Assert.False(correlation.IsAbandoned, correlation.AbandonReason);
+        Assert.False(correlation.IsWakePending);
+        Assert.False(correlation.HasUnresolvedWake());
+        Assert.Equal(GrokInternalCompletionTests.PromptId, correlation.Success?.PromptId);
+    }
+
+    [Fact]
+    public void StartingOneUnscopedPromptLeavesTheOtherQueued()
+    {
+        var lines = Lines(GrokInternalCompletionTests.MeasuredLog()).ToList();
+        lines.Add("""{"ts":"2026-10-19T01:00:00.000Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.prompt.queued","ctx":{"prompt_id":"followup-prompt-1"}}""");
+        lines.Add("""{"ts":"2026-10-19T01:00:00.010Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.prompt.queued","ctx":{"prompt_id":"followup-prompt-2"}}""");
+        lines.Add("""{"ts":"2026-10-19T01:00:00.100Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.handle_prompt.start","ctx":{"prompt_id":"followup-prompt-1","block_count":1}}""");
+        lines.Add("""{"ts":"2026-10-19T01:00:01.000Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.handle_prompt.done","ctx":{"prompt_id":"followup-prompt-1","ok":true}}""");
+
+        var correlation = Observe(lines.Where(line => !string.IsNullOrWhiteSpace(line)));
+        Assert.False(correlation.IsAbandoned, correlation.AbandonReason);
+        Assert.True(correlation.HasUnresolvedWake());
+        Assert.Equal("queued or background wake prompt remained pending", correlation.DescribeUnresolvedWake());
+        Assert.Null(correlation.Success);
+    }
+
+    [Fact]
+    public void AnonymousWakeAdmissionSurvivesAnUnrelatedPromptStart()
+    {
+        var lines = Lines(GrokInternalCompletionTests.MeasuredLog()).ToList();
+        lines.Add("""{"ts":"2026-10-19T01:00:00.000Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.task_wake.bridge_admission","ctx":{"admitted":true,"enqueued":true,"monitor":false}}""");
+        lines.Add("""{"ts":"2026-10-19T01:00:00.100Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.handle_prompt.start","ctx":{"prompt_id":"followup-prompt-1","block_count":1}}""");
+        lines.Add("""{"ts":"2026-10-19T01:00:01.000Z","src":"shell","pid":56368,"ver":"1.0.62","lvl":"info","sid":"01a15136-771a-7363-924b-9e5bb063b27b","msg":"shell.handle_prompt.done","ctx":{"prompt_id":"followup-prompt-1","ok":true}}""");
+
+        var correlation = Observe(lines.Where(line => !string.IsNullOrWhiteSpace(line)));
+        Assert.False(correlation.IsAbandoned, correlation.AbandonReason);
+        Assert.True(correlation.HasUnresolvedWake());
+        Assert.Null(correlation.Success);
+        Assert.Equal("queued or background wake prompt remained pending", correlation.DescribeUnresolvedWake());
     }
 
     [Fact]
