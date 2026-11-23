@@ -2,7 +2,7 @@
 
 この一覧は、relay SKILL の `facade-options` ブロック内 `model:` 行、および MCP `start_agent` の `model` 引数へ渡す **CLI 識別子** を記録する。Codex App / Cursor IDE / GitHub Copilot App など UI 上のモデル名とは文字列が一致しない場合がある。Facade は、Cursor で `reasoning_effort` または `fast` を指定したときを除き、識別子を変換せず指定時だけ各 CLI の `--model` へそのまま渡す。Cursor の選択規則は下の effort / fast 表を参照する。
 
-**スナップショット取得日:** Cursor は 2026-10-06。Grok Build は 2026-10-15。GitHub Copilot と Antigravity は 2026-11-14。Jules に model 識別子は無い。
+**スナップショット取得日:** 2026-11-23。各一覧は取得時の認証アカウント、プラン、接続設定に基づく。Jules に model 識別子は無い。
 
 ## 使い方
 
@@ -17,9 +17,9 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 
 ## Cursor CLI
 
-- **CLI バージョン:** `2026.10.01-e373342`
+- **CLI バージョン:** `2026.11.22-e9042b2`
 - **取得コマンド:** `cursor-agent models`
-- **件数:** 246
+- **件数:** 284
 
 `cursor-agent` の stream-json `init` イベントが返す `model` フィールドは UI 表示名である。例: 識別子 `composer-2.5-fast` に対し init では `Composer 2.5 Fast` が返る。
 
@@ -46,7 +46,6 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 | `claude-fable-5-thinking-xhigh` | Claude Fable 5 1M Extra High Thinking (NO ZDR) |
 | `cursor-grok-4.5-high` | Grok 4.5 |
 | `cursor-grok-4.5-high-fast` | Grok 4.5 Fast |
-| `gemini-3.7-flash-high` | Gemini 3.7 Flash |
 | `claude-sonnet-5-thinking-high` | Claude Sonnet 5 1M Thinking |
 | `claude-sonnet-5-thinking-xhigh` | Claude Sonnet 5 1M Extra High Thinking |
 | `gpt-5.6-luna-high` | GPT-5.6 Luna 1M High |
@@ -111,6 +110,26 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 | `claude-opus-4-8-thinking-xhigh-fast` | Claude Opus 4.8 1M Extra High Thinking Fast |
 | `claude-opus-4-8-thinking-max` | Claude Opus 4.8 1M Max Thinking |
 | `claude-opus-4-8-thinking-max-fast` | Claude Opus 4.8 1M Max Thinking Fast |
+| `gemini-4-neon-low` | Gemini 4 Neon  Low |
+| `gemini-4-neon-medium` | Gemini 4 Neon  Medium |
+| `gemini-4-neon-high` | Gemini 4 Neon  High |
+| `gemini-4-neon-xhigh` | Gemini 4 Neon  Extra High |
+| `gemini-4-carbon-low` | Gemini 4 Carbon  Low |
+| `gemini-4-carbon-medium` | Gemini 4 Carbon  Medium |
+| `gemini-4-carbon-high` | Gemini 4 Carbon  High |
+| `gemini-4-hydrogen-low` | Gemini 4 Hydrogen  Low |
+| `gemini-4-hydrogen-medium` | Gemini 4 Hydrogen  Medium |
+| `gemini-4-hydrogen-high` | Gemini 4 Hydrogen  High |
+| `gemini-4-hydrogen-xhigh` | Gemini 4 Hydrogen  Extra High |
+| `gemini-4-argon-low` | Gemini 4 Argon  Low |
+| `gemini-4-argon-medium` | Gemini 4 Argon  Medium |
+| `gemini-4-argon-high` | Gemini 4 Argon  High |
+| `muse-wonder-1.0-minimal` | Muse Wonder  Minimal |
+| `muse-wonder-1.0-low` | Muse Wonder  Low |
+| `muse-wonder-1.0-medium` | Muse Wonder  Medium |
+| `muse-wonder-1.0-high` | Muse Wonder  High |
+| `muse-wonder-1.0-xhigh` | Muse Wonder  Extra High |
+| `muse-wonder-1.0-max` | Muse Wonder  Max |
 | `gpt-5.6-sol-none` | GPT-5.6 Sol 1M None |
 | `gpt-5.6-sol-none-fast` | GPT-5.6 Sol 1M None Fast |
 | `gpt-5.6-sol-low` | GPT-5.6 Sol 1M Low |
@@ -129,6 +148,16 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 | `gpt-5.5-high-fast` | GPT-5.5 High Fast |
 | `gpt-5.5-extra-high` | GPT-5.5 1M Extra High |
 | `gpt-5.5-extra-high-fast` | GPT-5.5 Extra High Fast |
+| `claude-fable-5-2-low` | Claude Fable 5.2 1M Low (NO ZDR) |
+| `claude-fable-5-2-low-fast` | Claude Fable 5.2 1M Low Fast (NO ZDR) |
+| `claude-fable-5-2-medium` | Claude Fable 5.2 1M Medium (NO ZDR) |
+| `claude-fable-5-2-medium-fast` | Claude Fable 5.2 1M Medium Fast (NO ZDR) |
+| `claude-fable-5-2-high` | Claude Fable 5.2 1M (NO ZDR) |
+| `claude-fable-5-2-high-fast` | Claude Fable 5.2 1M Fast (NO ZDR) |
+| `claude-fable-5-2-xhigh` | Claude Fable 5.2 1M Extra High (NO ZDR) |
+| `claude-fable-5-2-xhigh-fast` | Claude Fable 5.2 1M Extra High Fast (NO ZDR) |
+| `claude-fable-5-2-max` | Claude Fable 5.2 1M Max (NO ZDR) |
+| `claude-fable-5-2-max-fast` | Claude Fable 5.2 1M Max Fast (NO ZDR) |
 | `claude-fable-5-1-low` | Claude Fable 5.1 1M Low (NO ZDR) |
 | `claude-fable-5-1-medium` | Claude Fable 5.1 1M Medium (NO ZDR) |
 | `claude-fable-5-1-high` | Claude Fable 5.1 1M (NO ZDR) |
@@ -154,8 +183,6 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 | `gemini-3.8-flash-low` | Gemini 3.8 Flash Low |
 | `gemini-3.8-flash-medium` | Gemini 3.8 Flash Medium |
 | `gemini-3.8-flash-high` | Gemini 3.8 Flash High |
-| `gemini-3.7-flash-low` | Gemini 3.7 Flash Low |
-| `gemini-3.7-flash-medium` | Gemini 3.7 Flash Medium |
 | `muse-spark-1.3-minimal` | Muse Spark 1.3 1M Minimal |
 | `muse-spark-1.3-low` | Muse Spark 1.3 1M Low |
 | `muse-spark-1.3-medium` | Muse Spark 1.3 1M Medium |
@@ -240,10 +267,6 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 | `gpt-5.6-luna-xhigh-fast` | GPT-5.6 Luna 1M Extra High Fast |
 | `gpt-5.6-luna-max` | GPT-5.6 Luna 1M Max |
 | `gpt-5.6-luna-max-fast` | GPT-5.6 Luna 1M Max Fast |
-| `gemini-3.6-flash-minimal` | Gemini 3.6 Flash Minimal |
-| `gemini-3.6-flash-low` | Gemini 3.6 Flash Low |
-| `gemini-3.6-flash-medium` | Gemini 3.6 Flash Medium |
-| `gemini-3.6-flash-high` | Gemini 3.6 Flash |
 | `gemini-3.1-pro` | Gemini 3.1 Pro |
 | `gpt-5.4-mini-none` | GPT-5.4 Mini None |
 | `gpt-5.4-mini-low` | GPT-5.4 Mini Low |
@@ -255,6 +278,16 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 | `gpt-5.4-nano-medium` | GPT-5.4 Nano |
 | `gpt-5.4-nano-high` | GPT-5.4 Nano High |
 | `gpt-5.4-nano-xhigh` | GPT-5.4 Nano Extra High |
+| `claude-haiku-5-5-low` | Claude Haiku 5.5  Low No Thinking |
+| `claude-haiku-5-5-medium` | Claude Haiku 5.5  Medium No Thinking |
+| `claude-haiku-5-5-high` | Claude Haiku 5.5  High No Thinking |
+| `claude-haiku-5-5-xhigh` | Claude Haiku 5.5  Extra High No Thinking |
+| `claude-haiku-5-5-max` | Claude Haiku 5.5  Max No Thinking |
+| `claude-haiku-5-5-thinking-low` | Claude Haiku 5.5  Low |
+| `claude-haiku-5-5-thinking-medium` | Claude Haiku 5.5  Medium |
+| `claude-haiku-5-5-thinking-high` | Claude Haiku 5.5  High |
+| `claude-haiku-5-5-thinking-xhigh` | Claude Haiku 5.5  Extra High |
+| `claude-haiku-5-5-thinking-max` | Claude Haiku 5.5  Max |
 | `claude-4.5-sonnet` | Claude Sonnet 4.5 |
 | `claude-4.5-sonnet-thinking` | Claude Sonnet 4.5 Thinking |
 | `gpt-5.1-low` | GPT-5.1 Low |
@@ -271,16 +304,23 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 | `kimi-k2.7-code` | Kimi K2.7 Code |
 | `glm-5.2-high` | GLM 5.2 |
 | `glm-5.2-max` | GLM 5.2 Max |
+| `deepseek-v41-flash-1017-none` | DeepSeek V4.1 Flash 1017 None |
+| `deepseek-v41-flash-1017-low` | DeepSeek V4.1 Flash 1017 Low |
+| `deepseek-v41-flash-1017-medium` | DeepSeek V4.1 Flash 1017 Medium |
+| `deepseek-v41-flash-1017-high` | DeepSeek V4.1 Flash 1017 High |
+| `deepseek-v41-flash-1017-max` | DeepSeek V4.1 Flash 1017 Max |
+
+- [Cursor CLI パラメーター](https://cursor.com/docs/cli/reference/parameters)
 
 ## GitHub Copilot CLI
 
-- **CLI バージョン:** `1.0.112`
-- **調査日:** 2026-11-14
-- **取得方法:** ログイン済み CLI で `copilot --model` を引数不足として実行し、CLI が出した `[possible values: ...]` を取得した
-- **件数:** 30
+- **CLI バージョン:** `1.0.114`
+- **調査日:** 2026-11-23
+- **取得方法:** ログイン済み CLI で `copilot --no-auto-update --model` を引数不足として実行し、CLI が出した `[possible values: ...]` を取得した
+- **件数:** 32
 - **注意:** 利用可能モデルは Copilot プラン、組織ポリシー、ロールアウト状態、認証アカウントにより変わる。下表は **この CLI とアカウント環境で `--model` の候補として出た一覧** である。
 - **Fusion:** `fusion` は単一の AI model 名ではない。GitHub Copilot Fusion は prompt ごとに model と実行パターン（Single / Cascade / Critique）を選ぶ runtime router / orchestrator である。effort は Facade の `reasoning_effort` に `standard` / `high` / `max` をそのまま書かず、CLI が受理する値と対象 model の組み合わせを確認する。公式情報: [About GitHub Copilot Fusion](https://docs.github.com/en/copilot/concepts/models/copilot-fusion)
-- **公式カタログとの差:** 2026-11-13 に GA となった `Gemini 4 Hydrogen` は公式資料で Copilot CLI 対応とされるが、今回の `copilot 1.0.112` の候補にはまだ現れなかった。`grok-4.5` は公式サポート一覧には残る一方で今回の CLI 候補にはなかったため、旧スナップショットから削除した。候補に現れない名前を推測で `--model` に足さない。
+- **公式カタログとの差:** Gemini 4 Hydrogen、Gemini 4 Neon、MAI Code 2、MAI Code 2 Flash は公式に Copilot CLI 対応と案内されており、この環境の `--model` 候補には表示されなかった。[GitHub Changelog](https://github.blog/changelog/month/11-2026/)
 
 | CLI 識別子 (`model:` / `--model`) | UI 表示名 |
 | --- | --- |
@@ -298,6 +338,8 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 | `claude-sonnet-4.6` | Claude Sonnet 4.6 |
 | `claude-haiku-5.5` | Claude Haiku 5.5 |
 | `claude-haiku-4.5` | Claude Haiku 4.5 |
+| `gpt-6.2-sol` | GPT-6.2 Sol |
+| `gpt-6.2-astra` | GPT-6.2 Astra |
 | `gpt-6.1-sol` | GPT-6.1 Sol |
 | `gpt-6.1-terra` | GPT-6.1 Terra |
 | `gpt-6-sol` | GPT-6 Sol |
@@ -317,49 +359,30 @@ MCP 直接呼び出し時は `start_agent` の `model` 引数へ同じ識別子�
 
 **新規・更新情報:**
 
-- `fusion`、`claude-fable-5.2`、`gemini-4-carbon` は 2026-10-28 から 2026-11-10 の公式リリースで追加された。
-- `gemini-4-hydrogen` は 2026-11-13 の公式リリース後、段階的 rollout 中である。Copilot CLI 対応が公式に案内されているが、今回の候補一覧にはない。
+- `gpt-6.2-sol` と `gpt-6.2-astra` が候補に加わった。[GitHub Changelog](https://github.blog/changelog/2026-11-17-openais-gpt-6-2-astra-and-gpt-6-2-sol-now-available/)
 - Claude Fable 5 / 5.1 / 5.2 は既定で Anthropic による安全性 classifier 用の data retention が必要で、Enterprise の条件と model policy 設定に依存する。
 - 2026-12-14 に `claude-fable-5`、`claude-haiku-4.5`、`gemini-3.8-flash`、`gemini-4-argon`、`grok-4.6`、`kimi-k3` が廃止予定である（Haiku 4.5 は annual plan の個人契約者を除く）。代替と最新状況は [GitHub Changelog](https://github.blog/changelog/2026-11-13-upcoming-deprecation-of-selected-github-copilot-models-in-december/) と [Supported AI models in GitHub Copilot](https://docs.github.com/en/copilot/reference/ai-models/supported-models) を確認する。
 
 ## Grok Build CLI
 
-- **調査日:** 2026-10-15
-- **CLI バージョン:** `grok 1.0.52 (0920c8169e27) [stable]`
-- **更新確認:** `grok update --check --json` は `currentVersion=1.0.52`、`latestVersion=1.0.52`、`updateAvailable=false`、`channel=stable`
-- **取得コマンド:** `grok models`（ログイン済みアカウント向けの選択可能カタログ）
-- **件数（ログイン済み）:** 1
-- **default model（ログイン済みカタログ）:** `grok-4.7`
-
-`grok models` は Cursor の `cursor-agent models` のような「識別子 - 表示名」形式ではなく、モデル ID のみを列挙する。reasoning effort はモデル ID の suffix ではなく `--reasoning-effort`（`--effort`）で指定する（下の reasoning effort 節）。
-
-### ログイン済み（2026-10-15 実機）
-
-`grok models` は `You are logged in with grok.com.` のあとに次を返した。
-
-```text
-Default model: grok-4.7
-
-Available models:
-  * grok-4.7 (default)
-```
+- **調査日:** 2026-11-23
+- **CLI バージョン:** `grok 1.0.92 (b06756fd6256) [stable]`
+- **更新確認:** `grok update --check --json` で stable の最新版 1.0.92 と一致
+- **取得コマンド:** `grok models`（grok.com にログイン済み）
+- **件数:** 4
 
 | CLI 識別子 (`model:` / `--model`) | 備考 |
 | --- | --- |
-| `grok-4.7` | ログイン済みカタログの唯一の ID。`grok models` の default 表示と一致 |
+| `grok-4.7` | CLI カタログの既定値 |
+| `grok-4.7-build-fast` | Grok 4.7 Fast。利用可否はプランに依存する。[Grok 4.7 Developer Guide](https://docs.x.ai/developers/grok-4-7) |
+| `grok-4.6` | ログイン済みカタログの候補 |
+| `grok-4.5` | ログイン済みカタログの候補 |
 
-`~/.grok/config.toml` の `[models].default` が古い値（例: `grok-4.6`）のままでも、ログイン後の `grok models` と headless 実行時の未指定 model はカタログ default（現状 `grok-4.7`）に従う。`[ui].fork_secondary_model` など UI 向け設定は `--model` の CLI カタログとは別である。
+`grok-4.7-build-fast` は `model` に指定する CLI 識別子である。reasoning effort は `--reasoning-effort`（`--effort`）で渡す。
 
-### 未ログイン時の参考（2026-10-06・別スナップショット）
+### reasoning effort
 
-未ログインで `grok models` を実行した当時の環境では、`grok-4.6` と `grok-4.5` が一覧に出ていた。2026-10-15 のログイン済みカタログでは選択できない。headless で `--model` を渡して推論するにはログインが必要であり、未ログイン時は exit 1（`Not signed in`）となる（[poc-observations](poc-observations.md) の 2026-10-06 観測）。
-
-| CLI 識別子（未ログイン一覧・参考） | 備考 |
-| --- | --- |
-| `grok-4.6` | 2026-10-06 未ログイン `grok models` に出ていた。現行ログイン済みカタログには無い |
-| `grok-4.5` | 同上 |
-
-### reasoning effort（2026-10-14 実機、2026-10-15 に invalid token を再確認）
+以下の実推論結果は 2026-10-14 から 10-15 の Grok Build 1.0.52 での観測。2026-11-23 に 1.0.92 で `invalid` を渡した場合も、CLI は `xhigh`、`high`、`medium`、`low` を候補として表示して終了した。
 
 Facade は `reasoning_effort` を `--reasoning-effort` へそのまま渡す。Cursor のようなカタログ合成はしない。
 
@@ -373,19 +396,23 @@ Facade は `reasoning_effort` を `--reasoning-effort` へそのまま渡す。C
 | `none` / `minimal` / `max` / `not-a-level` | exit 1。stderr は `unknown effort level '<値>'; use one of: xhigh, high, medium, low` |
 | `--model grok-4.6 --reasoning-effort low` | `grok-4.6` はカタログに無い。stderr に `warning: grok-4.6 isn't in the model catalog; ignoring --effort/--reasoning-effort low` が出て、続けて model 設定失敗で exit 1 |
 
-`model does not support reasoning effort; ignoring` は 1.0.52 のバイナリにも、上記の実機 stderr にも無かった。カタログ外モデルの無視警告は exit 1 なので、Facade は従来どおり `non_zero_exit` で失敗する。exit 0 で新しい無視警告だけが出た場合は `option_not_applied` にする。`--effort/--reasoning-effort ignored` は同じバイナリの文字列としてあるが、このカタログでは exit 0 の再現は取れていない。
+`model does not support reasoning effort; ignoring` は 1.0.52 のバイナリにも、上記の実機 stderr にも無かった。カタログ外モデルの無視警告は exit 1 なので、Facade は従来どおり `non_zero_exit` で失敗する。exit 0 で新しい無視警告だけが出た場合は `option_not_applied` にする。`--effort/--reasoning-effort ignored` は同じバイナリの文字列としてあるが、当時のカタログでは exit 0 の再現は取れていない。
 
 ## Antigravity CLI
 
-- **CLI バージョン:** `agy` 1.5.8
+- **CLI バージョン:** `agy` 1.5.14
 - **取得コマンド:** `agy models`
-- **件数:** 18
-- **確認日:** 2026-11-14
+- **件数:** 23
+- **確認日:** 2026-11-23
 
 `model:` には、このコマンドが出した slug をそのまま書く。Facade は空白以外を `--model` へ変換せず渡す。省略時は引数を付けない。未知 slug を別モデルへ替えない。slug の末尾にある level 名は model 識別子の一部であり、`reasoning_effort` ではない。
 
 | CLI 識別子 (`model:` / `--model`) | 表示名 |
 | --- | --- |
+| `gemini-4-neon-high` | Gemini 4 Neon (High) |
+| `gemini-4-neon-xhigh` | Gemini 4 Neon (XHigh) |
+| `gemini-4-neon-medium` | Gemini 4 Neon (Medium) |
+| `gemini-4-neon-low` | Gemini 4 Neon (Low) |
 | `gemini-4-argon-medium` | Gemini 4 Argon (Medium) |
 | `gemini-4-argon-high` | Gemini 4 Argon (High) |
 | `gemini-4-argon-low` | Gemini 4 Argon (Low) |
@@ -393,6 +420,7 @@ Facade は `reasoning_effort` を `--reasoning-effort` へそのまま渡す。C
 | `gemini-4-hydrogen-xhigh` | Gemini 4 Hydrogen (XHigh) |
 | `gemini-4-hydrogen-medium` | Gemini 4 Hydrogen (Medium) |
 | `gemini-4-hydrogen-low` | Gemini 4 Hydrogen (Low) |
+| `gemini-pro-orchestrator-neon` | Orchestrator (Neon) |
 | `gemini-pro-orchestrator-g1-pro` | Orchestrator (Argon) |
 | `gemini-3.8-flash-high` | Gemini 3.8 Flash (High) |
 | `gemini-3.8-flash-medium` | Gemini 3.8 Flash (Medium) |
@@ -407,7 +435,9 @@ Facade は `reasoning_effort` を `--reasoning-effort` へそのまま渡す。C
 
 ### 追加モデルと認証方式によるモデル差分
 
-1.5.8 では Gemini 4 Hydrogen 系（High, XHigh, Medium, Low）および Orchestrator (Argon) (`gemini-pro-orchestrator-g1-pro`) がカタログに追加された。また、公式 changelog（1.5.8 / 1.5.5）によると接続環境や認証方法により提供されるモデルが異なる：
+この環境では Gemini 4 Neon の 4 段階と Orchestrator (Neon) が加わった。Google AI Ultra、Google AI Pro、Gemini Enterprise で Gemini 4 Neon が提供され、モデル未選択時の既定値となる。認証方式による追加は `agy changelog` の 1.5.5、1.5.8、1.5.12、1.5.13 を参照。[Google Antigravity Changelog](https://antigravity.google/docs/changelog)
+
+- Gemini 4 Neon の Low、Medium、High、XHigh は、`GEMINI_API_KEY` 接続、`AGY_ADC_AUTH` 接続、Enterprise model gateway でも提供される。
 - `GEMINI_API_KEY` 接続時: Gemini 4 Hydrogen (Low, Medium, High, XHigh) および Gemini 4 Carbon (Low, Medium, High) が `/model` と `--model` に追加される。
 - `AGY_ADC_AUTH`（Google Cloud Application Default Credentials）接続時: Gemini 4 Hydrogen (Low, Medium, High, XHigh) および Gemini 4 Carbon (Low, Medium, High) が追加される。
 - Enterprise model gateway 経由: Gemini 4 Hydrogen がサポートされる。
@@ -427,9 +457,32 @@ Facade は token を絞らず、未指定なら `--effort` を付けない。
 
 - [Headless](https://antigravity.google/docs/cli/headless)
 
+## Codex CLI
+
+- **CLI バージョン:** `codex-cli 0.171.0`
+- **確認日:** 2026-11-23
+- **取得方法:** ChatGPT ログイン済みの `codex app-server --listen stdio://` を初期化し、`model/list` に `includeHidden: false` を渡す。表の識別子は応答の `data[].model`。
+- **件数:** 11
+
+選択候補は接続先やアカウント設定に依存する。表の Fast はカタログに `fast` が表示された項目を示す。利用権限と実行時の提供状況は接続先に依存する。[Codex app-server](https://developers.openai.com/siwc/token-sharing-open-source/codex-app-server)
+
+| CLI 識別子 (`model:` / `--model`) | 表示名 | 既定 effort | 対応 effort | Fast |
+| --- | --- | --- | --- | --- |
+| `gpt-6.2-sol` | GPT-6.2-Sol（カタログ既定） | `low` | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` | あり |
+| `gpt-6.2-astra` | GPT-6.2-Astra | `low` | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` | あり |
+| `gpt-6.1-terra` | GPT-6.1 Terra | `low` | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` | あり |
+| `gpt-6.1-sol` | GPT-6.1-Sol | `low` | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` | あり |
+| `gpt-6-astra` | GPT-6-Astra | `low` | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` | あり |
+| `gpt-6-sol` | GPT-6-Sol | `medium` | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` | あり |
+| `gpt-6-luna` | GPT-6-Luna | `medium` | `low`, `medium`, `high`, `xhigh`, `max` | あり |
+| `gpt-5.6-sol` | GPT-5.6-Sol | `low` | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` | あり |
+| `gpt-5.6-terra` | GPT-5.6-Terra | `medium` | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` | あり |
+| `gpt-5.6-luna` | GPT-5.6-Luna | `medium` | `low`, `medium`, `high`, `xhigh`, `max` | あり |
+| `gpt-daybreak-blue-latest` | Daybreak Blue | `low` | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` | — |
+
 ## Jules
 
-Jules に model 識別子は無い。`model`、`reasoning_effort`、`fast`、`run_mode`、空でない `skills`、`auto_approve=false` は起動前に拒否する。relay はこれらを省略して送ったり、別の値へ替えたりしない。新規 session では `session_id` を渡さない。
+Jules に model 識別子は無い。`model`、`reasoning_effort`、`fast`、`run_mode`、空でない `skills`、`auto_approve=false` は起動前に拒否する。relay はこれらを省略して送ったり、別の値へ替えたりしない。新規 session では `session_id` を渡さない。[Jules REST API](https://jules.google/docs/api/reference/)
 
 ## 更新方法
 
@@ -437,7 +490,8 @@ Jules に model 識別子は無い。`model`、`reasoning_effort`、`fast`、`ru
 2. **GitHub Copilot:** 対話 CLI で `/model` を実行し、script では `copilot --model` の引数不足エラーに出る `possible values` を `copilot --no-auto-update --model` から取得する。候補が実際に指定可能かは model policy と rollout に左右されるため、公式の [Supported AI models](https://docs.github.com/en/copilot/reference/ai-models/supported-models) と [GitHub Copilot CLI programmatic reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference) も確認する。
 3. **Grok Build:** `grok models` を実行し、CLI が出した識別子だけを反映する。未ログイン時のカタログと、ログイン後に実際に選べる集合は分けて記録する。
 4. **Antigravity:** `agy models` を実行し、CLI が出した slug だけを反映する。effort の受理範囲は公開資料と、その model が拒否した実エラーを分けて記録する。推測で token を足さない。
-5. このファイルのスナップショット日、CLI バージョン、表本体を更新する。
+5. **Codex:** `codex app-server` の `model/list` で `includeHidden: false` を指定し、`nextCursor` があれば全ページを取得する。`data[].model` と effort・速度の情報を反映する。
+6. このファイルのスナップショット日、CLI バージョン、表本体を更新する。
 
 ## 関連
 
@@ -471,4 +525,4 @@ Fastの利用条件と費用はproviderとmodelに依存する。OpenAIの現行
 - [GitHub Copilot CLI reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference)
 - [Grok Build CLI option handling](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/src/headless.rs)
 
-コード上の引数生成、MCP schema、mock runnerによるnew/resume/result/failure検証と、実CLIの実推論・backend tier提供確認は別の証拠である。この節の Cursor / Codex / Copilot についての実推論は、明示的な承認後に実施する。Grok Build のモデルカタログは 2026-10-15 に `grok models` で再取得した。reasoning effort の実機表は 2026-10-14、invalid effort の stderr は 2026-10-15 に再確認した。Antigravity のモデルカタログおよび `--effort` / `--model` の invalid 判定エラーは 2026-11-14 に `agy models` および `agy` 1.5.8 実機で再確認した。
+コード上の引数生成、MCP schema、mock runnerによるnew/resume/result/failure検証と、実CLIの実推論・backend tier提供確認は別の証拠である。2026-11-23 の更新ではカタログと CLI の入力検証を確認した。Grok Build の旧版での実推論の結果は各表に記載した。
