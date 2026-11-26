@@ -546,6 +546,8 @@ internal sealed class GrokStreamAccumulator
     private readonly HashSet<string> _retrievedBackgroundTaskIds = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _monitorToolCallToTaskId = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _backgroundTaskToMonitorToolCall = new(StringComparer.Ordinal);
+    // Monitor の待機解消とは別にする。バックグラウンド化したコマンドの tool call と task の対応だけを残す。
+    private readonly Dictionary<string, string> _backgroundCommandToolCallToTaskId = new(StringComparer.Ordinal);
     private readonly HashSet<string> _resolvedMonitorToolCalls = new(StringComparer.Ordinal);
     private string _sessionId = string.Empty;
     private int _jsonEventCount;
@@ -796,9 +798,9 @@ internal sealed class GrokStreamAccumulator
         {
             RemoveInFlight(toolCallId);
             var bgStatus = ReadStringProperty(rawOutput, "status");
+            var bgTaskId = ReadStringProperty(rawOutput, "task_id", "taskId");
             if (!IsTerminalStatus(bgStatus))
             {
-                var bgTaskId = ReadStringProperty(rawOutput, "task_id", "taskId");
                 if (string.IsNullOrWhiteSpace(bgTaskId))
                 {
                     MarkAmbiguous("BackgroundTaskStarted omitted task_id.");
@@ -807,6 +809,12 @@ internal sealed class GrokStreamAccumulator
                 {
                     TrackActiveTask(bgTaskId);
                 }
+            }
+
+            // 終端 status の登録だけでは取得済みにしない。後続の Bash 完了を結び付ける対応だけ残す。
+            if (!string.IsNullOrWhiteSpace(bgTaskId) && !string.IsNullOrWhiteSpace(toolCallId))
+            {
+                _backgroundCommandToolCallToTaskId[toolCallId] = bgTaskId;
             }
 
             return;
@@ -824,6 +832,26 @@ internal sealed class GrokStreamAccumulator
             RemoveInFlight(toolCallId);
             HandleKillTaskUpdate(rawOutput);
             return;
+        }
+
+        // バックグラウンド化したコマンドの完了は、同じ tool call の Bash 更新で戻ることがある。
+        // 起動通知は in_progress かつ数値 exit_code なので、親 status が実行中の間は取得済みにしない。
+        if (string.Equals(rawType, "Bash", StringComparison.OrdinalIgnoreCase)
+            && hasRawOutput
+            && !string.IsNullOrWhiteSpace(toolCallId)
+            && _backgroundCommandToolCallToTaskId.TryGetValue(toolCallId, out var backgroundTaskId))
+        {
+            if (HasNumericExitCode(rawOutput) && !IsActiveStatus(status))
+            {
+                RemoveInFlight(toolCallId);
+                ResolveTaskId(backgroundTaskId);
+                return;
+            }
+
+            if (IsActiveStatus(status))
+            {
+                return;
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(toolCallId)
@@ -919,8 +947,11 @@ internal sealed class GrokStreamAccumulator
         var taskId = ReadStringProperty(result, "task_id", "taskId");
         var outcome = ReadStringProperty(result, "outcome");
         var status = ReadStringProperty(result, "status");
+        // already_exited は、その時点でタスクが終わっていたという結果であり、取得済み証拠にする。
+        // killed と終端 status 以外の outcome は、結果を受け取ったことにしない。
         if (!string.IsNullOrWhiteSpace(taskId)
             && (string.Equals(outcome, "killed", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(outcome, "already_exited", StringComparison.OrdinalIgnoreCase)
                 || IsTerminalStatus(status)))
         {
             ResolveTaskId(taskId);
@@ -947,10 +978,8 @@ internal sealed class GrokStreamAccumulator
         }
 
         // exit_code が数値で返っている場合、または timed_out が true の場合は終了を確定できる。
-        // timed_out: false 単独では終了証明にならない。
-        if ((TryGetPropertyIgnoreCase(rawOutput, "exit_code", out var exitCodeElement)
-                || TryGetPropertyIgnoreCase(rawOutput, "exitCode", out exitCodeElement))
-            && exitCodeElement.ValueKind == JsonValueKind.Number)
+        // timed_out: false 単独では終了証明にならない。文字列の exit_code は数値ではない。
+        if (HasNumericExitCode(rawOutput))
         {
             return true;
         }
@@ -963,6 +992,13 @@ internal sealed class GrokStreamAccumulator
 
         return TryGetObjectProperty(rawOutput, "Result", out var nestedResult)
             && IsTerminalStatus(ReadStringProperty(nestedResult, "status"));
+    }
+
+    private static bool HasNumericExitCode(JsonElement rawOutput)
+    {
+        return (TryGetPropertyIgnoreCase(rawOutput, "exit_code", out var exitCodeElement)
+                || TryGetPropertyIgnoreCase(rawOutput, "exitCode", out exitCodeElement))
+            && exitCodeElement.ValueKind == JsonValueKind.Number;
     }
 
     private void ResolveTaskId(string taskId)

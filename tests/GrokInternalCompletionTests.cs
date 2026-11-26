@@ -953,6 +953,157 @@ public class GrokInternalCompletionTests
     }
 
     [Fact]
+    public async Task BackgroundBashCompletionAndAlreadyExitedAllowNaturalEndTurn()
+    {
+        using var harness = new GrokRescueHarness();
+        var run = harness.Start(Request());
+        await harness.StartedAsync();
+        const string taskId = "call-986e3ffe-13f9-47d2-9a70-65173764107f-49";
+        const string toolCallId = "call_bg";
+        harness.Runner.EmitStdout("""{"type":"text","data":"final answer"}""");
+        EmitBashUpdate(harness.Runner, toolCallId, "in_progress", 0);
+        EmitRunningBackgroundTask(harness.Runner, toolCallId, taskId);
+        harness.Append(MeasuredLog(includeDone: false) + UnstartedTaskWakeLog(taskId));
+        EmitBashUpdate(harness.Runner, toolCallId, null, 0);
+        EmitAlreadyExited(harness.Runner, "call_kill", taskId);
+        harness.Append(DoneLine() + "\n");
+        harness.Runner.EmitStdout("""{"type":"end","stopReason":"end_turn","sessionId":"01a15136-771a-7363-924b-9e5bb063b27b"}""");
+        harness.Runner.CompleteNaturally(new ProcessRunResult(0, string.Empty, string.Empty));
+
+        var result = await harness.AwaitRunAsync(run);
+        Assert.Equal(0, result.ExitCode);
+        Assert.Null(result.CompletionReason);
+        Assert.Equal("final answer", result.OutputText);
+        Assert.Equal(SessionId, result.SessionId);
+    }
+
+    [Fact]
+    public async Task BackgroundBashCompletionAloneAllowsNaturalEndTurn()
+    {
+        using var harness = new GrokRescueHarness();
+        var run = harness.Start(Request());
+        await harness.StartedAsync();
+        const string taskId = "37943b18-5bf8-4cd0-94d2-87352f0d15cf";
+        harness.Runner.EmitStdout("""{"type":"text","data":"final answer"}""");
+        EmitRunningBackgroundTask(harness.Runner, "call_bg", taskId);
+        harness.Append(MeasuredLog(includeDone: false) + TaskWakeLog(taskId));
+        EmitBashUpdate(harness.Runner, "call_bg", null, 1);
+        harness.Append(DoneLine() + "\n");
+        harness.Runner.EmitStdout("""{"type":"end","stopReason":"end_turn","sessionId":"01a15136-771a-7363-924b-9e5bb063b27b"}""");
+        harness.Runner.CompleteNaturally(new ProcessRunResult(0, string.Empty, string.Empty));
+
+        var result = await harness.AwaitRunAsync(run);
+        Assert.Equal(0, result.ExitCode);
+        Assert.Null(result.CompletionReason);
+        Assert.Equal("final answer", result.OutputText);
+        Assert.Equal(SessionId, result.SessionId);
+    }
+
+    [Fact]
+    public async Task AlreadyExitedAloneAllowsNaturalEndTurn()
+    {
+        using var harness = new GrokRescueHarness();
+        var run = harness.Start(Request());
+        await harness.StartedAsync();
+        const string taskId = "37943b18-5bf8-4cd0-94d2-87352f0d15cf";
+        harness.Runner.EmitStdout("""{"type":"text","data":"final answer"}""");
+        EmitRunningBackgroundTask(harness.Runner, "call_bg", taskId);
+        harness.Append(MeasuredLog(includeDone: false) + TaskWakeLog(taskId));
+        EmitAlreadyExited(harness.Runner, "call_kill", taskId);
+        harness.Append(DoneLine() + "\n");
+        harness.Runner.EmitStdout("""{"type":"end","stopReason":"end_turn","sessionId":"01a15136-771a-7363-924b-9e5bb063b27b"}""");
+        harness.Runner.CompleteNaturally(new ProcessRunResult(0, string.Empty, string.Empty));
+
+        var result = await harness.AwaitRunAsync(run);
+        Assert.Equal(0, result.ExitCode);
+        Assert.Null(result.CompletionReason);
+        Assert.Equal("final answer", result.OutputText);
+        Assert.Equal(SessionId, result.SessionId);
+    }
+
+    [Fact]
+    public async Task StartBlockedWithoutBashOrAlreadyExitedFailsNaturalEndTurn()
+    {
+        using var harness = new GrokRescueHarness();
+        var run = harness.Start(Request());
+        await harness.StartedAsync();
+        const string taskId = "37943b18-5bf8-4cd0-94d2-87352f0d15cf";
+        harness.Runner.EmitStdout("""{"type":"text","data":"partial"}""");
+        EmitRunningBackgroundTask(harness.Runner, "call_bg", taskId);
+        harness.Append(MeasuredLog(includeDone: false) + UnstartedTaskWakeLog(taskId) + DoneLine() + "\n");
+
+        await harness.AdvanceUntilReadAsync(run, minimumReads: 1);
+        Assert.False(run.IsCompleted);
+
+        harness.Runner.EmitStdout("""{"type":"end","stopReason":"end_turn","sessionId":"01a15136-771a-7363-924b-9e5bb063b27b"}""");
+        harness.Runner.CompleteNaturally(new ProcessRunResult(0, string.Empty, string.Empty));
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(async () => await harness.AwaitRunAsync(run));
+        Assert.Equal("grok_internal_state_indeterminate", failure.Data[CliJson.FailureKindKey]);
+        Assert.Contains(taskId, failure.Message, StringComparison.Ordinal);
+        var summary = Assert.IsType<string>(failure.Data[CliJson.FailureSummaryKey]);
+        Assert.Contains(taskId, summary, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task BashCompletionOfOneTaskLeavesTheOtherWakeUnretrieved()
+    {
+        using var harness = new GrokRescueHarness();
+        var run = harness.Start(Request());
+        await harness.StartedAsync();
+        const string retrieved = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        const string pending = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        harness.Runner.EmitStdout("""{"type":"text","data":"partial"}""");
+        EmitRunningBackgroundTask(harness.Runner, "call_a", retrieved);
+        EmitRunningBackgroundTask(harness.Runner, "call_b", pending);
+        harness.Append(MeasuredLog(includeDone: false) + TaskWakeLog(retrieved) + TaskWakeLog(pending) + DoneLine() + "\n");
+        EmitBashUpdate(harness.Runner, "call_a", null, 0);
+
+        await harness.AdvanceUntilReadAsync(run, minimumReads: 1);
+        Assert.False(run.IsCompleted);
+
+        harness.Runner.EmitStdout("""{"type":"end","stopReason":"end_turn","sessionId":"01a15136-771a-7363-924b-9e5bb063b27b"}""");
+        harness.Runner.CompleteNaturally(new ProcessRunResult(0, string.Empty, string.Empty));
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(async () => await harness.AwaitRunAsync(run));
+        Assert.Equal("grok_internal_state_indeterminate", failure.Data[CliJson.FailureKindKey]);
+        Assert.Contains(pending, failure.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(retrieved, failure.Message, StringComparison.Ordinal);
+        var summary = Assert.IsType<string>(failure.Data[CliJson.FailureSummaryKey]);
+        Assert.Contains(pending, summary, StringComparison.Ordinal);
+        Assert.DoesNotContain(retrieved, summary, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StartupBashAndStringExitCodeDoNotRetrieveBackgroundCommand()
+    {
+        using var log = TestRunLogs.CreateLog();
+        var accumulator = new GrokStreamAccumulator(log);
+        const string taskId = "bg_bash";
+
+        accumulator.OnStdoutLine("""{"type":"tool_call_update","toolCallId":"call_b1","status":"in_progress","rawOutput":{"type":"Bash","exit_code":0}}""");
+        Assert.DoesNotContain(taskId, accumulator.GetWatchSnapshot().RetrievedBackgroundTaskIds);
+
+        accumulator.OnStdoutLine("""{"type":"tool_call_update","toolCallId":"call_b1","status":"completed","rawOutput":{"type":"BackgroundTaskStarted","task_id":"bg_bash","status":"running"}}""");
+        var started = accumulator.GetWatchSnapshot();
+        Assert.DoesNotContain(taskId, started.RetrievedBackgroundTaskIds);
+        Assert.True(started.HasPendingBackgroundWork);
+
+        accumulator.OnStdoutLine("""{"type":"tool_call_update","toolCallId":"call_b1","status":"in_progress","rawOutput":{"type":"Bash","exit_code":0}}""");
+        var startup = accumulator.GetWatchSnapshot();
+        Assert.DoesNotContain(taskId, startup.RetrievedBackgroundTaskIds);
+        Assert.False(startup.HasInFlightForegroundTool);
+        Assert.True(startup.HasPendingBackgroundWork);
+
+        accumulator.OnStdoutLine("""{"type":"tool_call_update","toolCallId":"call_b1","status":null,"rawOutput":{"type":"Bash","exit_code":"0"}}""");
+        Assert.DoesNotContain(taskId, accumulator.GetWatchSnapshot().RetrievedBackgroundTaskIds);
+
+        accumulator.OnStdoutLine("""{"type":"tool_call_update","toolCallId":"call_b1","status":null,"rawOutput":{"type":"Bash","exit_code":0,"output_for_prompt":"hits=1"}}""");
+        var retrieved = accumulator.GetWatchSnapshot();
+        Assert.Contains(taskId, retrieved.RetrievedBackgroundTaskIds);
+        Assert.False(retrieved.HasPendingBackgroundWork);
+        Assert.False(retrieved.HasInFlightForegroundTool);
+    }
+
+    [Fact]
     public async Task StartingOneQueuedTaskWakeLeavesTheOtherUnretrievedOnNaturalEndTurn()
     {
         using var harness = new GrokRescueHarness();
@@ -1154,6 +1305,70 @@ public class GrokInternalCompletionTests
             + "\n"
             + Shell("2026-10-18T23:00:00.002Z", "shell.task_wake.bridge_admission", Pid, SessionId, Version, new { task_id = taskId, monitor = false, enqueued = true, admitted = true })
             + "\n";
+    }
+
+    private static string UnstartedTaskWakeLog(string taskId)
+    {
+        return TaskWakeLog(taskId)
+            + Shell(
+                "2026-10-18T23:00:00.003Z",
+                "shell.prompt.start_blocked",
+                Pid,
+                SessionId,
+                Version,
+                new { prompt_id = "task-completed-" + taskId, reason = "task_already_running", queue_depth = 2 })
+            + "\n";
+    }
+
+    private static void EmitRunningBackgroundTask(RecordingProcessRunner runner, string toolCallId, string taskId)
+    {
+        runner.EmitStdout(JsonSerializer.Serialize(new
+        {
+            type = "tool_call_update",
+            toolCallId,
+            status = "completed",
+            rawOutput = new
+            {
+                type = "BackgroundTaskStarted",
+                task_id = taskId,
+                status = "running",
+            },
+        }));
+    }
+
+    private static void EmitBashUpdate(RecordingProcessRunner runner, string toolCallId, string? status, object exitCode)
+    {
+        runner.EmitStdout(JsonSerializer.Serialize(new
+        {
+            type = "tool_call_update",
+            toolCallId,
+            status,
+            rawOutput = new
+            {
+                type = "Bash",
+                exit_code = exitCode,
+            },
+        }));
+    }
+
+    private static void EmitAlreadyExited(RecordingProcessRunner runner, string toolCallId, string taskId)
+    {
+        runner.EmitStdout(JsonSerializer.Serialize(new
+        {
+            type = "tool_call_update",
+            toolCallId,
+            status = "completed",
+            rawOutput = new
+            {
+                type = "KillTask",
+                Result = new
+                {
+                    task_id = taskId,
+                    outcome = "already_exited",
+                    message = "Task had already completed",
+                },
+            },
+        }));
     }
 
     private static void EmitBackgroundTask(RecordingProcessRunner runner, string toolCallId, string taskId)
